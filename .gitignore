@@ -1,0 +1,8 @@
+node_modules/
+**/dist/
+*.tmp
+*.lock
+*.log
+.DS_Store
+.turbo/
+.npmrc
