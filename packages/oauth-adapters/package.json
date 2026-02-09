@@ -1,0 +1,46 @@
+{
+  "name": "@other-yuka/oauth-adapters",
+  "version": "0.1.0",
+  "description": "Shared OAuth adapter interface and provider definitions for multi-account OpenCode plugins",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --outdir=dist --platform=node --format=esm --packages=external",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "prepack": "bun run build"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "sideEffects": false,
+  "author": "yuka",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/other-yuka/kyoli-gam.git",
+    "directory": "packages/oauth-adapters"
+  },
+  "devDependencies": {
+    "@types/node": "^25.2.2",
+    "typescript": "^5.8.0"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org",
+    "access": "public",
+    "main": "./dist/index.js",
+    "exports": {
+      ".": {
+        "import": "./dist/index.js",
+        "default": "./dist/index.js"
+      }
+    }
+  },
+  "files": [
+    "dist",
+    "package.json"
+  ]
+}
