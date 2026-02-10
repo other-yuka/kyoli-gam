@@ -1,0 +1,66 @@
+{
+  "name": "anthropic-multi-account",
+  "version": "0.1.0",
+  "description": "OpenCode plugin for Anthropic multi-account management with automatic rate limit switching",
+  "main": "./src/index.ts",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --outdir=dist --platform=node --format=esm --packages=external",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "prepack": "bun run build",
+    "dev": "bun run build --watch"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "sideEffects": false,
+  "keywords": [
+    "opencode",
+    "plugin",
+    "anthropic",
+    "claude",
+    "multi-account",
+    "rate-limit"
+  ],
+  "author": "yuka",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/other-yuka/kyoli-gam.git",
+    "directory": "packages/anthropic-multi-account"
+  },
+  "dependencies": {
+    "@other-yuka/multi-account-core": "workspace:^",
+    "@other-yuka/oauth-adapters": "workspace:^",
+    "opencode-anthropic-auth": "^0.0.13",
+    "proper-lockfile": "^4.1.2",
+    "valibot": "^1.2.0"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "^0.15.30",
+    "@types/node": "^25.2.2",
+    "@types/proper-lockfile": "^4.1.4",
+    "typescript": "^5.8.0"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org",
+    "access": "public",
+    "main": "./dist/index.js",
+    "exports": {
+      ".": {
+        "import": "./dist/index.js",
+        "default": "./dist/index.js"
+      }
+    }
+  },
+  "files": [
+    "dist",
+    "package.json",
+    "README.md",
+    "LICENSE"
+  ]
+}
