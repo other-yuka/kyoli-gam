@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: bun install
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Test
+        run: bun run test
+
+      - name: Build
+        run: bun run build
+
+      - name: Verify dist output
+        run: |
+          test -f packages/oauth-adapters/dist/index.js
+          test -f packages/multi-account-core/dist/index.js
+          test -f packages/anthropic-multi-account/dist/index.js
+          test -f packages/codex-multi-account/dist/index.js
+
+      - name: Publish packages (dependency order)
+        run: |
+          npm publish --workspace @other-yuka/oauth-adapters --access public
+          npm publish --workspace @other-yuka/multi-account-core --access public
+          npm publish --workspace anthropic-multi-account --access public
+          npm publish --workspace codex-multi-account --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          token: ${{ secrets.GITHUB_TOKEN }}
