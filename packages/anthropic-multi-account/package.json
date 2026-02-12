@@ -1,5 +1,5 @@
 {
-  "name": "anthropic-multi-account",
+  "name": "opencode-anthropic-multi-account",
   "version": "0.1.0",
   "description": "OpenCode plugin for Anthropic multi-account management with automatic rate limit switching",
   "main": "./src/index.ts",
@@ -34,8 +34,8 @@
     "directory": "packages/anthropic-multi-account"
   },
   "dependencies": {
-    "@other-yuka/multi-account-core": "workspace:^",
-    "@other-yuka/oauth-adapters": "workspace:^",
+    "opencode-multi-account-core": "workspace:^",
+    "opencode-oauth-adapters": "workspace:^",
     "opencode-anthropic-auth": "^0.0.13",
     "proper-lockfile": "^4.1.2",
     "valibot": "^1.2.0"

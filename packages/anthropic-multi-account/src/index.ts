@@ -1,7 +1,7 @@
 import { AnthropicAuthPlugin } from "opencode-anthropic-auth";
 import { tool } from "@opencode-ai/plugin";
 import type { Plugin } from "@opencode-ai/plugin";
-import { migrateFromAuthJson } from "@other-yuka/multi-account-core";
+import { migrateFromAuthJson } from "opencode-multi-account-core";
 import { AccountManager } from "./account-manager";
 import { executeWithAccountRotation } from "./executor";
 import { getPlanLabel, getUsageSummary } from "./usage";

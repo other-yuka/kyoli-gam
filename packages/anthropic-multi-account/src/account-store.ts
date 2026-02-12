@@ -2,7 +2,7 @@ import {
   AccountStore,
   setAccountsFilename,
   type DiskCredentials,
-} from "@other-yuka/multi-account-core";
+} from "opencode-multi-account-core";
 import { ACCOUNTS_FILENAME } from "./constants";
 
 setAccountsFilename(ACCOUNTS_FILENAME);

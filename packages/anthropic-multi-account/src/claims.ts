@@ -4,4 +4,4 @@ export {
   releaseClaim,
   writeClaim,
   type ClaimsMap,
-} from "@other-yuka/multi-account-core";
+} from "opencode-multi-account-core";

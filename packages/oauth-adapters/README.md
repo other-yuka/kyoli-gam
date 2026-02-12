@@ -28,7 +28,7 @@ Each adapter defines the full set of provider-specific values needed by the core
 ## Usage
 
 ```ts
-import { anthropicOAuthAdapter } from "@other-yuka/oauth-adapters";
+import { anthropicOAuthAdapter } from "opencode-oauth-adapters";
 
 const clientId = anthropicOAuthAdapter.oauthClientId;
 const tokenUrl = anthropicOAuthAdapter.tokenEndpoint;

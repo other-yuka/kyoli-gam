@@ -1,5 +1,5 @@
 {
-  "name": "@other-yuka/oauth-adapters",
+  "name": "opencode-oauth-adapters",
   "version": "0.1.0",
   "description": "Shared OAuth adapter interface and provider definitions for multi-account OpenCode plugins",
   "type": "module",

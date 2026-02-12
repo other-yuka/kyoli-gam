@@ -1,4 +1,4 @@
-import { createExecutorForProvider } from "@other-yuka/multi-account-core";
+import { createExecutorForProvider } from "opencode-multi-account-core";
 import { handleRateLimitResponse as handleRateLimitResponseForProvider } from "./rate-limit";
 import { formatWaitTime, getAccountLabel, showToast, sleep } from "./utils";
 

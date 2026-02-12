@@ -1,4 +1,4 @@
-import { createProactiveRefreshQueueForProvider } from "@other-yuka/multi-account-core";
+import { createProactiveRefreshQueueForProvider } from "opencode-multi-account-core";
 import { getConfig } from "./config";
 import { isTokenExpired, refreshToken } from "./token";
 import { debugLog } from "./utils";

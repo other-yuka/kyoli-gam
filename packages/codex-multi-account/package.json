@@ -1,5 +1,5 @@
 {
-  "name": "codex-multi-account",
+  "name": "opencode-codex-multi-account",
   "version": "0.1.0",
   "description": "OpenCode plugin for Codex (OpenAI) multi-account management with automatic rate limit switching",
   "main": "./src/index.ts",
@@ -35,8 +35,8 @@
     "directory": "packages/codex-multi-account"
   },
   "dependencies": {
-    "@other-yuka/multi-account-core": "workspace:^",
-    "@other-yuka/oauth-adapters": "workspace:^",
+    "opencode-multi-account-core": "workspace:^",
+    "opencode-oauth-adapters": "workspace:^",
     "proper-lockfile": "^4.1.2",
     "valibot": "^1.2.0"
   },
