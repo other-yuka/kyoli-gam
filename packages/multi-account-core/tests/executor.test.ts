@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import { beforeEach, describe, expect, test, vi } from "bun:test";
 import { createExecutorForProvider } from "../src/executor";
 import type { ManagedAccount, PluginClient } from "../src/types";
 

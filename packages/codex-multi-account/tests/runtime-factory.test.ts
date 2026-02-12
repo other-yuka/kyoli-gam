@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, vi } from "bun:test";
 import { AccountRuntimeFactory } from "../src/runtime-factory";
 import { AccountStore } from "../src/account-store";
 import { CODEX_API_ENDPOINT, TOKEN_EXPIRY_BUFFER_MS } from "../src/constants";

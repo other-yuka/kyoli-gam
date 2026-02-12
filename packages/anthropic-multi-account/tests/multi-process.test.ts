@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
-import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import * as v from "valibot";
 import { ACCOUNTS_FILENAME } from "../src/constants";
 import { AccountStore } from "../src/account-store";

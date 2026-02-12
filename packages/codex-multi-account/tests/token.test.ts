@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, vi } from "bun:test";
 import {
   OPENAI_OAUTH_ADAPTER,
   OPENAI_CLIENT_ID,

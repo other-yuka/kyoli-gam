@@ -1,7 +1,6 @@
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { AccountStore } from "../src/account-store";
+import { afterAll, afterEach, beforeEach, describe, expect, mock, test, vi } from "bun:test";
 import { ACCOUNTS_FILENAME } from "../src/constants";
 import type {
   AccountStorage,
@@ -12,20 +11,28 @@ import type {
 } from "../src/types";
 import { createMockClient, setupTestEnv } from "../tests/helpers";
 
-const { refreshTokenMock, isTokenExpiredMock, getConfigMock } = vi.hoisted(() => ({
-  refreshTokenMock: vi.fn(),
-  isTokenExpiredMock: vi.fn(),
-  getConfigMock: vi.fn(),
-}));
+const originalTokenModule = await import("../src/token");
+const originalConfigModule = await import("../src/config");
 
-vi.mock("../src/token", () => ({
+const refreshTokenMock = vi.fn();
+const isTokenExpiredMock = vi.fn();
+const getConfigMock = vi.fn();
+
+mock.module("../src/token", () => ({
   refreshToken: refreshTokenMock,
   isTokenExpired: isTokenExpiredMock,
 }));
 
-vi.mock("../src/config", () => ({
+mock.module("../src/config", () => ({
   getConfig: getConfigMock,
 }));
+
+afterAll(() => {
+  mock.module("../src/token", () => originalTokenModule);
+  mock.module("../src/config", () => originalConfigModule);
+});
+
+const { AccountStore } = await import("../src/account-store");
 
 type TestEnv = Awaited<ReturnType<typeof setupTestEnv>>;
 type QueueType = import("../src/proactive-refresh").ProactiveRefreshQueue;
@@ -273,8 +280,6 @@ async function createQueue(): Promise<QueueType> {
 
 describe("proactive-refresh", () => {
   beforeEach(async () => {
-    vi.useRealTimers();
-    vi.resetModules();
     installTimerSpies();
 
     testEnv = await setupTestEnv();
@@ -328,7 +333,6 @@ describe("proactive-refresh", () => {
 
     storagePath = "";
     restoreTimerSpies();
-    vi.useRealTimers();
   });
 
   test("start() does nothing when config.proactive_refresh is false", async () => {

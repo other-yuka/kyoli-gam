@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
-import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, vi } from "bun:test";
 import { AccountManager } from "../src/account-manager";
 import { AccountStore } from "../src/account-store";
 import { ACCOUNTS_FILENAME } from "../src/constants";

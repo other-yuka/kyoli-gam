@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, vi } from "bun:test";
 import {
   ANTHROPIC_OAUTH_ADAPTER,
   ANTHROPIC_CLIENT_ID,
