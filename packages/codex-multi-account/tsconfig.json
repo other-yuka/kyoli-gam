@@ -5,8 +5,7 @@
     "moduleResolution": "bundler",
     "baseUrl": ".",
     "paths": {
-      "opencode-multi-account-core": ["../multi-account-core/src/index.ts"],
-      "opencode-oauth-adapters": ["../oauth-adapters/src/index.ts"]
+      "opencode-multi-account-core": ["../multi-account-core/src/index.ts"]
     },
     "esModuleInterop": true,
     "strict": true,

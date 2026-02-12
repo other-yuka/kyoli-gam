@@ -1,18 +1,19 @@
 {
   "name": "opencode-codex-multi-account",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "OpenCode plugin for Codex (OpenAI) multi-account management with automatic rate limit switching",
-  "main": "./src/index.ts",
+  "main": "./dist/index.js",
   "type": "module",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     }
   },
   "scripts": {
-    "build": "esbuild src/index.ts --bundle --outdir=dist --platform=node --format=esm --packages=external",
+    "build": "esbuild src/index.ts --bundle --outdir=dist --platform=node --format=esm --packages=external && tsc -p tsconfig.build.json --emitDeclarationOnly",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "prepack": "bun run build",
@@ -39,15 +40,12 @@
     "directory": "packages/codex-multi-account"
   },
   "dependencies": {
-    "opencode-multi-account-core": "^0.1.2",
-    "opencode-oauth-adapters": "^0.1.2",
-    "proper-lockfile": "^4.1.2",
+    "opencode-multi-account-core": "^0.2.0",
     "valibot": "^1.2.0"
   },
   "devDependencies": {
     "@opencode-ai/plugin": "^0.15.30",
     "@types/node": "^25.2.2",
-    "@types/proper-lockfile": "^4.1.4",
     "typescript": "^5.8.0"
   },
   "publishConfig": {

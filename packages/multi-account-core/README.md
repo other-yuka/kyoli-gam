@@ -15,6 +15,7 @@ Shared core logic for multi-account OpenCode plugins. This package contains ~70%
 | ProactiveRefreshQueue | Background token refresh before expiry. Created via `createProactiveRefreshForProvider`. |
 | Config | Plugin configuration loading and validation with valibot. Created via `createConfigLoaderForProvider`. |
 | AuthMigration | One-time import of existing single-account OAuth creds from OpenCode's `auth.json`. |
+| Adapters | Provider-specific OAuth adapter definitions (endpoints, client IDs, plan labels). |
 | UI | Terminal UI primitives (ANSI formatting, confirm dialogs, select menus). |
 | Utils | Config directory resolution, formatting helpers. |
 
@@ -41,10 +42,8 @@ export const AccountManager = createAccountManagerForProvider({
 │          multi-account-core  ← you are here     │
 │  AccountStore . AccountManager . Executor        │
 │  Claims . Storage . RateLimit . ProactiveRefresh │
-│  AuthMigration . Config . Utils . UI             │
-├─────────────────────────────────────────────────┤
-│              oauth-adapters                     │
-│  (endpoints, client IDs, plan labels)           │
+│  AuthMigration . Config . Utils . UI . Adapters  │
+│  (endpoints, client IDs, plan labels)            │
 └─────────────────────────────────────────────────┘
 ```
 

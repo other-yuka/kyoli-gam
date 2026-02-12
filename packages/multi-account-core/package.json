@@ -1,17 +1,19 @@
 {
   "name": "opencode-multi-account-core",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Shared core for multi-account OpenCode plugins",
-  "main": "./src/index.ts",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     }
   },
   "scripts": {
-    "build": "esbuild src/index.ts --bundle --outdir=dist --platform=node --format=esm --packages=external",
+    "build": "esbuild src/index.ts --bundle --outdir=dist --platform=node --format=esm --packages=external && tsc -p tsconfig.build.json --emitDeclarationOnly",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "prepack": "bun run build",
@@ -30,7 +32,6 @@
     "directory": "packages/multi-account-core"
   },
   "dependencies": {
-    "opencode-oauth-adapters": "^0.1.2",
     "proper-lockfile": "^4.1.2",
     "valibot": "^1.2.0"
   },

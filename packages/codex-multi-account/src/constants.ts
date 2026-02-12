@@ -1,4 +1,4 @@
-import { openAIOAuthAdapter } from "opencode-oauth-adapters";
+import { openAIOAuthAdapter } from "opencode-multi-account-core";
 
 /** OpenAI OAuth adapter config */
 export const OPENAI_OAUTH_ADAPTER = openAIOAuthAdapter;

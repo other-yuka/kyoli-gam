@@ -1,4 +1,4 @@
-import { anthropicOAuthAdapter } from "opencode-oauth-adapters";
+import { anthropicOAuthAdapter } from "opencode-multi-account-core";
 
 /** Anthropic OAuth adapter config */
 export const ANTHROPIC_OAUTH_ADAPTER = anthropicOAuthAdapter;

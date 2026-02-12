@@ -5,7 +5,8 @@
     "outDir": "./dist",
     "rootDir": "./src",
     "declaration": true,
-    "sourceMap": true
+    "sourceMap": true,
+    "paths": {}
   },
   "exclude": ["node_modules", "dist", "**/*.test.ts"]
 }
