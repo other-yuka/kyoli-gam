@@ -3,10 +3,6 @@
     "target": "ESNext",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "baseUrl": ".",
-    "paths": {
-      "opencode-oauth-adapters": ["../oauth-adapters/src/index.ts"]
-    },
     "strict": true,
     "skipLibCheck": true,
     "noEmit": true,

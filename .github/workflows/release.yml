@@ -36,14 +36,12 @@ jobs:
 
       - name: Verify dist output
         run: |
-          test -f packages/oauth-adapters/dist/index.js
           test -f packages/multi-account-core/dist/index.js
           test -f packages/anthropic-multi-account/dist/index.js
           test -f packages/codex-multi-account/dist/index.js
 
       - name: Publish packages (dependency order)
         run: |
-          npm publish --workspace opencode-oauth-adapters --access public
           npm publish --workspace opencode-multi-account-core --access public
           npm publish --workspace opencode-anthropic-multi-account --access public
           npm publish --workspace opencode-codex-multi-account --access public

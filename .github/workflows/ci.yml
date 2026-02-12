@@ -45,7 +45,6 @@ jobs:
         run: bun run build
       - name: Verify dist output
         run: |
-          test -f packages/oauth-adapters/dist/index.js
           test -f packages/multi-account-core/dist/index.js
           test -f packages/anthropic-multi-account/dist/index.js
           test -f packages/codex-multi-account/dist/index.js

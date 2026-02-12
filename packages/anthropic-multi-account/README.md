@@ -26,8 +26,6 @@ Add to `opencode.json`:
 opencode-anthropic-multi-account  ← you are here
         │
 opencode-multi-account-core
-        │
-opencode-oauth-adapters
 ```
 
 See the [root README](../../README.md) for full documentation.

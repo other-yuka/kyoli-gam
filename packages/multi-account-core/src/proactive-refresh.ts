@@ -14,7 +14,20 @@ export interface ProactiveRefreshDependencies {
   debugLog: (client: PluginClient, message: string, extra?: Record<string, unknown>) => void;
 }
 
-export function createProactiveRefreshQueueForProvider(dependencies: ProactiveRefreshDependencies) {
+export interface ProactiveRefreshQueueInstance {
+  start(): void;
+  stop(): Promise<void>;
+}
+
+export interface ProactiveRefreshQueueClass {
+  new (
+    client: PluginClient,
+    store: AccountStore,
+    onInvalidate?: (uuid: string) => void,
+  ): ProactiveRefreshQueueInstance;
+}
+
+export function createProactiveRefreshQueueForProvider(dependencies: ProactiveRefreshDependencies): ProactiveRefreshQueueClass {
   const {
     getConfig,
     refreshToken,
