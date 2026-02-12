@@ -1,10 +1,14 @@
 {
   "name": "opencode-multi-account-core",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Shared core for multi-account OpenCode plugins",
   "main": "./src/index.ts",
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "source": "./src/index.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
   },
   "scripts": {
     "build": "esbuild src/index.ts --bundle --outdir=dist --platform=node --format=esm --packages=external",
@@ -26,7 +30,7 @@
     "directory": "packages/multi-account-core"
   },
   "dependencies": {
-    "opencode-oauth-adapters": "workspace:^",
+    "opencode-oauth-adapters": "^0.1.2",
     "proper-lockfile": "^4.1.2",
     "valibot": "^1.2.0"
   },
@@ -38,14 +42,7 @@
   },
   "publishConfig": {
     "registry": "https://registry.npmjs.org",
-    "access": "public",
-    "main": "./dist/index.js",
-    "exports": {
-      ".": {
-        "import": "./dist/index.js",
-        "default": "./dist/index.js"
-      }
-    }
+    "access": "public"
   },
   "files": [
     "dist",

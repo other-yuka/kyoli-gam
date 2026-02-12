@@ -74,7 +74,7 @@ The architecture follows a **Layered Plugin System with Provider Adapters**:
          └─────────────────────────────┘
 ```
 
-**Boundary enforcement**: Workspace protocol (`workspace:*`) and TypeScript path aliases ensure compile-time dependency validation. Plugins depend downward on adapters; adapters have zero dependencies on plugins.
+**Boundary enforcement**: Workspace protocol (`workspace:^`) and TypeScript path aliases ensure compile-time dependency validation. Plugins depend downward on adapters; adapters have zero dependencies on plugins.
 
 ---
 
@@ -809,7 +809,7 @@ Externals are excluded from the bundle — they must be installed by the consume
    - Wire up in `index.ts`
 
 3. **Monorepo integration**:
-   - Add `package.json` with `workspace:*` dependency on `kyoligam-oauth-adapters`
+    - Add `package.json` with `workspace:^` dependency on `kyoligam-oauth-adapters` and `kyoligam-multi-account-core`
    - Add tsconfig files (copy from existing plugin)
    - Update CI to verify new dist output
    - Add publish step to release workflow
@@ -1015,7 +1015,7 @@ export async function executeWithAccountRotation(
 | Type safety | TypeScript `--strict` with extra flags | CI: `bun run typecheck` |
 | Runtime correctness | Vitest test suite | CI: `bun run test` |
 | Build integrity | esbuild bundler + dist verification | CI: `test -f packages/*/dist/index.js` |
-| Dependency direction | Workspace protocol + tsconfig paths | Compile-time (TypeScript path resolution) |
+| Dependency direction | Workspace protocol (`workspace:^`) + tsconfig paths | Compile-time (TypeScript path resolution) |
 | Schema-type consistency | Valibot `v.InferOutput` | Compile-time (types auto-derived) |
 
 ### 15.2 Consistency Mechanisms
