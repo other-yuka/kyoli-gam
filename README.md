@@ -30,8 +30,8 @@ Use multiple OAuth accounts in a single OpenCode session. When one account gets 
 
 | Package | Description |
 |:--------|:------------|
-| [`anthropic-multi-account`](./packages/anthropic-multi-account) | OpenCode plugin for multi-account Anthropic (Claude) OAuth |
-| [`codex-multi-account`](./packages/codex-multi-account) | OpenCode plugin for multi-account OpenAI (ChatGPT Codex) OAuth |
+| [`opencode-anthropic-multi-account`](./packages/opencode-anthropic-multi-account) | OpenCode plugin for multi-account Anthropic (Claude) OAuth |
+| [`opencode-codex-multi-account`](./packages/opencode-codex-multi-account) | OpenCode plugin for multi-account OpenAI (ChatGPT Codex) OAuth |
 | [`multi-account-core`](./packages/multi-account-core) | Shared core logic: account management, storage, claims, rate limiting, executor |
 | [`oauth-adapters`](./packages/oauth-adapters) | Provider-specific OAuth adapter definitions (endpoints, client IDs, plan labels) |
 
@@ -50,9 +50,9 @@ Add the plugin to `opencode.json`:
 ```jsonc
 {
   "plugin": [
-    "anthropic-multi-account@latest",
+    "opencode-anthropic-multi-account@latest",
     // and/or
-    "codex-multi-account@latest"
+    "opencode-codex-multi-account@latest"
   ]
 }
 ```
@@ -123,7 +123,7 @@ opencode fetch
 
 ```
 ┌─────────────────────────────────────────────────┐
-│  anthropic-multi-account / codex-multi-account  │  Plugin entry points
+│  opencode-anthropic-multi-account / opencode-codex-multi-account  │  Plugin entry points
 │  (provider-specific: auth, usage, transforms)   │  ← thin shims + provider logic
 ├─────────────────────────────────────────────────┤
 │            multi-account-core                   │  Shared core (~70% of logic)

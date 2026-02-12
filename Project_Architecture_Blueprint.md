@@ -1,7 +1,7 @@
 # Project Architecture Blueprint
 
 > **kyoli-gam monorepo** — OAuth Multi-Account Plugin System for OpenCode  
-> Generated: 2026-02-11 | Based on: Full source analysis of all packages
+> Generated: 2026-02-12 | Based on: Full source analysis of all packages
 
 ---
 
@@ -38,9 +38,10 @@ The architecture follows a **Layered Plugin System with Provider Adapters**:
 
 | Layer | Package | Responsibility |
 |-------|---------|----------------|
-| **Adapter (Shared)** | `@kyoli/oauth-adapters` | Provider-agnostic interface definitions and concrete adapter configurations |
-| **Plugin (Provider-Specific)** | `anthropic-multi-account` | Anthropic-specific multi-account plugin |
-| **Plugin (Provider-Specific)** | `codex-multi-account` | OpenAI Codex-specific multi-account plugin |
+| **Layer 0: Adapter** | `kyoligam-oauth-adapters` | Provider-agnostic interface definitions and concrete adapter configurations |
+| **Layer 1: Core** | `kyoligam-multi-account-core` | Shared core logic (~70% of logic): account management, storage, executor |
+| **Layer 2: Plugin** | `anthropic-multi-account` | Anthropic-specific plugin entry point and transforms |
+| **Layer 2: Plugin** | `codex-multi-account` | OpenAI Codex-specific plugin entry point and transforms |
 
 ### 1.3 Guiding Principles
 
@@ -61,11 +62,15 @@ The architecture follows a **Layered Plugin System with Provider Adapters**:
                │                  │
     ┌──────────▼──────────┐ ┌────▼────────────────┐
     │  anthropic-multi-   │ │  codex-multi-       │
-    │  account (Plugin)   │ │  account (Plugin)   │  (Plugin layer)
+    │  account (Plugin)   │ │  account (Plugin)   │  (Layer 2: Plugin)
     └──────────┬──────────┘ └────┬────────────────┘
                │                  │
          ┌─────▼──────────────────▼────┐
-         │     @kyoli/oauth-adapters   │  (Shared adapter layer)
+         │ kyoligam-multi-account-core │  (Layer 1: Shared core)
+         └─────────────┬───────────────┘
+                       │
+         ┌─────────────▼───────────────┐
+         │  kyoligam-oauth-adapters    │  (Layer 0: Shared adapters)
          └─────────────────────────────┘
 ```
 
@@ -106,7 +111,7 @@ The architecture follows a **Layered Plugin System with Provider Adapters**:
                      └──────────┬───────────────┘
                                 │
                   ┌─────────────▼─────────────┐
-                  │   @kyoli/oauth-adapters    │
+                  │   kyoligam-oauth-adapters    │
                   │                           │
                   │  OAuthAdapter (interface)  │
                   │  anthropicOAuthAdapter     │
@@ -188,7 +193,7 @@ selectAccount()
 
 ## 3. Core Architectural Components
 
-### 3.1 `@kyoli/oauth-adapters` — Provider Adapter Definitions
+### 3.1 `kyoligam-oauth-adapters` — Provider Adapter Definitions
 
 **Purpose**: Define the contract and concrete configurations for each OAuth provider.
 
@@ -239,7 +244,7 @@ Both `anthropic-multi-account` and `codex-multi-account` share an identical modu
 |--------|---------------|-----------------------|
 | `index.ts` | Plugin entry point — registers auth hooks and tools with OpenCode | All modules |
 | `types.ts` | Valibot schemas + derived TypeScript types | None (leaf) |
-| `constants.ts` | Adapter-derived constants + timeout values | `@kyoli/oauth-adapters` |
+| `constants.ts` | Adapter-derived constants + timeout values | `kyoligam-oauth-adapters` |
 | `config.ts` | Plugin configuration loading/caching from disk | `types.ts`, `utils.ts` |
 | `account-store.ts` | Serialized disk I/O with file locking | `storage.ts`, `types.ts`, `constants.ts`, `utils.ts` |
 | `storage.ts` | Raw disk read + deduplication + corruption backup | `types.ts`, `constants.ts`, `utils.ts` |
@@ -290,7 +295,7 @@ Layer 2: Business Logic      │ executor, account-manager, auth-handler, runtim
 Layer 1: Infrastructure      │ account-store, storage, token, config, request-transform
                              │ usage, utils, ui/*
 ─────────────────────────────┤
-Layer 0: Shared Definitions  │ @kyoli/oauth-adapters (types, adapter configs)
+Layer 0: Shared Definitions  │ kyoligam-oauth-adapters (types, adapter configs)
                              │ types.ts (valibot schemas), constants.ts
 ```
 
@@ -306,17 +311,17 @@ Layer 0: Shared Definitions  │ @kyoli/oauth-adapters (types, adapter configs)
 
 ```
 anthropic-multi-account
-  ├── @kyoli/oauth-adapters (workspace:*)     ← Adapter config
+  ├── kyoligam-oauth-adapters (workspace:*)     ← Adapter config
   ├── opencode-anthropic-auth (^0.0.13)       ← External OAuth plugin (base auth)
   ├── proper-lockfile (^4.1.2)                ← File locking for concurrent access
   └── valibot (^1.2.0)                        ← Schema validation
 
 codex-multi-account
-  ├── @kyoli/oauth-adapters (workspace:*)     ← Adapter config
+  ├── kyoligam-oauth-adapters (workspace:*)     ← Adapter config
   ├── proper-lockfile (^4.1.2)                ← File locking
   └── valibot (^1.2.0)                        ← Schema validation
 
-@kyoli/oauth-adapters
+kyoligam-oauth-adapters
   └── (no runtime dependencies)
 ```
 
@@ -560,7 +565,7 @@ Original Request
 | `forceConsistentCasingInFileNames` | anthropic, codex |
 | `isolatedModules` | All |
 
-**Path Aliases**: `@kyoli/oauth-adapters` mapped to `../oauth-adapters/src/index.ts` in plugin tsconfigs for development-time source resolution.
+**Path Aliases**: `kyoligam-oauth-adapters` mapped to `../oauth-adapters/src/index.ts` in plugin tsconfigs for development-time source resolution.
 
 **Build Output**: Separate `tsconfig.build.json` extends `tsconfig.json` with `noEmit: false`, `declaration: true`, `sourceMap: true`.
 
@@ -568,7 +573,7 @@ Original Request
 
 - Build: `esbuild src/index.ts --bundle --outdir=dist --platform=node --format=esm --packages=external`
 - Codex OAuth server: Uses `Bun.serve()` for local callback server (runtime-detected via `globalThis.Bun`)
-- Package manager: Yarn 4.12.0 with `nodeLinker: node-modules`
+- Package manager: Bun workspaces with Turborepo
 
 ### 8.3 Valibot Schema Patterns
 
@@ -748,9 +753,9 @@ Trigger: push to main, pull_request to main
 Concurrency: cancel-in-progress per workflow+ref
 
 Jobs (parallel):
-  ├── typecheck: yarn install → yarn typecheck
-  ├── test:      yarn install → yarn test
-  └── build:     yarn install → yarn build → verify dist output exists
+  ├── typecheck: bun install → bun run typecheck
+  ├── test:      bun install → bun run test
+  └── build:     bun install → bun run build → verify dist output exists
 ```
 
 ### 11.2 Release Pipeline
@@ -760,9 +765,9 @@ Trigger: push tag v*.*.*
 
 Steps (sequential):
   1. Setup: Node.js 22 + npm registry
-  2. yarn install
-  3. yarn typecheck
-  4. yarn build
+  2. bun install
+  3. bun run typecheck
+  4. bun run build
   5. Verify: dist/index.js exists for both plugins
   6. npm publish --workspace anthropic-multi-account --access public
   7. npm publish --workspace codex-multi-account --access public
@@ -777,7 +782,7 @@ Steps (sequential):
 yarn workspaces foreach -A --topological --exclude kyoli-gam-monorepo run build
 
 Build order (topological):
-  1. @kyoli/oauth-adapters (no deps)
+  1. kyoligam-oauth-adapters (no deps)
   2. anthropic-multi-account (depends on oauth-adapters)
   3. codex-multi-account (depends on oauth-adapters)
 ```
@@ -786,7 +791,7 @@ Build order (topological):
 
 | Package | Published | Registry | Externals |
 |---------|-----------|----------|-----------|
-| `@kyoli/oauth-adapters` | Source only (workspace) | Not published | — |
+| `kyoligam-oauth-adapters` | Source only (workspace) | Not published | — |
 | `anthropic-multi-account` | dist/index.js | GitHub Packages | `@opencode-ai/plugin`, `opencode-anthropic-auth`, `valibot` |
 | `codex-multi-account` | dist/index.js | GitHub Packages | `@opencode-ai/plugin`, `valibot` |
 
@@ -816,7 +821,7 @@ Externals are excluded from the bundle — they must be installed by the consume
    - Wire up in `index.ts`
 
 3. **Monorepo integration**:
-   - Add `package.json` with `workspace:*` dependency on `@kyoli/oauth-adapters`
+   - Add `package.json` with `workspace:*` dependency on `kyoligam-oauth-adapters`
    - Add tsconfig files (copy from existing plugin)
    - Update CI to verify new dist output
    - Add publish step to release workflow
@@ -844,7 +849,7 @@ The current architecture intentionally duplicates modules across plugins rather 
 - **Pro**: Each plugin can diverge freely; no coupling between providers
 - **Con**: Bug fixes must be applied to each plugin independently
 
-If a third provider is added, consider extracting the shared modules (`account-manager`, `account-store`, `executor`, `storage`, `claims`, `proactive-refresh`, `config`, `rate-limit`, `utils`, `ui/*`) into a shared `@kyoli/multi-account-core` package with provider-specific hooks for the differing modules.
+If a third provider is added, consider extracting the shared modules (`account-manager`, `account-store`, `executor`, `storage`, `claims`, `proactive-refresh`, `config`, `rate-limit`, `utils`, `ui/*`) into a shared `kyoligam-multi-account-core` package with provider-specific hooks for the differing modules.
 
 ---
 
@@ -874,7 +879,7 @@ export const anthropicOAuthAdapter: OAuthAdapter = {
 
 ```typescript
 // packages/anthropic-multi-account/src/constants.ts — Layer 1 (consumer)
-import { anthropicOAuthAdapter } from "@kyoli/oauth-adapters";
+import { anthropicOAuthAdapter } from "kyoligam-oauth-adapters";
 export const ANTHROPIC_OAUTH_ADAPTER = anthropicOAuthAdapter;
 export const ANTHROPIC_TOKEN_ENDPOINT = ANTHROPIC_OAUTH_ADAPTER.tokenEndpoint;
 ```
@@ -1019,8 +1024,8 @@ export async function executeWithAccountRotation(
 
 | Check | Tool | Enforcement |
 |-------|------|-------------|
-| Type safety | TypeScript `--strict` with extra flags | CI: `yarn typecheck` |
-| Runtime correctness | Vitest test suite | CI: `yarn test` |
+| Type safety | TypeScript `--strict` with extra flags | CI: `bun run typecheck` |
+| Runtime correctness | Vitest test suite | CI: `bun run test` |
 | Build integrity | esbuild bundler + dist verification | CI: `test -f packages/*/dist/index.js` |
 | Dependency direction | Workspace protocol + tsconfig paths | Compile-time (TypeScript path resolution) |
 | Schema-type consistency | Valibot `v.InferOutput` | Compile-time (types auto-derived) |
@@ -1053,7 +1058,7 @@ export async function executeWithAccountRotation(
 3. Update `constants.ts` to reference the new adapter
 4. Implement `oauth.ts`, `request-transform.ts`, `runtime-factory.ts`, `usage.ts`
 5. Wire up in `index.ts`
-6. Run `yarn typecheck && yarn test && yarn build`
+6. Run `bun run typecheck && bun run test && bun run build`
 
 **Adding a feature to an existing plugin**:
 1. Identify which layer the change belongs to (infrastructure vs. business logic)

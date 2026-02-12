@@ -1,4 +1,4 @@
-import { openAIOAuthAdapter } from "@other-yuka/oauth-adapters";
+import { openAIOAuthAdapter } from "opencode-oauth-adapters";
 
 /** OpenAI OAuth adapter config */
 export const OPENAI_OAUTH_ADAPTER = openAIOAuthAdapter;

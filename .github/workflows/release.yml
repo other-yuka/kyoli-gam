@@ -43,10 +43,10 @@ jobs:
 
       - name: Publish packages (dependency order)
         run: |
-          npm publish --workspace @other-yuka/oauth-adapters --access public
-          npm publish --workspace @other-yuka/multi-account-core --access public
-          npm publish --workspace anthropic-multi-account --access public
-          npm publish --workspace codex-multi-account --access public
+          npm publish --workspace opencode-oauth-adapters --access public
+          npm publish --workspace opencode-multi-account-core --access public
+          npm publish --workspace opencode-anthropic-multi-account --access public
+          npm publish --workspace opencode-codex-multi-account --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 

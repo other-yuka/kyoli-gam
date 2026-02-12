@@ -4,7 +4,7 @@ import {
   loadConfig,
   resetConfigCache,
   updateConfigField,
-} from "@other-yuka/multi-account-core";
+} from "opencode-multi-account-core";
 
 initCoreConfig("codex-multiauth.json");
 

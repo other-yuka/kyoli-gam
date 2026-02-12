@@ -1,4 +1,4 @@
-import { createAccountManagerForProvider } from "@other-yuka/multi-account-core";
+import { createAccountManagerForProvider } from "opencode-multi-account-core";
 import { isTokenExpired, refreshToken } from "./token";
 
 export const AccountManager = createAccountManagerForProvider({

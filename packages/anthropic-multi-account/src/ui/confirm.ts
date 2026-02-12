@@ -1,1 +1,1 @@
-export { confirm } from "@other-yuka/multi-account-core";
+export { confirm } from "opencode-multi-account-core";
