@@ -1,16 +1,20 @@
-import { describe, test, expect, vi } from "vitest";
+import { afterAll, describe, test, expect, vi, mock } from "bun:test";
 import type { ManagedAccount } from "../src/types";
 import { createMockClient } from "./helpers";
 
-const { getConfigMock } = vi.hoisted(() => ({
-  getConfigMock: vi.fn(),
-}));
+const originalConfigModule = await import("../src/config");
 
-vi.mock("../src/config", () => ({
+const getConfigMock = vi.fn();
+
+mock.module("../src/config", () => ({
   getConfig: getConfigMock,
 }));
 
-import { formatWaitTime, getAccountLabel, showToast } from "../src/utils";
+afterAll(() => {
+  mock.module("../src/config", () => originalConfigModule);
+});
+
+const { formatWaitTime, getAccountLabel, showToast } = await import("../src/utils");
 
 function createAccount(overrides: Partial<ManagedAccount> = {}): ManagedAccount {
   return {

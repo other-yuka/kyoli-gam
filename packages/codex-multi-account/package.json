@@ -15,7 +15,7 @@
   "scripts": {
     "build": "esbuild src/index.ts --bundle --outdir=dist --platform=node --format=esm --packages=external && tsc -p tsconfig.build.json --emitDeclarationOnly",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "for f in tests/*.test.ts; do bun test \"$f\" || exit 1; done",
     "prepack": "bun run build",
     "dev": "bun run build --watch"
   },
