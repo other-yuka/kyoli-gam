@@ -158,7 +158,7 @@ bun run build
 ```
 
 > [!NOTE]
-> The monorepo uses Bun workspaces with [Turborepo](https://turbo.build) for task orchestration. `turbo.json` defines the dependency graph so builds and typechecks run in topological order. Each package uses a `publishConfig` pattern: `main` points to source (`./src/index.ts`) during development so tests and typechecks resolve source directly, and `publishConfig.main` points to compiled output (`./dist/index.js`) for npm consumers.
+> The monorepo uses Bun workspaces with [Turborepo](https://turbo.build) for task orchestration. `turbo.json` defines the dependency graph so builds and typechecks run in topological order. Each package uses [conditional exports](https://nodejs.org/api/packages.html#conditional-exports) with a `source` condition: `exports["."].source` points to source (`./src/index.ts`) so vitest resolves source directly during development, while `exports["."].import` points to compiled output (`./dist/index.js`) for npm consumers.
 
 ## Legal
 

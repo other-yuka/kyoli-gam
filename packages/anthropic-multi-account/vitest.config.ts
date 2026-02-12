@@ -1,7 +1,24 @@
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
+  resolve: {
+    conditions: ["source"],
+  },
+  ssr: {
+    resolve: {
+      conditions: ["source"],
+    },
+  },
   test: {
     include: ["tests/**/*.test.ts"],
+    server: {
+      deps: {
+        inline: [
+          "@opencode-ai/plugin",
+          "opencode-multi-account-core",
+          "opencode-oauth-adapters",
+        ],
+      },
+    },
   },
 });
