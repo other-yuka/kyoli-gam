@@ -41,6 +41,11 @@ jobs:
           test -f packages/anthropic-multi-account/dist/index.js
           test -f packages/codex-multi-account/dist/index.js
 
+      - name: Replace workspace protocol with actual versions
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          find packages -name 'package.json' -exec sed -i "s/\"workspace:\\^\"/\"^${VERSION}\"/g" {} +
+
       - name: Publish packages (dependency order)
         run: |
           npm publish --workspace opencode-oauth-adapters --access public

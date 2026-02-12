@@ -1,6 +1,6 @@
 {
   "name": "opencode-oauth-adapters",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Shared OAuth adapter interface and provider definitions for multi-account OpenCode plugins",
   "type": "module",
   "main": "./src/index.ts",
