@@ -1,4 +1,4 @@
-import { describe, test, expect } from "vitest";
+import { describe, test, expect } from "bun:test";
 import { buildRequestHeaders, transformRequestUrl } from "../src/request-transform";
 
 const CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses";

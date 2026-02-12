@@ -1,31 +1,39 @@
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import { afterAll, beforeEach, describe, expect, mock, test, vi } from "bun:test";
 import type { ManagedAccount, UsageLimits } from "../src/types";
 
-const { fetchUsageMock, getConfigMock, showToastMock } = vi.hoisted(() => ({
-  fetchUsageMock: vi.fn(),
-  getConfigMock: vi.fn(),
-  showToastMock: vi.fn(() => Promise.resolve()),
-}));
+const originalUsageModule = await import("../src/usage");
+const originalConfigModule = await import("../src/config");
+const originalUtilsModule = await import("../src/utils");
 
-vi.mock("../src/usage", () => ({
+const fetchUsageMock = vi.fn();
+const getConfigMock = vi.fn();
+const showToastMock = vi.fn(() => Promise.resolve());
+
+mock.module("../src/usage", () => ({
   fetchUsage: fetchUsageMock,
 }));
 
-vi.mock("../src/config", () => ({
+mock.module("../src/config", () => ({
   getConfig: getConfigMock,
 }));
 
-vi.mock("../src/utils", () => ({
+mock.module("../src/utils", () => ({
   formatWaitTime: (ms: number) => `${Math.ceil(ms / 1000)}s`,
   getAccountLabel: () => "Account 1",
   showToast: showToastMock,
 }));
 
-import {
+afterAll(() => {
+  mock.module("../src/usage", () => originalUsageModule);
+  mock.module("../src/config", () => originalConfigModule);
+  mock.module("../src/utils", () => originalUtilsModule);
+});
+
+const {
   retryAfterMsFromResponse,
   getResetMsFromUsage,
   handleRateLimitResponse,
-} from "../src/rate-limit";
+} = await import("../src/rate-limit");
 
 function createAccount(overrides: Partial<ManagedAccount> = {}): ManagedAccount {
   return {

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import { createProactiveRefreshQueueForProvider } from "../src/proactive-refresh";
 import type { AccountStore } from "../src/account-store";
 import type { PluginClient, PluginConfig, StoredAccount, TokenRefreshResult } from "../src/types";

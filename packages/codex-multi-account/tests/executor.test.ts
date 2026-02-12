@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, vi, type Mock } from "vitest";
+import { describe, test, expect, beforeEach, vi, type Mock } from "bun:test";
 import { executeWithAccountRotation } from "../src/executor";
 import { createMockClient } from "./helpers";
 import type { ManagedAccount, PluginClient } from "../src/types";

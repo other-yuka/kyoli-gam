@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import { createAccountManagerForProvider } from "../src/account-manager";
 import { AccountStore } from "../src/account-store";
 import { ACCOUNTS_FILENAME, setAccountsFilename } from "../src/constants";

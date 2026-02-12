@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test } from "bun:test";
 import { openAIOAuthAdapter } from "../src/adapters/openai";
 import { anthropicOAuthAdapter } from "../src/adapters/anthropic";
 import type { OAuthAdapter } from "../src/adapters/types";
