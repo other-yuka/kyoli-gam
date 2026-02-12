@@ -34,7 +34,41 @@ export interface AccountManagerDependencies {
   ) => Promise<TokenRefreshResult>;
 }
 
-export function createAccountManagerForProvider(dependencies: AccountManagerDependencies) {
+export interface AccountManagerInstance {
+  initialize(currentAuth: OAuthCredentials, client?: PluginClient): Promise<void>;
+  refresh(): Promise<void>;
+  getAccountCount(): number;
+  getAccounts(): ManagedAccount[];
+  getActiveAccount(): ManagedAccount | null;
+  setClient(client: PluginClient): void;
+  setRuntimeFactory(factory: RuntimeFactoryLike): void;
+  hasAnyUsableAccount(): boolean;
+  isRateLimited(account: ManagedAccount): boolean;
+  clearExpiredRateLimits(): void;
+  getMinWaitTime(): number;
+  selectAccount(): Promise<ManagedAccount | null>;
+  markRateLimited(uuid: string, backoffMs?: number): Promise<void>;
+  markRevoked(uuid: string): Promise<void>;
+  markSuccess(uuid: string): Promise<void>;
+  markAuthFailure(uuid: string, result: TokenRefreshResult): Promise<void>;
+  applyUsageCache(uuid: string, usage: UsageLimits): Promise<void>;
+  applyProfileCache(uuid: string, profile: ProfileData): Promise<void>;
+  ensureValidToken(uuid: string, client: PluginClient): Promise<TokenRefreshResult>;
+  validateNonActiveTokens(client: PluginClient): Promise<void>;
+  removeAccount(index: number): Promise<boolean>;
+  clearAllAccounts(): Promise<void>;
+  addAccount(auth: OAuthCredentials): Promise<void>;
+  toggleEnabled(uuid: string): Promise<void>;
+  replaceAccountCredentials(uuid: string, auth: OAuthCredentials): Promise<void>;
+  retryAuth(uuid: string, client: PluginClient): Promise<TokenRefreshResult>;
+}
+
+export interface AccountManagerClass {
+  new (store: AccountStore): AccountManagerInstance;
+  create(store: AccountStore, currentAuth: OAuthCredentials, client?: PluginClient): Promise<AccountManagerInstance>;
+}
+
+export function createAccountManagerForProvider(dependencies: AccountManagerDependencies): AccountManagerClass {
   const {
     providerAuthId,
     isTokenExpired,

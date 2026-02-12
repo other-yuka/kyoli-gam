@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
-import { openAIOAuthAdapter } from "../src/openai";
-import { anthropicOAuthAdapter } from "../src/anthropic";
-import type { OAuthAdapter } from "../src/types";
+import { openAIOAuthAdapter } from "../src/adapters/openai";
+import { anthropicOAuthAdapter } from "../src/adapters/anthropic";
+import type { OAuthAdapter } from "../src/adapters/types";
 
 function assertAdapterContract(adapter: OAuthAdapter) {
   expect(adapter.id.length).toBeGreaterThan(0);

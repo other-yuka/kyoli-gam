@@ -32,8 +32,7 @@ Use multiple OAuth accounts in a single OpenCode session. When one account gets 
 |:--------|:------------|
 | [`opencode-anthropic-multi-account`](./packages/opencode-anthropic-multi-account) | OpenCode plugin for multi-account Anthropic (Claude) OAuth |
 | [`opencode-codex-multi-account`](./packages/opencode-codex-multi-account) | OpenCode plugin for multi-account OpenAI (ChatGPT Codex) OAuth |
-| [`multi-account-core`](./packages/multi-account-core) | Shared core logic: account management, storage, claims, rate limiting, executor |
-| [`oauth-adapters`](./packages/oauth-adapters) | Provider-specific OAuth adapter definitions (endpoints, client IDs, plan labels) |
+| [`multi-account-core`](./packages/multi-account-core) | Shared core logic: account management, storage, claims, rate limiting, executor, provider-specific OAuth adapter definitions |
 
 ## Getting started
 
@@ -129,10 +128,8 @@ opencode fetch
 │            multi-account-core                   │  Shared core (~70% of logic)
 │  AccountStore · AccountManager · Executor       │
 │  Claims · Storage · RateLimit · ProactiveRefresh│
-│  AuthMigration · Config · Utils · UI            │
-├─────────────────────────────────────────────────┤
-│              oauth-adapters                     │  Provider definitions
-│  (endpoints, client IDs, plan labels)           │  ← zero runtime deps
+│  AuthMigration · Config · Utils · UI · Adapters │
+│  (endpoints, client IDs, plan labels)           │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -146,6 +143,7 @@ opencode fetch
 | Claims | core | Cross-process coordination via claim files with zombie detection. |
 | ProactiveRefreshQueue | core | Refreshes tokens in the background before they expire. |
 | AuthMigration | core | One-time import of existing single-account OAuth creds from `auth.json`. |
+| Adapters | core | Provider-specific OAuth adapter definitions (endpoints, client IDs, plan labels). |
 | AccountRuntimeFactory | plugin | Creates per-account fetch runtimes with provider-specific auth headers and request transforms. |
 
 ## Development
@@ -158,7 +156,7 @@ bun run build
 ```
 
 > [!NOTE]
-> The monorepo uses Bun workspaces with [Turborepo](https://turbo.build) for task orchestration. `turbo.json` defines the dependency graph so builds and typechecks run in topological order. Each package uses [conditional exports](https://nodejs.org/api/packages.html#conditional-exports) with a `source` condition: `exports["."].source` points to source (`./src/index.ts`) so vitest resolves source directly during development, while `exports["."].import` points to compiled output (`./dist/index.js`) for npm consumers.
+> The monorepo uses Bun workspaces with [Turborepo](https://turbo.build) for task orchestration. `turbo.json` defines the dependency graph so builds and typechecks run in topological order. Each package uses [conditional exports](https://nodejs.org/api/packages.html#conditional-exports): `exports["."].import` points to compiled output (`./dist/index.js`) for npm consumers, and `exports["."].types` points to generated declarations (`./dist/index.d.ts`). During development, `tsconfig.json` path mappings resolve cross-package imports to source for fast typechecking.
 
 ## Legal
 
