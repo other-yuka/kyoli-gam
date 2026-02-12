@@ -93,25 +93,24 @@ The architecture follows a **Layered Plugin System with Provider Adapters**:
                               │                │
          ┌────────────────────▼──┐  ┌──────────▼──────────────┐
          │  Anthropic Multi-Auth │  │   Codex Multi-Auth      │
-         │                       │  │                         │
-         │  ┌─────────────────┐  │  │  ┌─────────────────┐   │
-         │  │ AccountManager  │  │  │  │ AccountManager  │   │
-         │  ├─────────────────┤  │  │  ├─────────────────┤   │
-         │  │ AccountStore    │  │  │  │ AccountStore    │   │
-         │  ├─────────────────┤  │  │  ├─────────────────┤   │
-         │  │ RuntimeFactory  │  │  │  │ RuntimeFactory  │   │
-         │  ├─────────────────┤  │  │  ├─────────────────┤   │
-         │  │ Executor        │  │  │  │ Executor        │   │
-         │  ├─────────────────┤  │  │  ├─────────────────┤   │
-         │  │ ProactiveRefresh│  │  │  │ ProactiveRefresh│   │
-         │  └─────────────────┘  │  │  └─────────────────┘   │
+         │  (Plugin Layer)       │  │   (Plugin Layer)        │
          └───────────┬───────────┘  └──────────┬──────────────┘
                      │                          │
-                     │    workspace:*           │
                      └──────────┬───────────────┘
                                 │
                   ┌─────────────▼─────────────┐
-                  │   kyoligam-oauth-adapters    │
+                  │ kyoligam-multi-account-core│
+                  │ (Shared Core Layer)       │
+                  │                           │
+                  │  AccountManager           │
+                  │  AccountStore             │
+                  │  Executor                 │
+                  │  ProactiveRefresh         │
+                  └─────────────┬─────────────┘
+                                │
+                  ┌─────────────▼─────────────┐
+                  │   kyoligam-oauth-adapters  │
+                  │   (Shared Adapter Layer)  │
                   │                           │
                   │  OAuthAdapter (interface)  │
                   │  anthropicOAuthAdapter     │
@@ -245,23 +244,12 @@ Both `anthropic-multi-account` and `codex-multi-account` share an identical modu
 | `index.ts` | Plugin entry point — registers auth hooks and tools with OpenCode | All modules |
 | `types.ts` | Valibot schemas + derived TypeScript types | None (leaf) |
 | `constants.ts` | Adapter-derived constants + timeout values | `kyoligam-oauth-adapters` |
-| `config.ts` | Plugin configuration loading/caching from disk | `types.ts`, `utils.ts` |
-| `account-store.ts` | Serialized disk I/O with file locking | `storage.ts`, `types.ts`, `constants.ts`, `utils.ts` |
-| `storage.ts` | Raw disk read + deduplication + corruption backup | `types.ts`, `constants.ts`, `utils.ts` |
-| `account-manager.ts` | In-memory cache + account selection strategies + CRUD | `account-store.ts`, `claims.ts`, `config.ts`, `token.ts`, `types.ts` |
-| `executor.ts` | Retry loop with account rotation | `account-manager.ts`, `runtime-factory.ts`, `rate-limit.ts`, `utils.ts` |
-| `runtime-factory.ts` | Per-account fetch runtime creation and caching | `account-store.ts`, `token.ts`, `request-transform.ts` |
+| `auth-handler.ts` | OAuth flow orchestration + account management menu | `kyoligam-multi-account-core`, `ui/*` |
+| `runtime-factory.ts` | Per-account fetch runtime creation and caching | `kyoligam-multi-account-core`, `token.ts`, `request-transform.ts` |
 | `request-transform.ts` | HTTP request/response rewriting | `constants.ts` |
 | `token.ts` | Token expiry check + refresh with dedup mutex | `constants.ts`, `types.ts` |
-| `rate-limit.ts` | Rate limit response parsing and backoff | `account-manager.ts`, `usage.ts`, `config.ts`, `utils.ts` |
 | `usage.ts` | Usage/profile API fetching and formatting | `constants.ts`, `types.ts` |
-| `claims.ts` | Cross-process account claiming for parallel sessions | `utils.ts` |
-| `proactive-refresh.ts` | Background token refresh queue | `token.ts`, `config.ts`, `account-store.ts` |
-| `auth-handler.ts` | OAuth flow orchestration + account management menu | `account-manager.ts`, `usage.ts`, `token.ts`, `config.ts`, `ui/*` |
-| `ui/auth-menu.ts` | TUI menu rendering for account management | `ui/select.ts`, `ui/confirm.ts`, `ui/ansi.ts` |
-| `ui/select.ts` | Generic TUI select component (raw terminal I/O) | `ui/ansi.ts` |
-| `ui/confirm.ts` | TUI confirm dialog | `ui/select.ts` |
-| `ui/ansi.ts` | ANSI escape codes + key parsing + TTY detection | None (leaf) |
+| `ui/*` | TUI components for account management | None (leaf) |
 
 ### 3.3 Key Differences Between Anthropic and Codex Plugins
 
@@ -565,7 +553,7 @@ Original Request
 | `forceConsistentCasingInFileNames` | anthropic, codex |
 | `isolatedModules` | All |
 
-**Path Aliases**: `kyoligam-oauth-adapters` mapped to `../oauth-adapters/src/index.ts` in plugin tsconfigs for development-time source resolution.
+**Path Aliases**: `kyoligam-oauth-adapters` and `kyoligam-multi-account-core` mapped to their respective `src/index.ts` in plugin tsconfigs for development-time source resolution.
 
 **Build Output**: Separate `tsconfig.build.json` extends `tsconfig.json` with `noEmit: false`, `declaration: true`, `sourceMap: true`.
 
