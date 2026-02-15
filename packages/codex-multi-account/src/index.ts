@@ -12,6 +12,10 @@ import { formatWaitTime, getAccountLabel, showToast } from "./utils";
 import { OPENAI_OAUTH_ADAPTER } from "./constants";
 import type { OAuthCredentials, PluginClient } from "./types";
 
+function formatResetTime(resetAt: string): string {
+  return formatWaitTime(new Date(resetAt).getTime() - Date.now());
+}
+
 export const CodexMultiAuthPlugin = async (ctx: unknown) => {
   const { client } = ctx as unknown as { client: PluginClient } & Record<string, unknown>;
 
@@ -56,6 +60,21 @@ export const CodexMultiAuthPlugin = async (ctx: unknown) => {
             if (account.rateLimitResetAt && account.rateLimitResetAt > Date.now()) {
               const remaining = formatWaitTime(account.rateLimitResetAt - Date.now());
               statusParts.push(`RATE LIMITED (resets in ${remaining})`);
+            }
+
+            if (account.cachedUsage) {
+              const usage = account.cachedUsage;
+              const exhaustedTiers = [
+                { name: "5-hour", tier: usage.five_hour },
+                { name: "7-day", tier: usage.seven_day },
+              ].filter(({ tier }) => tier && tier.utilization >= 100);
+
+              exhaustedTiers.forEach(({ name, tier }) => {
+                if (tier && tier.resets_at) {
+                  const resetTime = formatResetTime(tier.resets_at);
+                  statusParts.push(`USAGE EXHAUSTED (${name}, resets ${resetTime})`);
+                }
+              });
             }
 
             lines.push(

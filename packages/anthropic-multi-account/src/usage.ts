@@ -102,11 +102,15 @@ export function getUsageSummary(account: ManagedAccount): string {
   const { five_hour, seven_day } = account.cachedUsage;
 
   if (five_hour) {
-    const reset = five_hour.resets_at ? ` (resets ${formatTimeRemaining(five_hour.resets_at)})` : "";
+    const reset = five_hour.utilization >= 100 && five_hour.resets_at
+      ? ` (resets ${formatTimeRemaining(five_hour.resets_at)})`
+      : "";
     parts.push(`5h: ${five_hour.utilization.toFixed(0)}%${reset}`);
   }
   if (seven_day) {
-    const reset = seven_day.resets_at ? ` (resets ${formatTimeRemaining(seven_day.resets_at)})` : "";
+    const reset = seven_day.utilization >= 100 && seven_day.resets_at
+      ? ` (resets ${formatTimeRemaining(seven_day.resets_at)})`
+      : "";
     parts.push(`7d: ${seven_day.utilization.toFixed(0)}%${reset}`);
   }
 

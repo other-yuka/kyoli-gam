@@ -69,6 +69,20 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
               statusParts.push(`RATE LIMITED (resets in ${remaining})`);
             }
 
+            if (account.cachedUsage) {
+              const now = Date.now();
+              const usage = account.cachedUsage;
+              const exhaustedTiers = [usage.five_hour, usage.seven_day].filter((tier) =>
+                tier
+                && tier.utilization >= 100
+                && tier.resets_at != null
+                && Date.parse(tier.resets_at) > now,
+              );
+              if (exhaustedTiers.length > 0) {
+                statusParts.push("USAGE EXHAUSTED");
+              }
+            }
+
             lines.push(
               `- **${label}**${planBadge}${marker}: ${statusParts.join(" | ")} | ${usage}`,
             );
