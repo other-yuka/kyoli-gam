@@ -32,7 +32,7 @@ function formatDate(timestamp: number | undefined): string {
 
 type AccountStatus = "active" | "rate-limited" | "auth-disabled" | "disabled";
 
-function getAccountStatus(account: ManagedAccount): AccountStatus {
+export function getAccountStatus(account: ManagedAccount): AccountStatus {
   if (account.isAuthDisabled) return "auth-disabled";
   if (!account.enabled) return "disabled";
   if (account.rateLimitResetAt && account.rateLimitResetAt > Date.now()) return "rate-limited";
