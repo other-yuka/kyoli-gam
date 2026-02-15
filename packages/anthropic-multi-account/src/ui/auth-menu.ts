@@ -36,6 +36,19 @@ function getAccountStatus(account: ManagedAccount): AccountStatus {
   if (account.isAuthDisabled) return "auth-disabled";
   if (!account.enabled) return "disabled";
   if (account.rateLimitResetAt && account.rateLimitResetAt > Date.now()) return "rate-limited";
+  if (account.cachedUsage) {
+    const now = Date.now();
+    const usage = account.cachedUsage;
+    const exhaustedTiers = [usage.five_hour, usage.seven_day].filter((tier) =>
+      tier
+      && tier.utilization >= 100
+      && tier.resets_at != null
+      && Date.parse(tier.resets_at) > now,
+    );
+    if (exhaustedTiers.length > 0) {
+      return "rate-limited";
+    }
+  }
   return "active";
 }
 
@@ -186,7 +199,9 @@ function printUsageEntry(name: string, entry: { utilization: number; resets_at: 
     return;
   }
   const bar = createProgressBar(entry.utilization);
-  const reset = formatResetTime(entry.resets_at);
+  const reset = entry.utilization >= 100 && entry.resets_at
+    ? formatResetTime(entry.resets_at)
+    : "";
   console.log(`     ${connector} ${name.padEnd(16)} ${bar}${reset}`);
 }
 
