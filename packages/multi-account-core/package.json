@@ -1,6 +1,6 @@
 {
   "name": "opencode-multi-account-core",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Shared core for multi-account OpenCode plugins",
   "type": "module",
   "main": "./dist/index.js",
@@ -24,7 +24,13 @@
     "node": ">=20.0.0"
   },
   "sideEffects": false,
-  "keywords": ["opencode", "plugin", "multi-account", "core", "shared"],
+  "keywords": [
+    "opencode",
+    "plugin",
+    "multi-account",
+    "core",
+    "shared"
+  ],
   "author": "yuka",
   "license": "MIT",
   "repository": {
