@@ -2,11 +2,15 @@ name: Release
 
 on:
   push:
-    tags:
-      - 'v*.*.*'
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   release:
@@ -25,31 +29,15 @@ jobs:
 
       - run: bun install
 
-      - name: Typecheck
-        run: bun run typecheck
-
-      - name: Test
-        run: bun run test
-
-      - name: Build
-        run: bun run build
-
-      - name: Verify dist output
-        run: |
-          test -f packages/multi-account-core/dist/index.js
-          test -f packages/anthropic-multi-account/dist/index.js
-          test -f packages/codex-multi-account/dist/index.js
-
-      - name: Publish packages (dependency order)
-        run: |
-          npm publish --workspace opencode-multi-account-core --access public
-          npm publish --workspace opencode-anthropic-multi-account --access public
-          npm publish --workspace opencode-codex-multi-account --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Create Release PR or Publish
+        id: changesets
+        uses: changesets/action@v1
         with:
-          generate_release_notes: true
-          token: ${{ secrets.GITHUB_TOKEN }}
+          title: 'chore: version packages'
+          commit: 'chore: version packages'
+          version: bunx changeset version
+          publish: bun run release
+          createGithubReleases: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
