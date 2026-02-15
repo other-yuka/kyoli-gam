@@ -158,6 +158,20 @@ bun run build
 > [!NOTE]
 > The monorepo uses Bun workspaces with [Turborepo](https://turbo.build) for task orchestration. `turbo.json` defines the dependency graph so builds and typechecks run in topological order. Each package uses [conditional exports](https://nodejs.org/api/packages.html#conditional-exports): `exports["."].import` points to compiled output (`./dist/index.js`) for npm consumers, and `exports["."].types` points to generated declarations (`./dist/index.d.ts`). During development, `tsconfig.json` path mappings resolve cross-package imports to source for fast typechecking.
 
+## Release Process
+
+> [!NOTE]
+> Draft: this release flow will be finalized after the release workflow update in Task 3.
+
+This project uses [Changesets](https://github.com/changesets/changesets) for versioning and release automation.
+
+1. After making changes, run `bunx changeset` to add a changeset file.
+   - Select the bump type: `patch`, `minor`, or `major`
+   - Add a short description of the change (used in `CHANGELOG`)
+2. Create a PR that includes the changeset file, then merge it.
+3. After merge, the Changesets bot automatically opens a `Version Packages` PR.
+4. Merge the `Version Packages` PR to trigger automatic npm publish and GitHub Release creation.
+
 ## Legal
 
 These plugins are for personal and internal development use. Respect provider quotas and data handling policies.
