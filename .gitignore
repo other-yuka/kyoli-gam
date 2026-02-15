@@ -2,7 +2,6 @@ node_modules/
 **/dist/
 *.tmp
 *.lock
-!bun.lock
 *.log
 .DS_Store
 .turbo/
