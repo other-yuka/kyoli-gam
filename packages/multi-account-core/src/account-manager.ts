@@ -517,8 +517,21 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
 
     async applyUsageCache(uuid: string, usage: UsageLimits): Promise<void> {
       await this.store.mutateAccount(uuid, (account) => {
+        const now = Date.now();
+        const exhaustedTierResetTimes = [usage.five_hour, usage.seven_day]
+          .flatMap((tier) => {
+            if (tier == null || tier.utilization < 100 || tier.resets_at == null) {
+              return [];
+            }
+            return [Date.parse(tier.resets_at)];
+          })
+          .filter((resetAt) => Number.isFinite(resetAt) && resetAt > now);
+
         account.cachedUsage = usage;
         account.cachedUsageAt = Date.now();
+        account.rateLimitResetAt = exhaustedTierResetTimes.length > 0
+          ? Math.min(...exhaustedTierResetTimes)
+          : undefined;
       });
     }
 

@@ -101,4 +101,28 @@ describe("core/account-manager", () => {
     expect(refreshToken).toHaveBeenCalledTimes(1);
     expect(authSetSpy).toHaveBeenCalledTimes(1);
   });
+
+  test("applyUsageCache clears stale rateLimitResetAt when usage is no longer exhausted", async () => {
+    const AccountManager = createAccountManagerForProvider({
+      providerAuthId: "openai",
+      isTokenExpired: () => false,
+      refreshToken: async () => ({ ok: false, permanent: false }),
+    });
+
+    const manager = await AccountManager.create(new AccountStore(), createAuth("seed"));
+    const active = manager.getActiveAccount();
+    if (!active?.uuid) {
+      throw new Error("Expected active account uuid");
+    }
+
+    await manager.markRateLimited(active.uuid, 60_000);
+    await manager.applyUsageCache(active.uuid, {
+      five_hour: { utilization: 0, resets_at: new Date(Date.now() + 3_600_000).toISOString() },
+      seven_day: { utilization: 40, resets_at: new Date(Date.now() + 86_400_000).toISOString() },
+      seven_day_sonnet: null,
+    });
+    await manager.refresh();
+
+    expect(manager.getActiveAccount()?.rateLimitResetAt).toBe(undefined);
+  });
 });
