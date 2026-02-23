@@ -1,6 +1,6 @@
 {
   "name": "opencode-anthropic-multi-account",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "OpenCode plugin for Anthropic multi-account management with automatic rate limit switching",
   "main": "./dist/index.js",
   "type": "module",
@@ -39,7 +39,7 @@
     "directory": "packages/anthropic-multi-account"
   },
   "dependencies": {
-    "opencode-multi-account-core": "^0.2.1",
+    "opencode-multi-account-core": "^0.2.2",
     "opencode-anthropic-auth": "^0.0.13",
     "valibot": "^1.2.0"
   },
