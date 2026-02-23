@@ -75,4 +75,26 @@ describe("getAccountStatus", () => {
 
     expect(getAccountStatus(account)).toBe("active");
   });
+
+  it("returns active when cached usage is available even if stale rateLimitResetAt is in the future", async () => {
+    const { getAccountStatus } = await import("../src/ui/auth-menu");
+
+    const account = {
+      index: 0,
+      refreshToken: "r",
+      addedAt: Date.now(),
+      lastUsed: Date.now(),
+      enabled: true,
+      rateLimitResetAt: Date.now() + 60_000,
+      consecutiveAuthFailures: 0,
+      isAuthDisabled: false,
+      cachedUsage: {
+        five_hour: { utilization: 0, resets_at: new Date(Date.now() + 3600_000).toISOString() },
+        seven_day: { utilization: 43, resets_at: new Date(Date.now() + 86400_000).toISOString() },
+        seven_day_sonnet: { utilization: 10, resets_at: new Date(Date.now() + 86400_000).toISOString() },
+      },
+    };
+
+    expect(getAccountStatus(account)).toBe("active");
+  });
 });

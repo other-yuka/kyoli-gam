@@ -35,10 +35,10 @@ type AccountStatus = "active" | "rate-limited" | "auth-disabled" | "disabled";
 export function getAccountStatus(account: ManagedAccount): AccountStatus {
   if (account.isAuthDisabled) return "auth-disabled";
   if (!account.enabled) return "disabled";
-  if (account.rateLimitResetAt && account.rateLimitResetAt > Date.now()) return "rate-limited";
   if (account.cachedUsage) {
     const now = Date.now();
     const usage = account.cachedUsage;
+    const hasEvaluableUsageTier = [usage.five_hour, usage.seven_day].some((tier) => tier != null);
     const exhaustedTiers = [usage.five_hour, usage.seven_day].filter((tier) =>
       tier
       && tier.utilization >= 100
@@ -48,7 +48,11 @@ export function getAccountStatus(account: ManagedAccount): AccountStatus {
     if (exhaustedTiers.length > 0) {
       return "rate-limited";
     }
+    if (hasEvaluableUsageTier) {
+      return "active";
+    }
   }
+  if (account.rateLimitResetAt && account.rateLimitResetAt > Date.now()) return "rate-limited";
   return "active";
 }
 
