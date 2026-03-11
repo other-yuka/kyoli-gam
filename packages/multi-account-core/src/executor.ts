@@ -41,6 +41,10 @@ export interface ExecutorDependencies {
   getAccountLabel: (account: ManagedAccount) => string;
 }
 
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
 export function createExecutorForProvider(
   providerName: string,
   dependencies: ExecutorDependencies,
@@ -95,6 +99,7 @@ export function createExecutorForProvider(
         runtime = await runtimeFactory.getRuntime(accountUuid);
         response = await runtime.fetch(input, init);
       } catch (error) {
+        if (isAbortError(error)) throw error;
         if (await handleRuntimeFetchFailure(manager, runtimeFactory, client, account, error)) {
           continue;
         }
@@ -115,6 +120,7 @@ export function createExecutorForProvider(
           try {
             serverResponse = await runtime.fetch(input, init);
           } catch (error) {
+            if (isAbortError(error)) throw error;
             if (await handleRuntimeFetchFailure(manager, runtimeFactory, client, account, error)) {
               authFailureDuringServerRetry = true;
               break;
@@ -148,6 +154,7 @@ export function createExecutorForProvider(
             return retryResponse;
           }
         } catch (error) {
+          if (isAbortError(error)) throw error;
           if (await handleRuntimeFetchFailure(manager, runtimeFactory, client, account, error)) {
             continue;
           }

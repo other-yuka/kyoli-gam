@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 
 describe("getUsageSummary", () => {
-  it("hides reset time when utilization < 100", async () => {
+  it("shows reset time regardless of utilization level", async () => {
     const { getUsageSummary } = await import("../src/usage");
 
     const account = {
@@ -20,9 +20,8 @@ describe("getUsageSummary", () => {
     };
 
     const summary = getUsageSummary(account);
-    expect(summary).toMatch(/5h: 50%/);
-    expect(summary).not.toMatch(/resets/);
-    expect(summary).toMatch(/7d: 30%/);
+    expect(summary).toMatch(/5h: 50%.*resets/);
+    expect(summary).toMatch(/7d: 30%.*resets/);
   });
 
   it("shows reset time when utilization >= 100", async () => {
