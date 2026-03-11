@@ -1,5 +1,11 @@
 # opencode-multi-account-core
 
+## 0.2.3
+
+### Patch Changes
+
+- [`6823b0a`](https://github.com/other-yuka/kyoli-gam/commit/6823b0afb730b210937862665f0bdcf25942dce3) Thanks [@other-yuka](https://github.com/other-yuka)! - Always show usage window reset time in status tool regardless of utilization level, and propagate AbortError instead of misclassifying it as a network error in executor
+
 ## 0.2.2
 
 ### Patch Changes
