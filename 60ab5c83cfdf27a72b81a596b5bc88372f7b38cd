@@ -1,0 +1,23 @@
+packages/anthropic-multi-account/src/executor.ts
+  3fe5d8a9717d1893 4-6,8-9,13,19,42-43,61-65,74
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.15",
+  "base_commit_sha": "60ab5c83cfdf27a72b81a596b5bc88372f7b38cd",
+  "prompts": {
+    "3fe5d8a9717d1893": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_2f4894982ffeg9PNLGa27qlQ77-05e9417a-d07c-42cd-be9b-13f2c3bd180d",
+        "model": "unknown"
+      },
+      "human_author": "Sanggyu Kang <other.yuka@gmail.com>",
+      "messages": [],
+      "total_additions": 19,
+      "total_deletions": 10,
+      "accepted_lines": 15,
+      "overriden_lines": 0
+    }
+  }
+}
