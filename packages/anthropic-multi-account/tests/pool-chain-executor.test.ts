@@ -236,4 +236,50 @@ describe("pool-chain executor integration", () => {
     expect(manager.markRateLimited).toHaveBeenCalledTimes(2);
     expect(cascadeStateManager.getSnapshot()).toBeNull();
   });
+
+  test("401 -> fresh 429 marks exhausted account and fails over through pool chain", async () => {
+    const manager = createMockPoolChainManager([
+      createAccount("acct-1"),
+      createAccount("acct-2"),
+    ]);
+
+    let acct1Calls = 0;
+    const runtimeFactory = createRuntimeFactoryByUuid({
+      "acct-1": async () => {
+        acct1Calls += 1;
+        if (acct1Calls === 1) {
+          return jsonResponse({ error: "unauthorized" }, 401);
+        }
+        return jsonResponse({ error: "rate_limited" }, 429);
+      },
+      "acct-2": async () => jsonResponse({ ok: true, account: "acct-2" }, 200),
+    });
+
+    const poolManager = new PoolManager();
+    const cascadeStateManager = new CascadeStateManager();
+    const poolChainConfig: PoolChainConfig = {
+      pools: [
+        { name: "primary", baseProvider: "anthropic", members: ["acct-1", "acct-2"], enabled: true },
+      ],
+      chains: [],
+    };
+
+    const response = await executeWithPoolChainRotation(
+      manager,
+      runtimeFactory,
+      poolManager,
+      cascadeStateManager,
+      poolChainConfig,
+      client,
+      "https://api.example.com/v1/messages",
+      { method: "POST", body: JSON.stringify({ prompt: "fresh-401-429" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(runtimeFactory.calls).toEqual(["acct-1", "acct-1", "acct-2"]);
+    expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", expect.any(Number));
+    expect(manager.markSuccess).toHaveBeenCalledWith("acct-2");
+    expect(manager.markSuccess).not.toHaveBeenCalledWith("acct-1");
+    expect(cascadeStateManager.getSnapshot()).toBeNull();
+  });
 });
