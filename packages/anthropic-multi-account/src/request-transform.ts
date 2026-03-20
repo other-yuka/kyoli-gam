@@ -1,9 +1,34 @@
+import { createHash } from "node:crypto";
 import {
   ANTHROPIC_OAUTH_ADAPTER,
   ANTHROPIC_BETA_HEADER,
   CLAUDE_CLI_USER_AGENT,
   TOOL_PREFIX,
 } from "./constants";
+import { SYSTEM_PROMPT } from "./anthropic-prompt";
+
+export function getSystemPrompt(): string {
+  return SYSTEM_PROMPT;
+}
+
+function sampleCodeUnits(text: string, indices: number[]): string {
+  return indices
+    .map((i) => (i < text.length ? text.charCodeAt(i).toString(16) : "30"))
+    .join("");
+}
+
+export function buildBillingHeader(firstUserMessage: string): string {
+  const version = ANTHROPIC_OAUTH_ADAPTER.cliVersion;
+  const salt = ANTHROPIC_OAUTH_ADAPTER.billingSalt;
+  if (!version || !salt) return "";
+
+  const sampled = sampleCodeUnits(firstUserMessage, [4, 7, 20]);
+  const hash = createHash("sha256")
+    .update(`${salt}${sampled}${version}`)
+    .digest("hex")
+    .slice(0, 3);
+  return `x-anthropic-billing-header: cc_version=${version}.${hash}; cc_entrypoint=cli; cch=00000;`;
+}
 
 const OPENCODE_CAMEL_RE = /OpenCode/g;
 const OPENCODE_LOWER_RE = /(?<!\/)opencode/gi;
@@ -59,12 +84,12 @@ export function buildRequestHeaders(
   const headers = new Headers();
 
   if (input instanceof Request) {
-    input.headers.forEach((value, key) => headers.set(key, value));
+    input.headers.forEach((value, key) => { headers.set(key, value); });
   }
 
   if (init?.headers) {
     if (init.headers instanceof Headers) {
-      init.headers.forEach((value, key) => headers.set(key, value));
+      init.headers.forEach((value, key) => { headers.set(key, value); });
     } else if (Array.isArray(init.headers)) {
       for (const [key, value] of init.headers) {
         if (value !== undefined) headers.set(key, String(value));
@@ -89,6 +114,8 @@ export function buildRequestHeaders(
   headers.set("authorization", `Bearer ${accessToken}`);
   headers.set("anthropic-beta", mergedBetas);
   headers.set("user-agent", CLAUDE_CLI_USER_AGENT);
+  headers.set("anthropic-dangerous-direct-browser-access", "true");
+  headers.set("x-app", "cli");
   headers.delete("x-api-key");
 
   return headers;

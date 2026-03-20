@@ -83,6 +83,31 @@ export type TokenRefreshResult =
   | { ok: true; patch: CredentialRefreshPatch }
   | { ok: false; permanent: boolean; status?: number };
 
+export class TokenRefreshError extends Error {
+  readonly status?: number;
+  readonly permanent: boolean;
+
+  constructor(permanent: boolean, status?: number) {
+    super(status === undefined ? "Token refresh failed" : `Token refresh failed: ${status}`);
+    this.name = "TokenRefreshError";
+    this.status = status;
+    this.permanent = permanent;
+    Object.setPrototypeOf(this, TokenRefreshError.prototype);
+  }
+}
+
+export function isTokenRefreshError(error: unknown): error is TokenRefreshError {
+  if (error instanceof TokenRefreshError) return true;
+  if (!(error instanceof Error)) return false;
+
+  const candidate = error as Error & Partial<TokenRefreshError>;
+  return (
+    candidate.name === "TokenRefreshError"
+    && typeof candidate.permanent === "boolean"
+    && (candidate.status === undefined || typeof candidate.status === "number")
+  );
+}
+
 export interface ManagedAccount {
   index: number;
   uuid?: string;

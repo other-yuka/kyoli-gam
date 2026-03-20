@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readClaims, writeClaim, isClaimedByOther, type ClaimsMap } from "./claims";
 import { getConfig } from "./config";
+import { getClearedOAuthBody } from "./utils";
 import type { AccountStore } from "./account-store";
 import type {
   ManagedAccount,
@@ -57,7 +58,7 @@ export interface AccountManagerInstance {
   validateNonActiveTokens(client: PluginClient): Promise<void>;
   removeAccount(index: number): Promise<boolean>;
   clearAllAccounts(): Promise<void>;
-  addAccount(auth: OAuthCredentials): Promise<void>;
+  addAccount(auth: OAuthCredentials, email?: string): Promise<void>;
   toggleEnabled(uuid: string): Promise<void>;
   replaceAccountCredentials(uuid: string, auth: OAuthCredentials): Promise<void>;
   retryAuth(uuid: string, client: PluginClient): Promise<TokenRefreshResult>;
@@ -460,13 +461,7 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
     }
 
     async markRevoked(uuid: string): Promise<void> {
-      await this.store.mutateAccount(uuid, (account) => {
-        account.isAuthDisabled = true;
-        account.authDisabledReason = "OAuth token revoked (403)";
-        account.accessToken = undefined;
-        account.expiresAt = undefined;
-      });
-      this.runtimeFactory?.invalidate(uuid);
+      await this.removeAccountByUuid(uuid);
     }
 
     async markSuccess(uuid: string): Promise<void> {
@@ -491,16 +486,39 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       }).catch(() => {});
     }
 
+    private async clearOpenCodeAuthIfNoAccountsRemain(): Promise<void> {
+      if (!this.client) return;
+
+      const storage = await this.store.load();
+      if (storage.accounts.length > 0) return;
+
+      await this.client.auth
+        .set({
+          path: { id: providerAuthId },
+          body: getClearedOAuthBody(),
+        })
+        .catch(() => {});
+    }
+
+    private async removeAccountByUuid(uuid: string): Promise<void> {
+      const removed = await this.store.removeAccount(uuid);
+      if (!removed) return;
+
+      this.last429Map.delete(uuid);
+      this.runtimeFactory?.invalidate(uuid);
+      await this.refresh();
+      await this.clearOpenCodeAuthIfNoAccountsRemain();
+    }
+
     async markAuthFailure(uuid: string, result: TokenRefreshResult): Promise<void> {
+      if (!result.ok && result.permanent) {
+        await this.removeAccountByUuid(uuid);
+        return;
+      }
+
       await this.store.mutateStorage((storage) => {
         const account = storage.accounts.find((entry) => entry.uuid === uuid);
         if (!account) return;
-
-        if (!result.ok && result.permanent) {
-          account.isAuthDisabled = true;
-          account.authDisabledReason = "Token permanently rejected (400/401/403)";
-          return;
-        }
 
         account.consecutiveAuthFailures = (account.consecutiveAuthFailures ?? 0) + 1;
         const maxFailures = getConfig().max_consecutive_auth_failures;
@@ -620,13 +638,24 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       this.activeAccountUuid = undefined;
     }
 
-    async addAccount(auth: OAuthCredentials): Promise<void> {
+    async addAccount(auth: OAuthCredentials, email?: string): Promise<void> {
       if (!auth.refresh) return;
 
-      const existing = this.cached.find((account) => account.refreshToken === auth.refresh);
-      if (existing) return;
+      const existingByToken = this.cached.find((account) => account.refreshToken === auth.refresh);
+      if (existingByToken) return;
+
+      if (email) {
+        const existingByEmail = this.cached.find(
+          (account) => account.email && account.email === email,
+        );
+        if (existingByEmail?.uuid) {
+          await this.replaceAccountCredentials(existingByEmail.uuid, auth);
+          return;
+        }
+      }
 
       const newAccount = this.createNewAccount(auth, Date.now());
+      if (email) newAccount.email = email;
       await this.store.addAccount(newAccount);
       this.activeAccountUuid = newAccount.uuid;
       await this.store.setActiveUuid(newAccount.uuid);

@@ -1,4 +1,5 @@
 import { AccountManager } from "./account-manager";
+import { CLAUDE_CLI_USER_AGENT } from "./constants";
 import { fetchProfile, fetchUsage } from "./usage";
 import { isTokenExpired } from "./token";
 import { getConfig, updateConfigField } from "./config";
@@ -6,10 +7,11 @@ import { isTTY } from "./ui/ansi";
 import { showAuthMenu, showManageAccounts, showStrategySelect, printQuotaReport, printQuotaError } from "./ui/auth-menu";
 import { createMinimalClient, getAccountLabel } from "./utils";
 import { AccountStore } from "./account-store";
+import { loginWithPiAi } from "./pi-ai-adapter";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import { exec } from "node:child_process";
-import type { ManagedAccount, OAuthCredentials, OriginalAuthHook, PluginClient, StoredAccount } from "./types";
+import type { ManagedAccount, OAuthCredentials, PluginClient, StoredAccount } from "./types";
 
 type OAuthCallbackResponse =
   | ({ type: "success" } & { refresh: string; access: string; expires: number })
@@ -20,6 +22,15 @@ export interface OAuthFlowResult {
   instructions: string;
   method: "auto";
   callback(code?: string): Promise<OAuthCallbackResponse>;
+  _email?: string;
+}
+
+interface OAuthPromptLike {
+  text?: string;
+  message?: string;
+  label?: string;
+  title?: string;
+  placeholder?: string;
 }
 
 function makeFailedFlowResult(message: string): OAuthFlowResult {
@@ -31,33 +42,90 @@ function makeFailedFlowResult(message: string): OAuthFlowResult {
   };
 }
 
-function delegateToOriginalAuth(
-  originalAuth: OriginalAuthHook,
-  manager: AccountManager | null,
-  inputs?: Record<string, string>,
-): Promise<OAuthFlowResult> {
-  const originalMethod = originalAuth.methods?.[0];
-  if (!originalMethod?.authorize) {
-    return Promise.resolve(makeFailedFlowResult("Original OAuth method not available"));
+function toOAuthCredentials(result: OAuthCallbackResponse & { type: "success" }): OAuthCredentials {
+  return { type: "oauth", refresh: result.refresh, access: result.access, expires: result.expires };
+}
+
+function asOAuthCallbackResponse(account: Partial<StoredAccount>): OAuthCallbackResponse {
+  if (!account.refreshToken || !account.accessToken || typeof account.expiresAt !== "number") {
+    return { type: "failed" };
   }
-  return originalMethod.authorize(inputs).then((result) =>
-    wrapCallbackWithManagerSync(result as OAuthFlowResult, manager, originalAuth, inputs),
+
+  return {
+    type: "success",
+    refresh: account.refreshToken,
+    access: account.accessToken,
+    expires: account.expiresAt,
+  };
+}
+
+function promptLine(message: string): Promise<string> {
+  if (!isTTY()) return Promise.resolve("");
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) => {
+    rl.question(message, (answer) => {
+      rl.close();
+      resolve(answer.trim());
+    });
+  });
+}
+
+function normalizePromptMessage(prompt: OAuthPromptLike): string {
+  return (
+    prompt.message
+    ?? prompt.text
+    ?? prompt.label
+    ?? prompt.title
+    ?? prompt.placeholder
+    ?? "Continue authentication: "
   );
 }
 
-function delegateReauthForAccount(
-  originalAuth: OriginalAuthHook,
-  manager: AccountManager,
-  targetAccount: ManagedAccount,
-  inputs?: Record<string, string>,
-): Promise<OAuthFlowResult> {
-  const originalMethod = originalAuth.methods?.[0];
-  if (!originalMethod?.authorize) {
-    return Promise.resolve(makeFailedFlowResult("Original OAuth method not available"));
+const ANTHROPIC_TOKEN_HOST = "platform.claude.com";
+
+async function startPiAiFlow(): Promise<OAuthFlowResult> {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : (input as Request).url;
+    if (url.includes(ANTHROPIC_TOKEN_HOST)) {
+      const headers = new Headers(init?.headers);
+      headers.set("user-agent", CLAUDE_CLI_USER_AGENT);
+      return originalFetch(input, { ...init, headers });
+    }
+    return originalFetch(input, init);
+  }) as typeof globalThis.fetch;
+  try {
+    const completedAccount = await loginWithPiAi({
+      onAuth: (info) => {
+        if (info.url) {
+          openBrowser(info.url);
+        }
+
+        const instruction = info.instructions ?? "Complete authorization in your browser.";
+        const urlLine = info.url ? `\nAuth URL (manual fallback): ${info.url}` : "";
+        console.log(`\n${instruction}${urlLine}\n`);
+      },
+      onPrompt: async (prompt) => {
+        const text = normalizePromptMessage(prompt as OAuthPromptLike);
+        return promptLine(text.endsWith(":") || text.endsWith("?") ? `${text} ` : `${text}: `);
+      },
+    });
+
+    const completedResult = asOAuthCallbackResponse(completedAccount);
+    const accountEmail = completedAccount.email;
+
+    return {
+      url: "",
+      instructions: "",
+      method: "auto",
+      callback: async () => completedResult,
+      _email: accountEmail,
+    };
+  } catch {
+    return makeFailedFlowResult("Failed to start OAuth flow");
+  } finally {
+    globalThis.fetch = originalFetch;
   }
-  return originalMethod.authorize(inputs).then((result) =>
-    wrapCallbackWithAccountReplace(result as OAuthFlowResult, manager, targetAccount),
-  );
 }
 
 function wrapCallbackWithAccountReplace(
@@ -72,19 +140,10 @@ function wrapCallbackWithAccountReplace(
       const callbackResult = await originalCallback(code);
 
       if (callbackResult?.type === "success" && callbackResult.refresh) {
-        const auth: OAuthCredentials = {
-          type: "oauth",
-          refresh: callbackResult.refresh,
-          access: callbackResult.access,
-          expires: callbackResult.expires,
-        };
-
         if (targetAccount.uuid) {
-          await manager.replaceAccountCredentials(targetAccount.uuid, auth);
+          await manager.replaceAccountCredentials(targetAccount.uuid, toOAuthCredentials(callbackResult));
         }
-
-        const label = getAccountLabel(targetAccount);
-        console.log(`\n✅ ${label} re-authenticated successfully.\n`);
+        console.log(`\n✅ ${getAccountLabel(targetAccount)} re-authenticated successfully.\n`);
       }
 
       return callbackResult;
@@ -93,43 +152,30 @@ function wrapCallbackWithAccountReplace(
 }
 
 function wrapCallbackWithManagerSync(
-  result: OAuthFlowResult,
+  result: OAuthFlowResult & { _email?: string },
   manager: AccountManager | null,
-  originalAuth?: OriginalAuthHook,
-  inputs?: Record<string, string>,
 ): OAuthFlowResult {
   const originalCallback = result.callback;
+  const email = result._email;
   return {
     ...result,
     callback: async function (code?: string) {
       const callbackResult = await originalCallback(code);
 
       if (callbackResult?.type === "success" && callbackResult.refresh) {
-        const auth: OAuthCredentials = {
-          type: "oauth",
-          refresh: callbackResult.refresh,
-          access: callbackResult.access,
-          expires: callbackResult.expires,
-        };
+        const auth = toOAuthCredentials(callbackResult);
 
         if (manager) {
           const countBefore = manager.getAccounts().length;
-          await manager.addAccount(auth);
+          await manager.addAccount(auth, email);
           const countAfter = manager.getAccounts().length;
-
-          if (countAfter > countBefore) {
-            console.log(`\n✅ Account added to multi-auth pool (${countAfter} total).\n`);
-          } else {
-            console.log(`\nℹ️  Account already exists in multi-auth pool (${countAfter} total).\n`);
-          }
-
-          if (originalAuth && inputs && isTTY()) {
-            await addMoreAccountsLoop(manager, originalAuth, inputs);
-          }
-
+          const added = countAfter > countBefore;
+          console.log(added
+            ? `\n✅ Account added to multi-auth pool (${countAfter} total).\n`
+            : `\nℹ️  Account already exists in multi-auth pool (${countAfter} total).\n`);
         } else {
           await persistFallback(auth);
-          console.log(`\n✅ Account saved.\n`);
+          console.log("\n✅ Account saved.\n");
         }
       }
 
@@ -150,20 +196,17 @@ function promptYesNo(message: string): Promise<boolean> {
 }
 
 function openBrowser(url: string): void {
-  const cmd = process.platform === "darwin" ? "open"
-    : process.platform === "win32" ? "start"
-    : "xdg-open";
+  const commands: Record<string, string> = {
+    darwin: "open",
+    win32: "start",
+  };
+  const cmd = commands[process.platform] ?? "xdg-open";
   exec(`${cmd} ${JSON.stringify(url)}`);
 }
 
 async function addMoreAccountsLoop(
   manager: AccountManager,
-  originalAuth: OriginalAuthHook,
-  inputs: Record<string, string>,
 ): Promise<void> {
-  const originalMethod = originalAuth.methods?.[0];
-  if (!originalMethod?.authorize) return;
-
   while (true) {
     const currentCount = manager.getAccounts().length;
     const shouldAdd = await promptYesNo(`Add another account? (${currentCount} added) (y/n): `);
@@ -171,7 +214,7 @@ async function addMoreAccountsLoop(
 
     let flow: OAuthFlowResult;
     try {
-      flow = await originalMethod.authorize(inputs) as OAuthFlowResult;
+      flow = await startPiAiFlow();
     } catch {
       console.log("\n❌ Failed to start OAuth flow.\n");
       break;
@@ -179,6 +222,9 @@ async function addMoreAccountsLoop(
 
     if (flow.url) {
       openBrowser(flow.url);
+    }
+    if (flow.instructions) {
+      console.log(`\n${flow.instructions}\n`);
     }
 
     let callbackResult: OAuthCallbackResponse;
@@ -194,22 +240,14 @@ async function addMoreAccountsLoop(
       break;
     }
 
-    const auth: OAuthCredentials = {
-      type: "oauth",
-      refresh: callbackResult.refresh,
-      access: callbackResult.access,
-      expires: callbackResult.expires,
-    };
-
+    const flowEmail = (flow as OAuthFlowResult & { _email?: string })._email;
     const countBefore = manager.getAccounts().length;
-    await manager.addAccount(auth);
+    await manager.addAccount(toOAuthCredentials(callbackResult), flowEmail);
     const countAfter = manager.getAccounts().length;
-
-    if (countAfter > countBefore) {
-      console.log(`\n✅ Account added to multi-auth pool (${countAfter} total).\n`);
-    } else {
-      console.log(`\nℹ️  Account already exists in multi-auth pool (${countAfter} total).\n`);
-    }
+    const added = countAfter > countBefore;
+    console.log(added
+      ? `\n✅ Account added to multi-auth pool (${countAfter} total).\n`
+      : `\nℹ️  Account already exists in multi-auth pool (${countAfter} total).\n`);
   }
 }
 
@@ -237,21 +275,20 @@ async function persistFallback(auth: OAuthCredentials): Promise<void> {
 }
 
 export async function handleAuthorize(
-  originalAuth: OriginalAuthHook,
   manager: AccountManager | null,
   inputs?: Record<string, string>,
   client?: PluginClient,
 ): Promise<OAuthFlowResult> {
   if (!inputs || !isTTY()) {
-    return delegateToOriginalAuth(originalAuth, manager, inputs);
+    return wrapCallbackWithManagerSync(await startPiAiFlow(), manager);
   }
 
   const effectiveManager = manager ?? await loadManagerFromDisk(client);
   if (!effectiveManager || effectiveManager.getAccounts().length === 0) {
-    return delegateToOriginalAuth(originalAuth, manager, inputs);
+    return wrapCallbackWithManagerSync(await startPiAiFlow(), manager);
   }
 
-  return runAccountManagementMenu(originalAuth, effectiveManager, inputs, client);
+  return runAccountManagementMenu(effectiveManager, client);
 }
 
 async function loadManagerFromDisk(client?: PluginClient): Promise<AccountManager | null> {
@@ -264,9 +301,7 @@ async function loadManagerFromDisk(client?: PluginClient): Promise<AccountManage
 }
 
 async function runAccountManagementMenu(
-  originalAuth: OriginalAuthHook,
   manager: AccountManager,
-  inputs: Record<string, string>,
   client?: PluginClient,
 ): Promise<OAuthFlowResult> {
   while (true) {
@@ -275,7 +310,7 @@ async function runAccountManagementMenu(
 
     switch (menuAction.type) {
       case "add":
-        return delegateToOriginalAuth(originalAuth, manager, inputs);
+        return wrapCallbackWithManagerSync(await startPiAiFlow(), manager);
 
       case "check-quotas":
         await handleCheckQuotas(manager, client);
@@ -286,7 +321,7 @@ async function runAccountManagementMenu(
         if (result.action === "back" || result.action === "cancel") continue;
         const manageResult = await handleManageAction(manager, result.action, result.account, client);
         if (manageResult.triggerOAuth) {
-          return delegateReauthForAccount(originalAuth, manager, manageResult.account, inputs);
+          return wrapCallbackWithAccountReplace(await startPiAiFlow(), manager, manageResult.account);
         }
         continue;
       }
@@ -298,7 +333,7 @@ async function runAccountManagementMenu(
       case "delete-all":
         await manager.clearAllAccounts();
         console.log("\nAll accounts deleted.\n");
-        return delegateToOriginalAuth(originalAuth, manager, inputs);
+        return wrapCallbackWithManagerSync(await startPiAiFlow(), manager);
 
       case "cancel":
         return makeFailedFlowResult("Authentication cancelled");
@@ -314,56 +349,64 @@ async function handleCheckQuotas(manager: AccountManager, client?: PluginClient)
   console.log(`\n📊 Checking quotas for ${accounts.length} account(s)...\n`);
 
   for (const account of accounts) {
-    if (account.isAuthDisabled || !account.accessToken || isTokenExpired(account)) {
-      if (!account.uuid) {
-        printQuotaError(account, "Missing account UUID");
-        continue;
-      }
-
-      const result = await manager.ensureValidToken(account.uuid, effectiveClient);
-      if (!result.ok) {
-        printQuotaError(account, account.isAuthDisabled
-          ? `${account.authDisabledReason ?? "Auth disabled"} (refresh failed)`
-          : "Failed to refresh token");
-        continue;
-      }
-
-      await manager.refresh();
-    }
-
-    const freshAccounts = manager.getAccounts();
-    const freshAccount = freshAccounts.find((candidate) => candidate.uuid === account.uuid);
-
-    if (!freshAccount?.accessToken) {
-      printQuotaError(account, "No access token available");
-      continue;
-    }
-
-    const usageResult = await fetchUsage(freshAccount.accessToken);
-    if (!usageResult.ok) {
-      printQuotaError(freshAccount, `Failed to fetch usage: ${usageResult.reason}`);
-      continue;
-    }
-
-    if (freshAccount.uuid) {
-      await manager.applyUsageCache(freshAccount.uuid, usageResult.data);
-    }
-
-    let reportAccount = freshAccount;
-    const profileResult = await fetchProfile(freshAccount.accessToken);
-    if (profileResult.ok) {
-      if (freshAccount.uuid) {
-        await manager.applyProfileCache(freshAccount.uuid, profileResult.data);
-      }
-      reportAccount = {
-        ...freshAccount,
-        email: profileResult.data.email ?? freshAccount.email,
-        planTier: profileResult.data.planTier,
-      };
-    }
-
-    printQuotaReport(reportAccount, usageResult.data);
+    await checkAccountQuota(manager, account, effectiveClient);
   }
+}
+
+async function checkAccountQuota(
+  manager: AccountManager,
+  account: ManagedAccount,
+  client: PluginClient,
+): Promise<void> {
+  if (account.isAuthDisabled || !account.accessToken || isTokenExpired(account)) {
+    if (!account.uuid) {
+      printQuotaError(account, "Missing account UUID");
+      return;
+    }
+
+    const refreshResult = await manager.ensureValidToken(account.uuid, client);
+    if (!refreshResult.ok) {
+      printQuotaError(account, account.isAuthDisabled
+        ? `${account.authDisabledReason ?? "Auth disabled"} (refresh failed)`
+        : "Failed to refresh token");
+      return;
+    }
+
+    await manager.refresh();
+  }
+
+  const freshAccounts = manager.getAccounts();
+  const freshAccount = freshAccounts.find((candidate) => candidate.uuid === account.uuid);
+
+  if (!freshAccount?.accessToken) {
+    printQuotaError(account, "No access token available");
+    return;
+  }
+
+  const usageResult = await fetchUsage(freshAccount.accessToken);
+  if (!usageResult.ok) {
+    printQuotaError(freshAccount, `Failed to fetch usage: ${usageResult.reason}`);
+    return;
+  }
+
+  if (freshAccount.uuid) {
+    await manager.applyUsageCache(freshAccount.uuid, usageResult.data);
+  }
+
+  let reportAccount = freshAccount;
+  const profileResult = await fetchProfile(freshAccount.accessToken);
+  if (profileResult.ok) {
+    if (freshAccount.uuid) {
+      await manager.applyProfileCache(freshAccount.uuid, profileResult.data);
+    }
+    reportAccount = {
+      ...freshAccount,
+      email: profileResult.data.email ?? freshAccount.email,
+      planTier: profileResult.data.planTier,
+    };
+  }
+
+  printQuotaReport(reportAccount, usageResult.data);
 }
 
 async function handleLoadBalancing(): Promise<void> {
@@ -418,7 +461,7 @@ async function handleManageAction(
       if (result.ok) {
         console.log(`✅ ${label} re-authenticated successfully.\n`);
       } else {
-        console.log(`Token refresh failed — starting OAuth flow...\n`);
+        console.log("Token refresh failed — starting OAuth flow...\n");
         return { triggerOAuth: true, account };
       }
       break;

@@ -2,6 +2,7 @@ import { describe, test, expect, beforeEach, vi, type Mock } from "bun:test";
 import { executeWithAccountRotation } from "../src/executor";
 import { createMockClient } from "./helpers";
 import type { ManagedAccount, PluginClient } from "../src/types";
+import type { ExecutorAccountManager, ExecutorRuntimeFactory } from "opencode-multi-account-core";
 
 // ─── Test Fixtures ───────────────────────────────────────────────
 
@@ -31,19 +32,19 @@ function createSecondAccount(): ManagedAccount {
   });
 }
 
-interface MockAccountManager {
-  getAccountCount: Mock;
-  selectAccount: Mock;
-  getActiveAccount: Mock;
-  refresh: Mock;
-  markSuccess: Mock;
-  markRateLimited: Mock;
-  markAuthFailure: Mock;
-  markRevoked: Mock;
-  hasAnyUsableAccount: Mock;
-  getMinWaitTime: Mock;
-  applyUsageCache: Mock;
-}
+type MockAccountManager = ExecutorAccountManager & {
+  getAccountCount: Mock<() => number>;
+  selectAccount: Mock<() => Promise<ManagedAccount | null>>;
+  getActiveAccount: Mock<() => ManagedAccount | null>;
+  refresh: Mock<() => Promise<void>>;
+  markSuccess: Mock<(uuid: string) => Promise<void>>;
+  markRateLimited: Mock<() => Promise<void>>;
+  markAuthFailure: Mock<() => Promise<void>>;
+  markRevoked: Mock<() => Promise<void>>;
+  hasAnyUsableAccount: Mock<() => boolean>;
+  getMinWaitTime: Mock<() => number>;
+  applyUsageCache: Mock<() => Promise<void>>;
+};
 
 function createMockManager(accounts: ManagedAccount[] = [createAccount()]): MockAccountManager {
   let selectIndex = 0;
@@ -67,12 +68,12 @@ function createMockManager(accounts: ManagedAccount[] = [createAccount()]): Mock
   };
 }
 
-interface MockRuntimeFactory {
-  getRuntime: Mock;
-  invalidate: Mock;
-}
+type MockRuntimeFactory = ExecutorRuntimeFactory & {
+  getRuntime: Mock<(uuid: string) => Promise<{ fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> }>>;
+  invalidate: Mock<(uuid: string) => void>;
+};
 
-function createMockRuntimeFactory(fetchFn: typeof fetch): MockRuntimeFactory {
+function createMockRuntimeFactory(fetchFn: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>): MockRuntimeFactory {
   return {
     getRuntime: vi.fn(() => Promise.resolve({ fetch: fetchFn })),
     invalidate: vi.fn(() => {}),
@@ -105,8 +106,8 @@ describe("executeWithAccountRotation", () => {
       const factory = createMockRuntimeFactory(fetchFn);
 
       const response = await executeWithAccountRotation(
-        manager as any,
-        factory as any,
+        manager,
+        factory,
         client,
         "https://api.example.com/v1/chat",
       );
@@ -123,8 +124,8 @@ describe("executeWithAccountRotation", () => {
       const factory = createMockRuntimeFactory(fetchFn);
 
       await executeWithAccountRotation(
-        manager as any,
-        factory as any,
+        manager,
+        factory,
         client,
         "https://api.example.com/v1/chat",
       );
@@ -155,8 +156,8 @@ describe("executeWithAccountRotation", () => {
       const factory = createMockRuntimeFactory(fetchFn);
 
       const response = await executeWithAccountRotation(
-        manager as any,
-        factory as any,
+        manager,
+        factory,
         client,
         "https://api.example.com/v1/chat",
       );
@@ -187,8 +188,8 @@ describe("executeWithAccountRotation", () => {
       const factory = createMockRuntimeFactory(fetchFn);
 
       const response = await executeWithAccountRotation(
-        manager as any,
-        factory as any,
+        manager,
+        factory,
         client,
         "https://api.example.com/v1/chat",
       );
@@ -217,8 +218,8 @@ describe("executeWithAccountRotation", () => {
       const factory = createMockRuntimeFactory(fetchFn);
 
       const response = await executeWithAccountRotation(
-        manager as any,
-        factory as any,
+        manager,
+        factory,
         client,
         "https://api.example.com/v1/chat",
       );
@@ -243,8 +244,8 @@ describe("executeWithAccountRotation", () => {
 
       await expect(
         executeWithAccountRotation(
-          manager as any,
-          factory as any,
+          manager,
+          factory,
           client,
           "https://api.example.com/v1/chat",
         ),
@@ -277,8 +278,8 @@ describe("executeWithAccountRotation", () => {
       const factory = createMockRuntimeFactory(fetchFn);
 
       const response = await executeWithAccountRotation(
-        manager as any,
-        factory as any,
+        manager,
+        factory,
         client,
         "https://api.example.com/v1/chat",
       );
@@ -303,8 +304,8 @@ describe("executeWithAccountRotation", () => {
       const factory = createMockRuntimeFactory(fetchFn);
 
       const response = await executeWithAccountRotation(
-        manager as any,
-        factory as any,
+        manager,
+        factory,
         client,
         "https://api.example.com/v1/chat",
       );
@@ -336,8 +337,8 @@ describe("executeWithAccountRotation", () => {
       const factory = createMockRuntimeFactory(fetchFn);
 
       const response = await executeWithAccountRotation(
-        manager as any,
-        factory as any,
+        manager,
+        factory,
         client,
         "https://api.example.com/v1/chat",
       );
@@ -363,8 +364,8 @@ describe("executeWithAccountRotation", () => {
       const factory = createMockRuntimeFactory(fetchFn);
 
       const response = await executeWithAccountRotation(
-        manager as any,
-        factory as any,
+        manager,
+        factory,
         client,
         "https://api.example.com/v1/chat",
       );
@@ -393,8 +394,8 @@ describe("executeWithAccountRotation", () => {
 
       await expect(
         executeWithAccountRotation(
-          manager as any,
-          factory as any,
+          manager,
+          factory,
           client,
           "https://api.example.com/v1/chat",
         ),
@@ -424,8 +425,8 @@ describe("executeWithAccountRotation", () => {
       const factory = createMockRuntimeFactory(fetchFn);
 
       const response = await executeWithAccountRotation(
-        manager as any,
-        factory as any,
+        manager,
+        factory,
         client,
         "https://api.example.com/v1/chat",
       );
@@ -445,8 +446,8 @@ describe("executeWithAccountRotation", () => {
 
       await expect(
         executeWithAccountRotation(
-          manager as any,
-          factory as any,
+          manager,
+          factory,
           client,
           "https://api.example.com/v1/chat",
         ),
@@ -467,7 +468,12 @@ describe("executeWithAccountRotation", () => {
         getRuntime: vi.fn(() => {
           callCount++;
           if (callCount === 1) {
-            return Promise.reject(new Error("Token refresh failed: 401"));
+            const tokenRefreshError = Object.assign(new Error("Token refresh failed: 401"), {
+              name: "TokenRefreshError",
+              permanent: true,
+              status: 401,
+            });
+            return Promise.reject(tokenRefreshError);
           }
           return Promise.resolve({
             fetch: vi.fn(() => Promise.resolve(jsonResponse({ ok: true }))),
@@ -477,8 +483,8 @@ describe("executeWithAccountRotation", () => {
       };
 
       const response = await executeWithAccountRotation(
-        manager as any,
-        factory as any,
+        manager,
+        factory,
         client,
         "https://api.example.com/v1/chat",
       );
@@ -504,8 +510,8 @@ describe("executeWithAccountRotation", () => {
       const factory = createMockRuntimeFactory(fetchFn);
 
       const response = await executeWithAccountRotation(
-        manager as any,
-        factory as any,
+        manager,
+        factory,
         client,
         "https://api.example.com/v1/chat",
       );
@@ -532,8 +538,8 @@ describe("executeWithAccountRotation", () => {
       };
 
       await executeWithAccountRotation(
-        manager as any,
-        factory as any,
+        manager,
+        factory,
         client,
         "https://api.example.com/v1/chat",
         requestInit,

@@ -1,10 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from "bun:test";
-import {
-  ANTHROPIC_OAUTH_ADAPTER,
-  ANTHROPIC_CLIENT_ID,
-  ANTHROPIC_TOKEN_ENDPOINT,
-  TOKEN_EXPIRY_BUFFER_MS,
-} from "../src/constants";
+import { ANTHROPIC_OAUTH_ADAPTER, TOKEN_EXPIRY_BUFFER_MS } from "../src/constants";
+import * as piAiAdapter from "../src/pi-ai-adapter";
+import type { CredentialRefreshPatch } from "../src/types";
 import { clearRefreshMutex, isTokenExpired, refreshToken } from "../src/token";
 import { createMockClient } from "../tests/helpers";
 
@@ -18,19 +15,15 @@ function createDeferred<T>() {
   return { promise, resolve, reject };
 }
 
-function createTokenResponse(body: Record<string, unknown>, status = 200): Response {
-  return new Response(JSON.stringify(body), { status });
-}
-
 describe("token", () => {
-  let originalFetch: typeof globalThis.fetch;
+  let refreshWithPiAiSpy: ReturnType<typeof vi.spyOn<typeof piAiAdapter, "refreshWithPiAi">>;
 
   beforeEach(() => {
-    originalFetch = globalThis.fetch;
+    refreshWithPiAiSpy = vi.spyOn(piAiAdapter, "refreshWithPiAi");
   });
 
   afterEach(() => {
-    globalThis.fetch = originalFetch;
+    refreshWithPiAiSpy.mockRestore();
     clearRefreshMutex();
   });
 
@@ -73,67 +66,35 @@ describe("token", () => {
   });
 
   describe("refreshToken success", () => {
-    test("calls fetch with expected request and returns full patch", async () => {
+    test("calls refreshWithPiAi and returns patch", async () => {
       const client = createMockClient();
-      const mockFetch = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) =>
-        Promise.resolve(
-          createTokenResponse({
-            access_token: "new-access",
-            refresh_token: "new-refresh",
-            expires_in: 3600,
-            account: {
-              uuid: "user-uuid",
-              email_address: "user@example.com",
-            },
-          }),
-        ),
-      );
-      globalThis.fetch = mockFetch;
-
-      const beforeRefresh = Date.now();
-      const result = await refreshToken("old-refresh", "account-1", client);
-      const afterRefresh = Date.now();
-
-      expect(mockFetch.mock.calls.length).toBe(1);
-      const [url, init] = mockFetch.mock.calls[0] ?? [];
-      expect(url).toBe(ANTHROPIC_TOKEN_ENDPOINT);
-      expect(init?.method).toBe("POST");
-      expect(init?.headers).toEqual({ "Content-Type": "application/json" });
-      const body = JSON.parse(String(init?.body)) as {
-        grant_type: string;
-        refresh_token: string;
-        client_id: string;
+      const patch: CredentialRefreshPatch = {
+        accessToken: "new-access",
+        refreshToken: "new-refresh",
+        expiresAt: Date.now() + 3_600_000,
+        uuid: "user-uuid",
+        email: "user@example.com",
       };
-      expect(body).toEqual({
-        grant_type: "refresh_token",
-        refresh_token: "old-refresh",
-        client_id: ANTHROPIC_CLIENT_ID,
-      });
+      refreshWithPiAiSpy.mockResolvedValue(patch);
 
+      const result = await refreshToken("old-refresh", "account-1", client);
+
+      expect(refreshWithPiAiSpy).toHaveBeenCalledTimes(1);
+      expect(refreshWithPiAiSpy).toHaveBeenCalledWith("old-refresh");
       expect(result.ok).toBe(true);
       if (!result.ok) {
         throw new Error("Expected successful refresh result");
       }
-
-      expect(result.patch.accessToken).toBe("new-access");
-      expect(result.patch.refreshToken).toBe("new-refresh");
-      expect(result.patch.uuid).toBe("user-uuid");
-      expect(result.patch.email).toBe("user@example.com");
-      expect(result.patch.expiresAt).toBeGreaterThanOrEqual(beforeRefresh + 3_600_000);
-      expect(result.patch.expiresAt).toBeLessThanOrEqual(afterRefresh + 3_600_000);
+      expect(result.patch).toEqual(patch);
+      expect(client.logs.length).toBe(0);
     });
 
-    test("handles response without optional fields", async () => {
+    test("handles minimal patch response", async () => {
       const client = createMockClient();
-      const mockFetch = vi.fn(() =>
-        Promise.resolve(
-          createTokenResponse({
-            access_token: "new-access",
-            expires_in: 3600,
-          }),
-        ),
-      );
-      globalThis.fetch = mockFetch;
+      refreshWithPiAiSpy.mockResolvedValue({
+        accessToken: "new-access",
+        expiresAt: Date.now() + 3_600_000,
+      });
 
       const result = await refreshToken("old-refresh", "account-1", client);
 
@@ -143,9 +104,8 @@ describe("token", () => {
       }
 
       expect(result.patch.accessToken).toBe("new-access");
+      expect(result.patch.expiresAt).toBeGreaterThan(Date.now());
       expect(result.patch.refreshToken).toBeUndefined();
-      expect(result.patch.uuid).toBeUndefined();
-      expect(result.patch.email).toBeUndefined();
     });
   });
 
@@ -155,8 +115,8 @@ describe("token", () => {
 
       for (const status of permanentStatuses) {
         const client = createMockClient();
-        const mockFetch = vi.fn(() => Promise.resolve(new Response("", { status })));
-        globalThis.fetch = mockFetch;
+        refreshWithPiAiSpy.mockReset();
+        refreshWithPiAiSpy.mockRejectedValue(new Error(`Token refresh failed: ${status}`));
 
         const result = await refreshToken("old-refresh", `account-${status}`, client);
 
@@ -164,17 +124,17 @@ describe("token", () => {
         expect(client.logs.length).toBe(1);
         expect(client.logs[0]?.service).toBe(ANTHROPIC_OAUTH_ADAPTER.serviceLogName);
         expect(client.logs[0]?.level).toBe("error");
-        expect(client.logs[0]?.message.includes(`Token refresh failed: ${status}`)).toBe(true);
+        expect(client.logs[0]?.message.includes(`${status}`)).toBe(true);
       }
     });
 
-    test("returns transient failure and logs warn for 500/502/503", async () => {
+    test("returns transient failure and logs warn for non-permanent statuses", async () => {
       const transientStatuses = [500, 502, 503];
 
       for (const status of transientStatuses) {
         const client = createMockClient();
-        const mockFetch = vi.fn(() => Promise.resolve(new Response("", { status })));
-        globalThis.fetch = mockFetch;
+        refreshWithPiAiSpy.mockReset();
+        refreshWithPiAiSpy.mockRejectedValue(new Error(`Token refresh failed: ${status}`));
 
         const result = await refreshToken("old-refresh", `account-${status}`, client);
 
@@ -182,14 +142,13 @@ describe("token", () => {
         expect(client.logs.length).toBe(1);
         expect(client.logs[0]?.service).toBe(ANTHROPIC_OAUTH_ADAPTER.serviceLogName);
         expect(client.logs[0]?.level).toBe("warn");
-        expect(client.logs[0]?.message.includes(`Token refresh failed: ${status}`)).toBe(true);
+        expect(client.logs[0]?.message.includes(`${status}`)).toBe(true);
       }
     });
 
-    test("returns transient failure when fetch throws", async () => {
+    test("returns transient failure when refreshWithPiAi throws network-like error", async () => {
       const client = createMockClient();
-      const mockFetch = vi.fn(() => Promise.reject(new Error("network error")));
-      globalThis.fetch = mockFetch;
+      refreshWithPiAiSpy.mockRejectedValue(new Error("network error"));
 
       const result = await refreshToken("old-refresh", "account-network-error", client);
 
@@ -203,20 +162,17 @@ describe("token", () => {
   describe("refreshToken Promise dedup", () => {
     test("deduplicates concurrent refreshes for same accountId", async () => {
       const client = createMockClient();
-      const deferred = createDeferred<Response>();
-      const mockFetch = vi.fn(() => deferred.promise);
-      globalThis.fetch = mockFetch;
+      const deferred = createDeferred<CredentialRefreshPatch>();
+      refreshWithPiAiSpy.mockImplementation(() => deferred.promise);
 
       const firstCall = refreshToken("old-refresh", "same-account", client);
       const secondCall = refreshToken("old-refresh", "same-account", client);
 
-      expect(mockFetch.mock.calls.length).toBe(1);
-      deferred.resolve(
-        createTokenResponse({
-          access_token: "new-access",
-          expires_in: 3600,
-        }),
-      );
+      expect(refreshWithPiAiSpy).toHaveBeenCalledTimes(1);
+      deferred.resolve({
+        accessToken: "new-access",
+        expiresAt: Date.now() + 3_600_000,
+      });
 
       const [firstResult, secondResult] = await Promise.all([firstCall, secondCall]);
 
@@ -224,57 +180,41 @@ describe("token", () => {
       expect(firstResult).toEqual(secondResult);
     });
 
-    test("makes a new fetch after prior refresh completes", async () => {
+    test("makes a new refresh call after prior refresh completes", async () => {
       const client = createMockClient();
-      const mockFetch = vi.fn(() =>
-        Promise.resolve(
-          createTokenResponse({
-            access_token: "new-access",
-            expires_in: 3600,
-          }),
-        ),
-      );
-      globalThis.fetch = mockFetch;
+      refreshWithPiAiSpy.mockResolvedValue({
+        accessToken: "new-access",
+        expiresAt: Date.now() + 3_600_000,
+      });
 
       const firstCall = refreshToken("old-refresh", "same-account", client);
       const secondCall = refreshToken("old-refresh", "same-account", client);
       await Promise.all([firstCall, secondCall]);
 
-      expect(mockFetch.mock.calls.length).toBe(1);
+      expect(refreshWithPiAiSpy).toHaveBeenCalledTimes(1);
 
       await refreshToken("old-refresh", "same-account", client);
 
-      expect(mockFetch.mock.calls.length).toBe(2);
+      expect(refreshWithPiAiSpy).toHaveBeenCalledTimes(2);
     });
 
     test("does not deduplicate concurrent refreshes for different accountIds", async () => {
       const client = createMockClient();
-      const deferredA = createDeferred<Response>();
-      const deferredB = createDeferred<Response>();
+      const deferredA = createDeferred<CredentialRefreshPatch>();
+      const deferredB = createDeferred<CredentialRefreshPatch>();
       let callIndex = 0;
-      const mockFetch = vi.fn(() => {
+      refreshWithPiAiSpy.mockImplementation(() => {
         callIndex += 1;
         return callIndex === 1 ? deferredA.promise : deferredB.promise;
       });
-      globalThis.fetch = mockFetch;
 
       const callA = refreshToken("old-refresh-a", "account-a", client);
       const callB = refreshToken("old-refresh-b", "account-b", client);
 
-      expect(mockFetch.mock.calls.length).toBe(2);
+      expect(refreshWithPiAiSpy).toHaveBeenCalledTimes(2);
 
-      deferredA.resolve(
-        createTokenResponse({
-          access_token: "token-a",
-          expires_in: 3600,
-        }),
-      );
-      deferredB.resolve(
-        createTokenResponse({
-          access_token: "token-b",
-          expires_in: 3600,
-        }),
-      );
+      deferredA.resolve({ accessToken: "token-a", expiresAt: Date.now() + 3_600_000 });
+      deferredB.resolve({ accessToken: "token-b", expiresAt: Date.now() + 3_600_000 });
 
       const [resultA, resultB] = await Promise.all([callA, callB]);
 
@@ -291,35 +231,38 @@ describe("token", () => {
   describe("clearRefreshMutex", () => {
     test("clears specific accountId mutex only", async () => {
       const client = createMockClient();
-      const deferreds = [createDeferred<Response>(), createDeferred<Response>(), createDeferred<Response>()];
+      const deferreds = [
+        createDeferred<CredentialRefreshPatch>(),
+        createDeferred<CredentialRefreshPatch>(),
+        createDeferred<CredentialRefreshPatch>(),
+      ];
       let callIndex = 0;
-      const mockFetch = vi.fn(() => {
+      refreshWithPiAiSpy.mockImplementation(() => {
         const deferred = deferreds[callIndex];
         callIndex += 1;
         if (!deferred) {
-          throw new Error("Unexpected fetch call");
+          throw new Error("Unexpected refresh call");
         }
         return deferred.promise;
       });
-      globalThis.fetch = mockFetch;
 
       const firstA = refreshToken("refresh-a", "account-a", client);
       const firstB = refreshToken("refresh-b", "account-b", client);
       const dedupA = refreshToken("refresh-a", "account-a", client);
       const dedupB = refreshToken("refresh-b", "account-b", client);
 
-      expect(mockFetch.mock.calls.length).toBe(2);
+      expect(refreshWithPiAiSpy).toHaveBeenCalledTimes(2);
 
       clearRefreshMutex("account-a");
 
       const secondA = refreshToken("refresh-a", "account-a", client);
       const stillDedupB = refreshToken("refresh-b", "account-b", client);
 
-      expect(mockFetch.mock.calls.length).toBe(3);
+      expect(refreshWithPiAiSpy).toHaveBeenCalledTimes(3);
 
-      deferreds[0]?.resolve(createTokenResponse({ access_token: "token-a-1", expires_in: 3600 }));
-      deferreds[1]?.resolve(createTokenResponse({ access_token: "token-b-1", expires_in: 3600 }));
-      deferreds[2]?.resolve(createTokenResponse({ access_token: "token-a-2", expires_in: 3600 }));
+      deferreds[0]?.resolve({ accessToken: "token-a-1", expiresAt: Date.now() + 3_600_000 });
+      deferreds[1]?.resolve({ accessToken: "token-b-1", expiresAt: Date.now() + 3_600_000 });
+      deferreds[2]?.resolve({ accessToken: "token-a-2", expiresAt: Date.now() + 3_600_000 });
 
       const [resultA1, resultADedup, resultB1, resultBDedup, resultA2, resultBStillDedup] = await Promise.all([
         firstA,
@@ -351,38 +294,37 @@ describe("token", () => {
     test("clears all mutexes when accountId is omitted", async () => {
       const client = createMockClient();
       const deferreds = [
-        createDeferred<Response>(),
-        createDeferred<Response>(),
-        createDeferred<Response>(),
-        createDeferred<Response>(),
+        createDeferred<CredentialRefreshPatch>(),
+        createDeferred<CredentialRefreshPatch>(),
+        createDeferred<CredentialRefreshPatch>(),
+        createDeferred<CredentialRefreshPatch>(),
       ];
       let callIndex = 0;
-      const mockFetch = vi.fn(() => {
+      refreshWithPiAiSpy.mockImplementation(() => {
         const deferred = deferreds[callIndex];
         callIndex += 1;
         if (!deferred) {
-          throw new Error("Unexpected fetch call");
+          throw new Error("Unexpected refresh call");
         }
         return deferred.promise;
       });
-      globalThis.fetch = mockFetch;
 
       const firstA = refreshToken("refresh-a", "account-a", client);
       const firstB = refreshToken("refresh-b", "account-b", client);
 
-      expect(mockFetch.mock.calls.length).toBe(2);
+      expect(refreshWithPiAiSpy).toHaveBeenCalledTimes(2);
 
       clearRefreshMutex();
 
       const secondA = refreshToken("refresh-a", "account-a", client);
       const secondB = refreshToken("refresh-b", "account-b", client);
 
-      expect(mockFetch.mock.calls.length).toBe(4);
+      expect(refreshWithPiAiSpy).toHaveBeenCalledTimes(4);
 
-      deferreds[0]?.resolve(createTokenResponse({ access_token: "token-a-1", expires_in: 3600 }));
-      deferreds[1]?.resolve(createTokenResponse({ access_token: "token-b-1", expires_in: 3600 }));
-      deferreds[2]?.resolve(createTokenResponse({ access_token: "token-a-2", expires_in: 3600 }));
-      deferreds[3]?.resolve(createTokenResponse({ access_token: "token-b-2", expires_in: 3600 }));
+      deferreds[0]?.resolve({ accessToken: "token-a-1", expiresAt: Date.now() + 3_600_000 });
+      deferreds[1]?.resolve({ accessToken: "token-b-1", expiresAt: Date.now() + 3_600_000 });
+      deferreds[2]?.resolve({ accessToken: "token-a-2", expiresAt: Date.now() + 3_600_000 });
+      deferreds[3]?.resolve({ accessToken: "token-b-2", expiresAt: Date.now() + 3_600_000 });
 
       const [resultA1, resultB1, resultA2, resultB2] = await Promise.all([firstA, firstB, secondA, secondB]);
 

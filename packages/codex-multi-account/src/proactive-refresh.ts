@@ -4,6 +4,7 @@ import { isTokenExpired, refreshToken } from "./token";
 import { debugLog } from "./utils";
 
 export const ProactiveRefreshQueue = createProactiveRefreshQueueForProvider({
+  providerAuthId: "openai",
   getConfig,
   isTokenExpired,
   refreshToken,

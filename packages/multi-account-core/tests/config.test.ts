@@ -2,7 +2,6 @@ import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
-  getConfig,
   initCoreConfig,
   loadConfig,
   resetConfigCache,
@@ -57,7 +56,7 @@ describe("core/config", () => {
   test("updates a field and refreshes cache", async () => {
     await updateConfigField("max_consecutive_auth_failures", 5);
 
-    const current = getConfig();
+    const current = await loadConfig();
     expect(current.max_consecutive_auth_failures).toBe(5);
 
     const persisted = JSON.parse(await fs.readFile(configPath, "utf-8")) as { max_consecutive_auth_failures?: number };

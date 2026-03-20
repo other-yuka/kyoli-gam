@@ -1,7 +1,8 @@
-import { describe, test, expect, beforeEach, vi, type Mock } from "bun:test";
+import { describe, test, expect, beforeEach, vi } from "bun:test";
 import { executeWithAccountRotation } from "../src/executor";
 import { createMockClient } from "./helpers";
 import type { ManagedAccount, PluginClient } from "../src/types";
+import type { ExecutorAccountManager, ExecutorRuntimeFactory } from "opencode-multi-account-core";
 
 function createAccount(overrides: Partial<ManagedAccount> = {}): ManagedAccount {
   return {
@@ -27,19 +28,19 @@ function createSecondAccount(): ManagedAccount {
   });
 }
 
-interface MockAccountManager {
-  getAccountCount: Mock;
-  selectAccount: Mock;
-  getActiveAccount: Mock;
-  refresh: Mock;
-  markSuccess: Mock;
-  markRateLimited: Mock;
-  markAuthFailure: Mock;
-  markRevoked: Mock;
-  hasAnyUsableAccount: Mock;
-  getMinWaitTime: Mock;
-  applyUsageCache: Mock;
-}
+type MockAccountManager = ExecutorAccountManager & {
+  getAccountCount: ReturnType<typeof vi.fn>;
+  selectAccount: ReturnType<typeof vi.fn>;
+  getActiveAccount: ReturnType<typeof vi.fn>;
+  refresh: ReturnType<typeof vi.fn>;
+  markSuccess: ReturnType<typeof vi.fn>;
+  markRateLimited: ReturnType<typeof vi.fn>;
+  markAuthFailure: ReturnType<typeof vi.fn>;
+  markRevoked: ReturnType<typeof vi.fn>;
+  hasAnyUsableAccount: ReturnType<typeof vi.fn>;
+  getMinWaitTime: ReturnType<typeof vi.fn>;
+  applyUsageCache: ReturnType<typeof vi.fn>;
+};
 
 function createMockManager(accounts: ManagedAccount[] = [createAccount()]): MockAccountManager {
   let selectIndex = 0;
@@ -63,12 +64,14 @@ function createMockManager(accounts: ManagedAccount[] = [createAccount()]): Mock
   };
 }
 
-interface MockRuntimeFactory {
-  getRuntime: Mock;
-  invalidate: Mock;
-}
+type MockRuntimeFactory = ExecutorRuntimeFactory & {
+  getRuntime: ReturnType<typeof vi.fn>;
+  invalidate: ReturnType<typeof vi.fn>;
+};
 
-function createMockRuntimeFactory(fetchFn: typeof fetch): MockRuntimeFactory {
+function createMockRuntimeFactory(
+  fetchFn: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>,
+): MockRuntimeFactory {
   return {
     getRuntime: vi.fn(() => Promise.resolve({ fetch: fetchFn })),
     invalidate: vi.fn(() => {}),
@@ -96,8 +99,8 @@ describe("executeWithAccountRotation", () => {
     const factory = createMockRuntimeFactory(fetchFn);
 
     const response = await executeWithAccountRotation(
-      manager as any,
-      factory as any,
+      manager,
+      factory,
       client,
       "https://api.example.com/v1/chat",
     );
@@ -123,7 +126,7 @@ describe("executeWithAccountRotation", () => {
     });
 
     const factory = createMockRuntimeFactory(fetchFn);
-    const response = await executeWithAccountRotation(manager as any, factory as any, client, "https://api.example.com/v1/chat");
+    const response = await executeWithAccountRotation(manager, factory, client, "https://api.example.com/v1/chat");
 
     expect(response.status).toBe(200);
     expect(manager.markRateLimited).toHaveBeenCalled();
@@ -144,7 +147,7 @@ describe("executeWithAccountRotation", () => {
     });
 
     const factory = createMockRuntimeFactory(fetchFn);
-    const response = await executeWithAccountRotation(manager as any, factory as any, client, "https://api.example.com/v1/chat");
+    const response = await executeWithAccountRotation(manager, factory, client, "https://api.example.com/v1/chat");
 
     expect(response.status).toBe(200);
     expect(factory.invalidate).toHaveBeenCalledWith("acct-1");
@@ -160,7 +163,7 @@ describe("executeWithAccountRotation", () => {
     manager.hasAnyUsableAccount = vi.fn(() => false);
 
     await expect(
-      executeWithAccountRotation(manager as any, factory as any, client, "https://api.example.com/v1/chat"),
+      executeWithAccountRotation(manager, factory, client, "https://api.example.com/v1/chat"),
     ).rejects.toThrow("All Anthropic accounts have authentication failures");
   });
 
@@ -184,10 +187,37 @@ describe("executeWithAccountRotation", () => {
     });
 
     const factory = createMockRuntimeFactory(fetchFn);
-    const response = await executeWithAccountRotation(manager as any, factory as any, client, "https://api.example.com/v1/chat");
+    const response = await executeWithAccountRotation(manager, factory, client, "https://api.example.com/v1/chat");
 
     expect(response.status).toBe(200);
     expect(manager.markRevoked).toHaveBeenCalledWith("acct-1");
+  });
+
+  test("clears OpenCode auth when all accounts are revoked or disabled", async () => {
+    const account = createAccount();
+    const manager = createMockManager([account]);
+    manager.hasAnyUsableAccount = vi.fn(() => false);
+
+    const authSetSpy = vi.spyOn(client.auth, "set").mockResolvedValue();
+    const fetchFn = vi.fn(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ error: "token has been revoked" }), {
+          status: 403,
+          headers: { "content-type": "application/json" },
+        }),
+      ));
+
+    const factory = createMockRuntimeFactory(fetchFn);
+
+    await expect(
+      executeWithAccountRotation(manager, factory, client, "https://api.example.com/v1/chat"),
+    ).rejects.toThrow("All Anthropic accounts have been revoked or disabled");
+
+    expect(authSetSpy).toHaveBeenCalledWith({
+      path: { id: "anthropic" },
+      body: { type: "oauth", refresh: "", access: "", expires: 0 },
+    });
+    authSetSpy.mockRestore();
   });
 
   test("on non-revoked 403 returns response as-is", async () => {
@@ -203,7 +233,7 @@ describe("executeWithAccountRotation", () => {
       ));
 
     const factory = createMockRuntimeFactory(fetchFn);
-    const response = await executeWithAccountRotation(manager as any, factory as any, client, "https://api.example.com/v1/chat");
+    const response = await executeWithAccountRotation(manager, factory, client, "https://api.example.com/v1/chat");
 
     expect(response.status).toBe(403);
     expect(manager.markRevoked).not.toHaveBeenCalled();
@@ -224,7 +254,7 @@ describe("executeWithAccountRotation", () => {
     });
 
     const factory = createMockRuntimeFactory(fetchFn);
-    const response = await executeWithAccountRotation(manager as any, factory as any, client, "https://api.example.com/v1/chat");
+    const response = await executeWithAccountRotation(manager, factory, client, "https://api.example.com/v1/chat");
 
     expect(response.status).toBe(200);
     expect(fetchFn).toHaveBeenCalledTimes(3);
@@ -241,7 +271,7 @@ describe("executeWithAccountRotation", () => {
     const factory = createMockRuntimeFactory(fetchFn);
 
     await expect(
-      executeWithAccountRotation(manager as any, factory as any, client, "https://api.example.com/v1/chat"),
+      executeWithAccountRotation(manager, factory, client, "https://api.example.com/v1/chat"),
     ).rejects.toThrow(/Exhausted \d+ retries across all accounts/);
   });
 
@@ -261,7 +291,7 @@ describe("executeWithAccountRotation", () => {
     const fetchFn = vi.fn(() => Promise.resolve(jsonResponse({ ok: true })));
     const factory = createMockRuntimeFactory(fetchFn);
 
-    const response = await executeWithAccountRotation(manager as any, factory as any, client, "https://api.example.com/v1/chat");
+    const response = await executeWithAccountRotation(manager, factory, client, "https://api.example.com/v1/chat");
     expect(response.status).toBe(200);
     expect(selectCallCount).toBeGreaterThanOrEqual(2);
   });
@@ -276,7 +306,7 @@ describe("executeWithAccountRotation", () => {
     const factory = createMockRuntimeFactory(fetchFn);
 
     await expect(
-      executeWithAccountRotation(manager as any, factory as any, client, "https://api.example.com/v1/chat"),
+      executeWithAccountRotation(manager, factory, client, "https://api.example.com/v1/chat"),
     ).rejects.toThrow("All Anthropic accounts are disabled");
   });
 
@@ -290,7 +320,12 @@ describe("executeWithAccountRotation", () => {
       getRuntime: vi.fn(() => {
         callCount += 1;
         if (callCount === 1) {
-          return Promise.reject(new Error("Token refresh failed: 401"));
+          const tokenRefreshError = Object.assign(new Error("Token refresh failed: 401"), {
+            name: "TokenRefreshError",
+            permanent: true,
+            status: 401,
+          });
+          return Promise.reject(tokenRefreshError);
         }
         return Promise.resolve({
           fetch: vi.fn(() => Promise.resolve(jsonResponse({ ok: true }))),
@@ -299,7 +334,7 @@ describe("executeWithAccountRotation", () => {
       invalidate: vi.fn(() => {}),
     };
 
-    const response = await executeWithAccountRotation(manager as any, factory as any, client, "https://api.example.com/v1/chat");
+    const response = await executeWithAccountRotation(manager, factory, client, "https://api.example.com/v1/chat");
 
     expect(response.status).toBe(200);
     expect(factory.invalidate).toHaveBeenCalledWith("acct-1");
@@ -320,8 +355,8 @@ describe("executeWithAccountRotation", () => {
     };
 
     await executeWithAccountRotation(
-      manager as any,
-      factory as any,
+      manager,
+      factory,
       client,
       "https://api.example.com/v1/chat",
       requestInit,

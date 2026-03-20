@@ -102,6 +102,56 @@ describe("core/account-manager", () => {
     expect(authSetSpy).toHaveBeenCalledTimes(1);
   });
 
+  test("markAuthFailure removes account on permanent failure and clears provider auth when last", async () => {
+    const AccountManager = createAccountManagerForProvider({
+      providerAuthId: "anthropic",
+      isTokenExpired: () => false,
+      refreshToken: async () => ({ ok: false, permanent: true }),
+    });
+
+    const client = createMockClient() as PluginClient;
+    const authSetSpy = vi.spyOn(client.auth, "set");
+    const manager = await AccountManager.create(new AccountStore(), createAuth("seed"), client);
+    const active = manager.getActiveAccount();
+    if (!active?.uuid) {
+      throw new Error("Expected active account uuid");
+    }
+
+    await manager.markAuthFailure(active.uuid, { ok: false, permanent: true });
+    await manager.refresh();
+
+    expect(manager.getAccounts()).toHaveLength(0);
+    expect(authSetSpy).toHaveBeenCalledWith({
+      path: { id: "anthropic" },
+      body: { type: "oauth", refresh: "", access: "", expires: 0 },
+    });
+  });
+
+  test("markRevoked removes account and clears provider auth when last", async () => {
+    const AccountManager = createAccountManagerForProvider({
+      providerAuthId: "anthropic",
+      isTokenExpired: () => false,
+      refreshToken: async () => ({ ok: false, permanent: false }),
+    });
+
+    const client = createMockClient() as PluginClient;
+    const authSetSpy = vi.spyOn(client.auth, "set");
+    const manager = await AccountManager.create(new AccountStore(), createAuth("seed"), client);
+    const active = manager.getActiveAccount();
+    if (!active?.uuid) {
+      throw new Error("Expected active account uuid");
+    }
+
+    await manager.markRevoked(active.uuid);
+    await manager.refresh();
+
+    expect(manager.getAccounts()).toHaveLength(0);
+    expect(authSetSpy).toHaveBeenCalledWith({
+      path: { id: "anthropic" },
+      body: { type: "oauth", refresh: "", access: "", expires: 0 },
+    });
+  });
+
   test("applyUsageCache clears stale rateLimitResetAt when usage is no longer exhausted", async () => {
     const AccountManager = createAccountManagerForProvider({
       providerAuthId: "openai",

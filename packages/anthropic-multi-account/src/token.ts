@@ -1,20 +1,15 @@
 import {
   ANTHROPIC_OAUTH_ADAPTER,
-  ANTHROPIC_CLIENT_ID,
-  ANTHROPIC_TOKEN_ENDPOINT,
   TOKEN_EXPIRY_BUFFER_MS,
-  TOKEN_REFRESH_TIMEOUT_MS,
 } from "./constants";
-import * as v from "valibot";
-import {
-  TokenResponseSchema,
-  type ManagedAccount,
-  type PluginClient,
-  type CredentialRefreshPatch,
-  type TokenRefreshResult,
+import { refreshWithPiAi } from "./pi-ai-adapter";
+import type {
+  ManagedAccount,
+  PluginClient,
+  TokenRefreshResult,
 } from "./types";
 
-const PERMANENT_FAILURE_STATUSES = new Set([400, 401, 403]);
+const PERMANENT_FAILURE_HTTP_STATUSES = new Set([400, 401, 403]);
 const refreshMutexByAccountId = new Map<string, Promise<TokenRefreshResult>>();
 
 export function isTokenExpired(account: Pick<ManagedAccount, "accessToken" | "expiresAt">): boolean {
@@ -33,61 +28,28 @@ export async function refreshToken(
   if (inFlightRefresh) return inFlightRefresh;
 
   const refreshPromise = (async (): Promise<TokenRefreshResult> => {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), TOKEN_REFRESH_TIMEOUT_MS);
     try {
-      const startTime = Date.now();
-      const response = await fetch(ANTHROPIC_TOKEN_ENDPOINT, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          grant_type: "refresh_token",
-          refresh_token: currentRefreshToken,
-          client_id: ANTHROPIC_CLIENT_ID,
-        }),
-        signal: controller.signal,
-      });
-
-      if (!response.ok) {
-        const isPermanent = PERMANENT_FAILURE_STATUSES.has(response.status);
-        await client.app
-          .log({
-            body: {
-              service: ANTHROPIC_OAUTH_ADAPTER.serviceLogName,
-              level: isPermanent ? "error" : "warn",
-              message: `Token refresh failed: ${response.status}${isPermanent ? " (permanent)" : ""}`,
-              extra: { accountId },
-            },
-          })
-          .catch(() => {});
-        return { ok: false, permanent: isPermanent };
-      }
-
-      const json = v.parse(TokenResponseSchema, await response.json());
-
-      const patch: CredentialRefreshPatch = {
-        accessToken: json.access_token,
-        expiresAt: startTime + json.expires_in * 1000,
-        refreshToken: json.refresh_token,
-        uuid: json.account?.uuid,
-        email: json.account?.email_address,
-      };
-
+      const patch = await refreshWithPiAi(currentRefreshToken);
       return { ok: true, patch };
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const statusMatch = message.match(/\b(400|401|403)\b/);
+      const isPermanent = statusMatch !== null
+        && PERMANENT_FAILURE_HTTP_STATUSES.has(Number(statusMatch[1]));
+
       await client.app
         .log({
           body: {
             service: ANTHROPIC_OAUTH_ADAPTER.serviceLogName,
-            level: "warn",
-            message: `Token refresh network error: ${error instanceof Error ? error.message : String(error)}`,
+            level: isPermanent ? "error" : "warn",
+            message: `Token refresh failed: ${message}${isPermanent ? " (permanent)" : ""}`,
             extra: { accountId },
           },
         })
         .catch(() => {});
-      return { ok: false, permanent: false };
+
+      return { ok: false, permanent: isPermanent };
     } finally {
-      clearTimeout(timeout);
       refreshMutexByAccountId.delete(accountId);
     }
   })();

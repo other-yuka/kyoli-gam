@@ -102,7 +102,7 @@ describe("account-manager", () => {
     globalThis.fetch = vi.fn(() => Promise.resolve(new Response(
       JSON.stringify({ access_token: "test", expires_in: 3600 }),
       { status: 200 },
-    )));
+    ))) as unknown as typeof fetch;
   });
 
   afterEach(async () => {
@@ -327,8 +327,10 @@ describe("account-manager", () => {
       expect(savedAccount?.authDisabledReason).toBe("2 consecutive auth failures");
     });
 
-    test("permanent auth failure disables account regardless of usability", async () => {
-      const manager = await createManagerFromStorage(createTestStorage(1));
+    test("permanent auth failure removes account and clears Anthropic auth when last account", async () => {
+      const client = createMockClient();
+      const setSpy = vi.spyOn(client.auth, "set");
+      const manager = await createManagerFromStorage(createTestStorage(1), client);
       const account = manager.getAccounts()[0];
       if (!account?.uuid) {
         throw new Error("Expected account");
@@ -337,9 +339,11 @@ describe("account-manager", () => {
       await manager.markAuthFailure(account.uuid, { ok: false, permanent: true });
 
       const saved = await readStorage();
-      const savedAccount = saved.accounts.find((entry) => entry.uuid === account.uuid);
-      expect(savedAccount?.isAuthDisabled).toBe(true);
-      expect(savedAccount?.authDisabledReason).toBe("Token permanently rejected (400/401/403)");
+      expect(saved.accounts).toHaveLength(0);
+      expect(setSpy).toHaveBeenCalledWith({
+        path: { id: "anthropic" },
+        body: { type: "oauth", refresh: "", access: "", expires: 0 },
+      });
     });
   });
 

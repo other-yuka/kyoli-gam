@@ -16,6 +16,8 @@ export const openAIOAuthAdapter: OAuthAdapter = {
   oauthBetaHeader: "",
   requestBetaHeader: "",
   cliUserAgent: "opencode/1.1.53",
+  cliVersion: "",
+  billingSalt: "",
   toolPrefix: "mcp_",
   accountStorageFilename: "openai-multi-account-accounts.json",
   transform: {

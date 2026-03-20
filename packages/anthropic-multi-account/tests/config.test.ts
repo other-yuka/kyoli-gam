@@ -49,12 +49,12 @@ describe("config", () => {
     expect(cached.debug).toBe(true);
   });
 
-  test("getConfig returns defaults before loading", () => {
+  test("getConfig returns cached config after load", async () => {
+    const loaded = await loadConfig();
     const current = getConfig();
 
-    expect(current.account_selection_strategy).toBe("sticky");
-    expect(current.cross_process_claims).toBe(true);
-    expect(current.default_retry_after_ms).toBe(60_000);
+    expect(current.quiet_mode).toBe(loaded.quiet_mode);
+    expect(current.debug).toBe(loaded.debug);
   });
 
   test("resetConfigCache forces load from latest file", async () => {

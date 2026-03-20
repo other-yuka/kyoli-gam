@@ -100,7 +100,7 @@ describe("account-manager", () => {
     globalThis.fetch = vi.fn(() => Promise.resolve(new Response(
       JSON.stringify({ access_token: "test", expires_in: 3600 }),
       { status: 200 },
-    )));
+    ))) as unknown as typeof fetch;
   });
 
   afterEach(async () => {
@@ -242,6 +242,25 @@ describe("account-manager", () => {
     expect(savedAccount?.authDisabledReason).toBe("2 consecutive auth failures");
   });
 
+  test("markAuthFailure removes account on permanent failure and clears openai auth when last", async () => {
+    const client = createMockClient();
+    const setSpy = vi.spyOn(client.auth, "set");
+    const manager = await createManagerFromStorage(createTestStorage(1), client);
+    const account = manager.getAccounts()[0];
+    if (!account?.uuid) {
+      throw new Error("Expected account");
+    }
+
+    await manager.markAuthFailure(account.uuid, { ok: false, permanent: true });
+
+    const saved = await readStorage();
+    expect(saved.accounts).toHaveLength(0);
+    expect(setSpy).toHaveBeenCalledWith({
+      path: { id: "openai" },
+      body: { type: "oauth", refresh: "", access: "", expires: 0 },
+    });
+  });
+
   test("markRateLimited persists and getMinWaitTime follows earliest reset", async () => {
     const manager = await createManagerFromStorage(createTestStorage(2));
     const accounts = manager.getAccounts();
@@ -318,7 +337,7 @@ describe("account-manager", () => {
       access_token: "fresh-access",
       refresh_token: "fresh-refresh",
       expires_in: 3600,
-    }), { status: 200 })));
+    }), { status: 200 }))) as unknown as typeof fetch;
 
     const result = await manager.ensureValidToken(account.uuid, createMockClient());
     expect(result.ok).toBe(true);
