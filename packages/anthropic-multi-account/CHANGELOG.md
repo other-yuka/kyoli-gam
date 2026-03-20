@@ -1,5 +1,14 @@
 # opencode-anthropic-multi-account
 
+## 0.2.4
+
+### Patch Changes
+
+- [`b4eff3d`](https://github.com/other-yuka/kyoli-gam/commit/b4eff3d144199995a51764bf2549adbce94fb6b1) Thanks [@other-yuka](https://github.com/other-yuka)! - - Complete pi.ai auth flow internally and clean up revoked accounts
+  - Refactor executor retry logic: convert outer loop to bounded `for`, centralize response status dispatch, extract 5xx server retry helper, and fix 401 fresh-retry bug where non-401 responses bypassed normal status handling
+- Updated dependencies [[`b4eff3d`](https://github.com/other-yuka/kyoli-gam/commit/b4eff3d144199995a51764bf2549adbce94fb6b1)]:
+  - opencode-multi-account-core@0.2.4
+
 ## 0.2.3
 
 ### Patch Changes
