@@ -48,6 +48,11 @@ function createStore(accounts: StoredAccount[]): AccountStore {
       fn(account);
       return { ...account };
     },
+    removeAccount: async (uuid: string) => {
+      const initialLength = storage.accounts.length;
+      storage.accounts = storage.accounts.filter((entry) => entry.uuid !== uuid);
+      return storage.accounts.length !== initialLength;
+    },
   };
 
   return store as unknown as AccountStore;
@@ -71,6 +76,7 @@ describe("core/proactive-refresh", () => {
     globalThis.setTimeout = setTimeoutSpy as unknown as typeof setTimeout;
 
     const ProactiveRefreshQueue = createProactiveRefreshQueueForProvider({
+      providerAuthId: "openai",
       getConfig: () => createConfig({ proactive_refresh: false }),
       isTokenExpired: () => false,
       refreshToken: async () => ({ ok: false, permanent: false } as TokenRefreshResult),
@@ -92,6 +98,7 @@ describe("core/proactive-refresh", () => {
     globalThis.clearTimeout = clearTimeoutSpy as unknown as typeof clearTimeout;
 
     const ProactiveRefreshQueue = createProactiveRefreshQueueForProvider({
+      providerAuthId: "openai",
       getConfig: () => createConfig({ proactive_refresh: true }),
       isTokenExpired: () => false,
       refreshToken: async () => ({ ok: false, permanent: false } as TokenRefreshResult),
@@ -105,5 +112,67 @@ describe("core/proactive-refresh", () => {
 
     await queue.stop();
     expect(clearTimeoutSpy).toHaveBeenCalledWith(handle);
+  });
+
+  test("permanent proactive refresh failure removes account and clears provider auth", async () => {
+    let scheduledCallback: (() => void) | null = null;
+    globalThis.setTimeout = ((handler: TimerHandler) => {
+      if (typeof handler !== "function") {
+        throw new Error("Expected timeout function");
+      }
+      scheduledCallback = () => {
+        handler();
+      };
+      return 1 as unknown as ReturnType<typeof setTimeout>;
+    }) as unknown as typeof setTimeout;
+
+    const authSetSpy = vi.fn(async () => {});
+    const client: PluginClient = {
+      auth: { set: authSetSpy },
+      tui: { showToast: async () => {} },
+      app: { log: async () => {} },
+    };
+
+    const account: StoredAccount = {
+      uuid: "acct-1",
+      planTier: "",
+      refreshToken: "refresh-1",
+      accessToken: "access-1",
+      expiresAt: Date.now() + 60_000,
+      addedAt: Date.now(),
+      lastUsed: Date.now(),
+      enabled: true,
+      consecutiveAuthFailures: 0,
+      isAuthDisabled: false,
+    };
+
+    const store = createStore([account]);
+    const ProactiveRefreshQueue = createProactiveRefreshQueueForProvider({
+      providerAuthId: "anthropic",
+      getConfig: () => createConfig({ proactive_refresh: true }),
+      isTokenExpired: () => false,
+      refreshToken: async () => ({ ok: false, permanent: true } as TokenRefreshResult),
+      debugLog: () => {},
+    });
+
+    const queue = new ProactiveRefreshQueue(client, store);
+    queue.start();
+    if (!scheduledCallback) {
+      throw new Error("Expected scheduled callback");
+    }
+
+    const callback = scheduledCallback as () => void;
+    callback();
+    const inFlight = (queue as unknown as { inFlight: Promise<void> | null }).inFlight;
+    if (inFlight) {
+      await inFlight;
+    }
+
+    const persisted = await store.load();
+    expect(persisted.accounts).toHaveLength(0);
+    expect(authSetSpy).toHaveBeenCalledWith({
+      path: { id: "anthropic" },
+      body: { type: "oauth", refresh: "", access: "", expires: 0 },
+    });
   });
 });

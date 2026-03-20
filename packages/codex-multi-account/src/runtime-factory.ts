@@ -1,6 +1,7 @@
 import { AccountStore } from "./account-store";
 import { isTokenExpired, refreshToken } from "./token";
 import { buildRequestHeaders, transformRequestUrl } from "./request-transform";
+import { TokenRefreshError } from "opencode-multi-account-core";
 import type { PluginClient, StoredAccount } from "./types";
 import { debugLog } from "./utils";
 
@@ -61,10 +62,7 @@ export class AccountRuntimeFactory {
       if (!accessToken || !expiresAt || isTokenExpired({ accessToken, expiresAt })) {
         const refreshed = await refreshToken(storedAccount.refreshToken, uuid, this.client);
         if (!refreshed.ok) {
-          if (typeof refreshed.status === "number") {
-            throw new Error(`Token refresh failed: ${refreshed.status}`);
-          }
-          throw new Error("Token refresh failed");
+          throw new TokenRefreshError(refreshed.permanent, refreshed.status);
         }
 
         accessToken = refreshed.patch.accessToken;

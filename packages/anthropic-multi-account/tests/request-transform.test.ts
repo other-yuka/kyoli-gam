@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   buildRequestHeaders,
   createResponseStreamTransform,
+  getSystemPrompt,
   transformRequestBody,
   transformRequestUrl,
 } from "../src/request-transform";
@@ -28,6 +29,23 @@ async function readTransformedText(response: Response): Promise<string> {
   return new Response(transformed.body).text();
 }
 
+describe("getSystemPrompt", () => {
+  test("returns a non-empty string", () => {
+    const prompt = getSystemPrompt();
+    expect(typeof prompt).toBe("string");
+    expect(prompt.length).toBeGreaterThan(0);
+  });
+
+  test("starts with expected Claude Code CLI preamble", () => {
+    const prompt = getSystemPrompt();
+    expect(prompt.startsWith("You are an interactive CLI tool")).toBe(true);
+  });
+
+  test("returns the same value on repeated calls", () => {
+    expect(getSystemPrompt()).toBe(getSystemPrompt());
+  });
+});
+
 describe("buildRequestHeaders", () => {
   test("sets auth, merged beta, user-agent, removes x-api-key, and preserves init headers", () => {
     const headers = buildRequestHeaders(
@@ -47,6 +65,8 @@ describe("buildRequestHeaders", () => {
       `${ANTHROPIC_BETA_HEADER},custom-beta`,
     );
     expect(headers.get("user-agent")).toBe(CLAUDE_CLI_USER_AGENT);
+    expect(headers.get("anthropic-dangerous-direct-browser-access")).toBe("true");
+    expect(headers.get("x-app")).toBe("cli");
     expect(headers.get("x-api-key")).toBe(null);
     expect(headers.get("x-custom-header")).toBe("custom-value");
   });

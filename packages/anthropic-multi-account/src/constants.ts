@@ -3,7 +3,6 @@ import { anthropicOAuthAdapter } from "opencode-multi-account-core";
 /** Anthropic OAuth adapter config */
 export const ANTHROPIC_OAUTH_ADAPTER = anthropicOAuthAdapter;
 
-/** Anthropic OAuth Client ID (same as builtin opencode-anthropic-auth) */
 export const ANTHROPIC_CLIENT_ID = ANTHROPIC_OAUTH_ADAPTER.oauthClientId;
 
 /** Token exchange / refresh endpoint */

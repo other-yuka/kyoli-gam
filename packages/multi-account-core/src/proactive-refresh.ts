@@ -1,9 +1,11 @@
 import { AccountStore } from "./account-store";
 import type { PluginClient, PluginConfig, StoredAccount, TokenRefreshResult } from "./types";
+import { getClearedOAuthBody } from "./utils";
 
 const INITIAL_DELAY_MS = 5_000;
 
 export interface ProactiveRefreshDependencies {
+  providerAuthId: string;
   getConfig: () => PluginConfig;
   refreshToken: (
     currentRefreshToken: string,
@@ -29,6 +31,7 @@ export interface ProactiveRefreshQueueClass {
 
 export function createProactiveRefreshQueueForProvider(dependencies: ProactiveRefreshDependencies): ProactiveRefreshQueueClass {
   const {
+    providerAuthId,
     getConfig,
     refreshToken,
     isTokenExpired,
@@ -51,6 +54,10 @@ export function createProactiveRefreshQueueForProvider(dependencies: ProactiveRe
       if (!config.proactive_refresh) return;
 
       this.runToken++;
+      if (this.timeoutHandle) {
+        clearTimeout(this.timeoutHandle);
+        this.timeoutHandle = null;
+      }
       this.scheduleNext(this.runToken, INITIAL_DELAY_MS);
 
       debugLog(this.client, "Proactive refresh started", {
@@ -140,22 +147,48 @@ export function createProactiveRefreshQueueForProvider(dependencies: ProactiveRe
 
     private async persistFailure(account: StoredAccount, permanent: boolean): Promise<void> {
       try {
-        await this.store.mutateAccount(account.uuid!, (target) => {
-          if (permanent) {
+        const accountUuid = account.uuid;
+        if (!accountUuid) return;
+
+        if (permanent) {
+          const removed = await this.store.removeAccount(accountUuid);
+          if (!removed) return;
+
+          this.onInvalidate?.(accountUuid);
+          await this.clearOpenCodeAuthIfNoAccountsRemain();
+          return;
+        }
+
+        await this.store.mutateStorage((storage) => {
+          const target = storage.accounts.find((entry) => entry.uuid === accountUuid);
+          if (!target) return;
+
+          target.consecutiveAuthFailures = (target.consecutiveAuthFailures ?? 0) + 1;
+          const maxFailures = getConfig().max_consecutive_auth_failures;
+          const usableCount = storage.accounts.filter(
+            (entry) => entry.enabled && !entry.isAuthDisabled && entry.uuid !== accountUuid,
+          ).length;
+
+          if (target.consecutiveAuthFailures >= maxFailures && usableCount > 0) {
             target.isAuthDisabled = true;
-            target.authDisabledReason = "Token permanently rejected (proactive refresh)";
-          } else {
-            target.consecutiveAuthFailures = (target.consecutiveAuthFailures ?? 0) + 1;
-            const maxFailures = getConfig().max_consecutive_auth_failures;
-            if (target.consecutiveAuthFailures >= maxFailures) {
-              target.isAuthDisabled = true;
-              target.authDisabledReason = `${maxFailures} consecutive auth failures (proactive refresh)`;
-            }
+            target.authDisabledReason = `${maxFailures} consecutive auth failures (proactive refresh)`;
           }
         });
       } catch {
         debugLog(this.client, `Failed to persist auth failure for ${account.uuid}`);
       }
+    }
+
+    private async clearOpenCodeAuthIfNoAccountsRemain(): Promise<void> {
+      const storage = await this.store.load();
+      if (storage.accounts.length > 0) return;
+
+      await this.client.auth
+        .set({
+          path: { id: providerAuthId },
+          body: getClearedOAuthBody(),
+        })
+        .catch(() => {});
     }
   };
 }

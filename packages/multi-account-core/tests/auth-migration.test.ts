@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
-import { setupTestEnv, createTestStorage } from "./helpers";
+import { setupTestEnv } from "./helpers";
 import { AccountStore } from "../src/account-store";
 import { migrateFromAuthJson } from "../src/auth-migration";
 
@@ -25,13 +25,21 @@ describe("migrateFromAuthJson", () => {
     return fs.writeFile(join(dir, "auth.json"), JSON.stringify(data), "utf-8");
   }
 
-  async function writeStorageFile(data: object): Promise<void> {
-    const storagePath = join(dir, "multiauth-accounts.json");
-    await fs.writeFile(storagePath, JSON.stringify(data), "utf-8");
-  }
-
   it("returns false when storage already has accounts", async () => {
-    await writeStorageFile(createTestStorage(2));
+    const now = Date.now();
+    await store.addAccount({
+      uuid: "existing-uuid",
+      refreshToken: "existing-refresh",
+      accessToken: "existing-access",
+      expiresAt: now + 3_600_000,
+      addedAt: now,
+      lastUsed: now,
+      enabled: true,
+      planTier: "",
+      consecutiveAuthFailures: 0,
+      isAuthDisabled: false,
+    });
+
     await writeAuthJson({
       anthropic: { type: "oauth", refresh: "rt_existing", access: "at_existing", expires: 9999999999 },
     });

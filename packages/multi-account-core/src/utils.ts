@@ -86,3 +86,14 @@ export function createMinimalClient(): PluginClient {
     },
   };
 }
+
+// ─── OAuth Helpers ───────────────────────────────────────────────
+
+export function getClearedOAuthBody() {
+  return {
+    type: "oauth" as const,
+    refresh: "",
+    access: "",
+    expires: 0,
+  };
+}

@@ -21,6 +21,8 @@ export interface OAuthAdapter {
   oauthBetaHeader: string;
   requestBetaHeader: string;
   cliUserAgent: string;
+  cliVersion: string;
+  billingSalt: string;
   toolPrefix: string;
   accountStorageFilename: string;
   transform: OAuthAdapterTransformConfig;

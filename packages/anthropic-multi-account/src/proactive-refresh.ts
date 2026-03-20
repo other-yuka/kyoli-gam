@@ -4,6 +4,7 @@ import { isTokenExpired, refreshToken } from "./token";
 import { debugLog } from "./utils";
 
 export const ProactiveRefreshQueue = createProactiveRefreshQueueForProvider({
+  providerAuthId: "anthropic",
   getConfig,
   isTokenExpired,
   refreshToken,

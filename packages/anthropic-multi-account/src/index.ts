@@ -1,36 +1,79 @@
-import { AnthropicAuthPlugin } from "opencode-anthropic-auth";
 import { tool } from "@opencode-ai/plugin";
 import type { Plugin } from "@opencode-ai/plugin";
-import { migrateFromAuthJson } from "opencode-multi-account-core";
+import {
+  CascadeStateManager,
+  loadPoolChainConfig,
+  migrateFromAuthJson,
+  PoolManager,
+  type PoolChainConfig,
+} from "opencode-multi-account-core";
 import { AccountManager } from "./account-manager";
 import { executeWithAccountRotation } from "./executor";
 import { getPlanLabel, getUsageSummary } from "./usage";
 import { handleAuthorize } from "./auth-handler";
+import { getSystemPrompt, buildBillingHeader } from "./request-transform";
+import { ANTHROPIC_BETA_HEADER, CLAUDE_CLI_USER_AGENT } from "./constants";
 import { loadConfig } from "./config";
 import { ProactiveRefreshQueue } from "./proactive-refresh";
 import { AccountStore } from "./account-store";
 import { AccountRuntimeFactory } from "./runtime-factory";
 import { formatWaitTime, getAccountLabel, showToast } from "./utils";
 import { ANTHROPIC_OAUTH_ADAPTER } from "./constants";
-import type { OAuthCredentials, OriginalAuthHook, PluginClient } from "./types";
+import type { OAuthCredentials, PluginClient } from "./types";
+
+function extractFirstUserText(input: Record<string, unknown>): string {
+  try {
+    const raw = input as { messages?: unknown; request?: { messages?: unknown } };
+    const messages = (raw.messages ?? raw.request?.messages) as
+      Array<{ role?: string; content?: string | Array<{ type?: string; text?: string }> }> | undefined;
+    if (!Array.isArray(messages)) return "";
+    for (const msg of messages) {
+      if (msg.role !== "user") continue;
+      if (typeof msg.content === "string") return msg.content;
+      if (Array.isArray(msg.content)) {
+        for (const block of msg.content) {
+          if (block.type === "text" && block.text) return block.text;
+        }
+      }
+    }
+  } catch {}
+  return "";
+}
+
+function injectSystemPrompt(output: { system?: string[] }): void {
+  const systemPrompt = getSystemPrompt();
+
+  if (!Array.isArray(output.system)) {
+    output.system = [systemPrompt];
+    return;
+  }
+
+  if (!output.system.includes(systemPrompt)) {
+    output.system.unshift(systemPrompt);
+  }
+}
 
 export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
   const { client } = ctx as unknown as { client: PluginClient } & Record<string, unknown>;
 
   await loadConfig();
 
-  const originalHooks = await AnthropicAuthPlugin(ctx);
-  const originalAuth = (originalHooks as Record<string, unknown>).auth as OriginalAuthHook;
-
   const store = new AccountStore();
   let manager: AccountManager | null = null;
   let runtimeFactory: AccountRuntimeFactory | null = null;
   let refreshQueue: ProactiveRefreshQueue | null = null;
+  let poolManager: PoolManager | null = null;
+  let cascadeStateManager: CascadeStateManager | null = null;
+  let poolChainConfig: PoolChainConfig = { pools: [], chains: [] };
 
   return {
-    "experimental.chat.system.transform": (originalHooks as Record<string, unknown>)[
-      "experimental.chat.system.transform"
-    ],
+    "experimental.chat.system.transform": (input: Record<string, unknown>, output: { system?: string[] }) => {
+      injectSystemPrompt(output);
+      const billingHeader = buildBillingHeader(extractFirstUserText(input));
+      if (billingHeader && !output.system?.includes(billingHeader)) {
+        output.system?.unshift(billingHeader);
+      }
+    },
 
     tool: {
       [ANTHROPIC_OAUTH_ADAPTER.statusToolName]: tool({
@@ -64,9 +107,13 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
             else if (!account.enabled) statusParts.push("disabled");
             else statusParts.push("enabled");
 
-            if (account.rateLimitResetAt && account.rateLimitResetAt > Date.now()) {
-              const remaining = formatWaitTime(account.rateLimitResetAt - Date.now());
-              statusParts.push(`RATE LIMITED (resets in ${remaining})`);
+            if (account.rateLimitResetAt) {
+              if (account.rateLimitResetAt > Date.now()) {
+                const remaining = formatWaitTime(account.rateLimitResetAt - Date.now());
+                statusParts.push(`RATE LIMITED (resets in ${remaining})`);
+              } else {
+                statusParts.push("RATE LIMIT RESET");
+              }
             }
 
             if (account.cachedUsage) {
@@ -101,7 +148,7 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
           type: "oauth" as const,
           async authorize() {
             const inputs = arguments.length > 0 ? (arguments[0] as Record<string, string>) : undefined;
-            return handleAuthorize(originalAuth, manager, inputs, client);
+            return handleAuthorize(manager, inputs, client);
           },
         },
         { type: "api" as const, label: "Create an API Key" },
@@ -114,7 +161,7 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
       ) {
         const auth = await getAuth() as Record<string, unknown>;
         if (auth.type !== "oauth") {
-          return originalAuth.loader(getAuth, provider);
+          return { apiKey: "", fetch };
         }
 
         for (const model of Object.values((provider as Record<string, unknown>).models ?? {}) as Record<string, unknown>[]) {
@@ -126,8 +173,13 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
         const credentials = auth as OAuthCredentials;
         await migrateFromAuthJson("anthropic", store);
         manager = await AccountManager.create(store, credentials, client);
-        runtimeFactory = new AccountRuntimeFactory(ctx as Record<string, unknown>, store, client, provider);
+        runtimeFactory = new AccountRuntimeFactory(store, client);
         manager.setRuntimeFactory(runtimeFactory);
+
+        poolChainConfig = await loadPoolChainConfig();
+        poolManager = new PoolManager();
+        poolManager.loadPools(poolChainConfig.pools);
+        cascadeStateManager = new CascadeStateManager();
 
         if (manager.getAccountCount() > 0) {
           const activeLabel = manager.getActiveAccount() ? getAccountLabel(manager.getActiveAccount()!) : "none";
@@ -153,13 +205,22 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
           refreshQueue = new ProactiveRefreshQueue(
             client,
             store,
-            (uuid) => runtimeFactory?.invalidate(uuid),
+            (uuid) => {
+              runtimeFactory?.invalidate(uuid);
+              void manager?.refresh();
+            },
           );
           refreshQueue.start();
         }
 
         return {
           apiKey: "",
+          "chat.headers": async (input: { provider?: { info?: { id?: string } } }, output: { headers: Record<string, string> }) => {
+            if (input.provider?.info?.id !== ANTHROPIC_OAUTH_ADAPTER.authProviderId) return;
+            output.headers["user-agent"] = CLAUDE_CLI_USER_AGENT;
+            output.headers["anthropic-beta"] = ANTHROPIC_BETA_HEADER;
+            output.headers["x-app"] = "cli";
+          },
           async fetch(input: RequestInfo | URL, init?: RequestInit) {
             if (!manager || !runtimeFactory) {
               return fetch(input, init);
@@ -171,7 +232,24 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
               );
             }
 
-            return executeWithAccountRotation(manager, runtimeFactory, client, input, init);
+            if (!poolManager || !cascadeStateManager) {
+              poolManager = new PoolManager();
+              poolManager.loadPools(poolChainConfig.pools);
+              cascadeStateManager = new CascadeStateManager();
+            }
+
+            return executeWithAccountRotation(
+              manager,
+              runtimeFactory,
+              client,
+              input,
+              init,
+              {
+                poolManager,
+                cascadeStateManager,
+                poolChainConfig,
+              },
+            );
           },
         };
       },

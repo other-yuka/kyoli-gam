@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
-import { afterAll, afterEach, beforeEach, describe, expect, mock, test, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
+import { createProactiveRefreshQueueForProvider } from "opencode-multi-account-core";
 import { ACCOUNTS_FILENAME } from "../src/constants";
 import type {
   AccountStorage,
@@ -11,31 +12,14 @@ import type {
 } from "../src/types";
 import { createMockClient, setupTestEnv } from "../tests/helpers";
 
-const originalTokenModule = await import("../src/token");
-const originalConfigModule = await import("../src/config");
-
 const refreshTokenMock = vi.fn();
 const isTokenExpiredMock = vi.fn();
 const getConfigMock = vi.fn();
 
-mock.module("../src/token", () => ({
-  refreshToken: refreshTokenMock,
-  isTokenExpired: isTokenExpiredMock,
-}));
-
-mock.module("../src/config", () => ({
-  getConfig: getConfigMock,
-}));
-
-afterAll(() => {
-  mock.module("../src/token", () => originalTokenModule);
-  mock.module("../src/config", () => originalConfigModule);
-});
-
 const { AccountStore } = await import("../src/account-store");
 
 type TestEnv = Awaited<ReturnType<typeof setupTestEnv>>;
-type QueueType = import("../src/proactive-refresh").ProactiveRefreshQueue;
+type QueueType = { start(): void; stop(): Promise<void> };
 type TimeoutHandle = ReturnType<typeof setTimeout>;
 
 interface ScheduledTimer {
@@ -272,7 +256,25 @@ async function readPersistedStorage(): Promise<AccountStorage> {
 }
 
 async function createQueue(): Promise<QueueType> {
-  const { ProactiveRefreshQueue } = await import("../src/proactive-refresh");
+  const createQueueClass = createProactiveRefreshQueueForProvider as unknown as
+    (deps: Record<string, unknown>) => unknown;
+  const proactiveDeps: Record<string, unknown> = {
+    providerAuthId: "anthropic",
+    getConfig: () => getConfigMock(),
+    refreshToken: (
+      currentRefreshToken: string,
+      accountId: string,
+      pluginClient: PluginClient,
+    ) => refreshTokenMock(currentRefreshToken, accountId, pluginClient),
+    isTokenExpired: (account: Pick<StoredAccount, "accessToken" | "expiresAt">) =>
+      isTokenExpiredMock(account),
+    debugLog: () => {},
+  };
+  const ProactiveRefreshQueue = createQueueClass(proactiveDeps) as new (
+    client: PluginClient,
+    store: unknown,
+    onInvalidate?: (uuid: string) => void,
+  ) => QueueType;
   const queue = new ProactiveRefreshQueue(client, new AccountStore());
   activeQueue = queue;
   return queue;
@@ -615,7 +617,7 @@ describe("proactive-refresh", () => {
     expect(refreshTokenCalls.length).toBe(1);
   });
 
-  test("persistFailure sets isAuthDisabled for permanent failures", async () => {
+  test("persistFailure removes account and clears Anthropic auth for permanent failures", async () => {
     await seedStorage([
       createAccount(14, {
         uuid: "permanent-failure-account",
@@ -625,14 +627,17 @@ describe("proactive-refresh", () => {
 
     refreshTokenImpl = async () => ({ ok: false, permanent: true });
 
+    const authSetSpy = vi.spyOn(client.auth, "set").mockResolvedValue();
     const queue = await createQueue();
     queue.start();
     await firePendingTimerByDelay(5_000);
 
     const persisted = await readPersistedStorage();
-    const updated = persisted.accounts.find((account) => account.uuid === "permanent-failure-account");
-    expect(updated?.isAuthDisabled).toBe(true);
-    expect(updated?.authDisabledReason).toBe("Token permanently rejected (proactive refresh)");
+    expect(persisted.accounts).toHaveLength(0);
+    expect(authSetSpy).toHaveBeenCalledWith({
+      path: { id: "anthropic" },
+      body: { type: "oauth", refresh: "", access: "", expires: 0 },
+    });
   });
 
   test("persistFailure increments consecutiveAuthFailures for transient failures", async () => {

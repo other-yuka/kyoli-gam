@@ -14,6 +14,8 @@ export const anthropicOAuthAdapter: OAuthAdapter = {
   oauthBetaHeader: "oauth-2025-04-20",
   requestBetaHeader: "oauth-2025-04-20,interleaved-thinking-2025-05-14",
   cliUserAgent: "claude-cli/2.1.2 (external, cli)",
+  cliVersion: "2.1.80",
+  billingSalt: "59cf53e54c78",
   toolPrefix: "mcp_",
   accountStorageFilename: "anthropic-multi-account-accounts.json",
   transform: {

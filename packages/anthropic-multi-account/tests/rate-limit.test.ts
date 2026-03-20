@@ -1,39 +1,22 @@
-import { afterAll, beforeEach, describe, expect, mock, test, vi } from "bun:test";
+import { beforeEach, describe, expect, test, vi } from "bun:test";
+import { createRateLimitHandlers } from "opencode-multi-account-core";
 import type { ManagedAccount, UsageLimits } from "../src/types";
-
-const originalUsageModule = await import("../src/usage");
-const originalConfigModule = await import("../src/config");
-const originalUtilsModule = await import("../src/utils");
 
 const fetchUsageMock = vi.fn();
 const getConfigMock = vi.fn();
 const showToastMock = vi.fn(() => Promise.resolve());
 
-mock.module("../src/usage", () => ({
-  fetchUsage: fetchUsageMock,
-}));
-
-mock.module("../src/config", () => ({
-  getConfig: getConfigMock,
-}));
-
-mock.module("../src/utils", () => ({
-  formatWaitTime: (ms: number) => `${Math.ceil(ms / 1000)}s`,
-  getAccountLabel: () => "Account 1",
-  showToast: showToastMock,
-}));
-
-afterAll(() => {
-  mock.module("../src/usage", () => originalUsageModule);
-  mock.module("../src/config", () => originalConfigModule);
-  mock.module("../src/utils", () => originalUtilsModule);
-});
-
 const {
   retryAfterMsFromResponse,
   getResetMsFromUsage,
   handleRateLimitResponse,
-} = await import("../src/rate-limit");
+} = createRateLimitHandlers({
+  fetchUsage: async (accessToken: string) => fetchUsageMock(accessToken),
+  getConfig: () => getConfigMock(),
+  formatWaitTime: (ms: number) => `${Math.ceil(ms / 1000)}s`,
+  getAccountLabel: () => "Account 1",
+  showToast: showToastMock,
+});
 
 function createAccount(overrides: Partial<ManagedAccount> = {}): ManagedAccount {
   return {

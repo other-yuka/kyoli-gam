@@ -1,7 +1,14 @@
-import { AnthropicAuthPlugin } from "opencode-anthropic-auth";
-import type { PluginInput } from "@opencode-ai/plugin";
 import { AccountStore } from "./account-store";
-import type { OriginalAuthHook, PluginClient } from "./types";
+import { ANTHROPIC_OAUTH_ADAPTER } from "./constants";
+import { isTokenExpired, refreshToken } from "./token";
+import { TokenRefreshError } from "opencode-multi-account-core";
+import {
+  buildRequestHeaders,
+  createResponseStreamTransform,
+  transformRequestBody,
+  transformRequestUrl,
+} from "./request-transform";
+import type { PluginClient, StoredAccount } from "./types";
 import { debugLog } from "./utils";
 
 type BaseFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -10,20 +17,15 @@ interface AccountRuntime {
   fetch: BaseFetch;
 }
 
-type ScopedAnthropicAuthPluginInput = {
-  client: PluginClient;
-} & Record<string, unknown>;
+const TOKEN_REFRESH_PERMANENT_FAILURE_STATUS = 401;
 
-/** Per-account base plugin instances — delegates all auth mechanics to AnthropicAuthPlugin. */
 export class AccountRuntimeFactory {
   private runtimes = new Map<string, AccountRuntime>();
   private initLocks = new Map<string, Promise<AccountRuntime>>();
 
   constructor(
-    private readonly pluginCtx: Record<string, unknown>,
     private readonly store: AccountStore,
     private readonly client: PluginClient,
-    private readonly provider: unknown,
   ) {}
 
   async getRuntime(uuid: string): Promise<AccountRuntime> {
@@ -53,81 +55,86 @@ export class AccountRuntimeFactory {
     this.runtimes.clear();
   }
 
-  private async createRuntime(uuid: string): Promise<AccountRuntime> {
-    const scopedClient = this.createScopedClient(uuid);
-
-    const scopedCtx: ScopedAnthropicAuthPluginInput = {
-      ...this.pluginCtx,
-      client: scopedClient,
-    };
-
-    const hooks = await AnthropicAuthPlugin(scopedCtx as unknown as PluginInput);
-    const auth = (hooks as Record<string, unknown>).auth as OriginalAuthHook;
-
-    if (!auth?.loader) {
-      throw new Error(`Base plugin loader unavailable for account ${uuid}`);
+  private async ensureFreshToken(
+    storedAccount: StoredAccount,
+    uuid: string,
+  ): Promise<{ accessToken: string; expiresAt: number }> {
+    const refreshed = await refreshToken(storedAccount.refreshToken, uuid, this.client);
+    if (!refreshed.ok) {
+      throw new TokenRefreshError(
+        refreshed.permanent,
+        refreshed.permanent ? TOKEN_REFRESH_PERMANENT_FAILURE_STATUS : undefined,
+      );
     }
 
-    const scopedGetAuth = this.createScopedGetAuth(uuid);
-    const result = await auth.loader(scopedGetAuth, this.provider);
+    await this.store.mutateAccount(uuid, (account) => {
+      account.accessToken = refreshed.patch.accessToken;
+      account.expiresAt = refreshed.patch.expiresAt;
+      if (refreshed.patch.refreshToken) account.refreshToken = refreshed.patch.refreshToken;
+      if (refreshed.patch.uuid) account.uuid = refreshed.patch.uuid;
+      if (refreshed.patch.email) account.email = refreshed.patch.email;
+      account.consecutiveAuthFailures = 0;
+      account.isAuthDisabled = false;
+      account.authDisabledReason = undefined;
+    });
 
-    if (!result?.fetch) {
-      throw new Error(`Base plugin returned no fetch for account ${uuid}`);
-    }
+    this.client.auth
+      .set({
+        path: { id: ANTHROPIC_OAUTH_ADAPTER.authProviderId },
+        body: {
+          type: "oauth",
+          refresh: refreshed.patch.refreshToken ?? storedAccount.refreshToken,
+          access: refreshed.patch.accessToken,
+          expires: refreshed.patch.expiresAt,
+        },
+      })
+      .catch(() => {});
 
-    debugLog(this.client, `Runtime created for account ${uuid.slice(0, 8)}`);
-    return { fetch: result.fetch };
+    return { accessToken: refreshed.patch.accessToken, expiresAt: refreshed.patch.expiresAt };
   }
 
-  private createScopedGetAuth(uuid: string): () => Promise<{
-    type: "oauth";
-    refresh: string;
-    access: string;
-    expires: number;
-  }> {
-    const store = this.store;
+  private async executeTransformedFetch(
+    input: RequestInfo | URL,
+    init: RequestInit | undefined,
+    accessToken: string,
+  ): Promise<Response> {
+    const transformedInput = transformRequestUrl(input);
+    const headers = buildRequestHeaders(transformedInput, init, accessToken);
+    const transformedBody =
+      typeof init?.body === "string" ? transformRequestBody(init.body) : init?.body;
 
-    return async () => {
-      const credentials = await store.readCredentials(uuid);
-      if (!credentials) {
-        return { type: "oauth" as const, refresh: "", access: "", expires: 0 };
+    const response = await fetch(transformedInput, {
+      ...init,
+      headers,
+      body: transformedBody,
+    });
+
+    return createResponseStreamTransform(response);
+  }
+
+  private async createRuntime(uuid: string): Promise<AccountRuntime> {
+    const fetchWithAccount: BaseFetch = async (input, init) => {
+      const storage = await this.store.load();
+      const storedAccount = storage.accounts.find((account: StoredAccount) => account.uuid === uuid);
+      if (!storedAccount) {
+        throw new Error(`No credentials found for account ${uuid}`);
       }
 
-      return {
-        type: "oauth" as const,
-        refresh: credentials.refreshToken,
-        access: credentials.accessToken ?? "",
-        expires: credentials.expiresAt ?? 0,
-      };
+      let accessToken = storedAccount.accessToken;
+      let expiresAt = storedAccount.expiresAt;
+
+      if (!accessToken || !expiresAt || isTokenExpired({ accessToken, expiresAt })) {
+        ({ accessToken, expiresAt } = await this.ensureFreshToken(storedAccount, uuid));
+      }
+
+      if (!accessToken) {
+        throw new Error(`No access token available for account ${uuid}`);
+      }
+
+      return this.executeTransformedFetch(input, init, accessToken);
     };
-  }
 
-  private createScopedClient(uuid: string): PluginClient {
-    const store = this.store;
-    const originalClient = this.client;
-
-    return {
-      auth: {
-        async set(params: {
-          path: { id: string };
-          body: { type: string; refresh: string; access: string; expires: number };
-        }): Promise<void> {
-          const { body } = params;
-
-          await store.mutateAccount(uuid, (account) => {
-            account.accessToken = body.access;
-            account.expiresAt = body.expires;
-            if (body.refresh) account.refreshToken = body.refresh;
-            account.consecutiveAuthFailures = 0;
-            account.isAuthDisabled = false;
-            account.authDisabledReason = undefined;
-          });
-
-          originalClient.auth.set(params).catch(() => {});
-        },
-      },
-      tui: originalClient.tui,
-      app: originalClient.app,
-    };
+    debugLog(this.client, `Runtime created for account ${uuid.slice(0, 8)}`);
+    return { fetch: fetchWithAccount };
   }
 }

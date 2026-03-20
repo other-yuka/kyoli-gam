@@ -1,4 +1,9 @@
-import type { ManagedAccount, PluginClient, TokenRefreshResult } from "./types";
+import {
+  isTokenRefreshError,
+  type ManagedAccount,
+  type PluginClient,
+  type TokenRefreshResult,
+} from "./types";
 
 const MIN_MAX_RETRIES = 6;
 const RETRIES_PER_ACCOUNT = 3;
@@ -6,8 +11,6 @@ const MAX_SERVER_RETRIES_PER_ATTEMPT = 2;
 const MAX_RESOLVE_ATTEMPTS = 10;
 const SERVER_RETRY_BASE_MS = 1_000;
 const SERVER_RETRY_MAX_MS = 4_000;
-const PERMANENT_AUTH_FAILURE_STATUSES = new Set([400, 401, 403]);
-
 export interface ExecutorAccountManager {
   getAccountCount(): number;
   refresh(): Promise<void>;
@@ -212,15 +215,14 @@ export function createExecutorForProvider(
     account: ManagedAccount,
     error: unknown,
   ): Promise<boolean> {
-    const refreshFailureStatus = getRefreshFailureStatus(error);
-    if (refreshFailureStatus === undefined) return false;
+    if (!isTokenRefreshError(error)) return false;
     if (!account.uuid) return false;
 
     const accountUuid = account.uuid;
     runtimeFactory.invalidate(accountUuid);
     await manager.markAuthFailure(accountUuid, {
       ok: false,
-      permanent: PERMANENT_AUTH_FAILURE_STATUSES.has(refreshFailureStatus),
+      permanent: error.permanent,
     });
     await manager.refresh();
 
@@ -276,15 +278,6 @@ export function createExecutorForProvider(
   return {
     executeWithAccountRotation,
   };
-}
-
-function getRefreshFailureStatus(error: unknown): number | undefined {
-  if (!(error instanceof Error)) return undefined;
-  const matched = error.message.match(/Token refresh failed:\s*(\d{3})/);
-  if (!matched) return undefined;
-
-  const status = Number(matched[1]);
-  return Number.isFinite(status) ? status : undefined;
 }
 
 async function isRevokedTokenResponse(response: Response): Promise<boolean> {
