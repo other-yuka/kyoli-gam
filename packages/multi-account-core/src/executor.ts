@@ -76,16 +76,119 @@ export function createExecutorForProvider(
     init?: RequestInit,
   ): Promise<Response> {
     const maxRetries = Math.max(MIN_MAX_RETRIES, manager.getAccountCount() * RETRIES_PER_ACCOUNT);
-    let retries = 0;
     let previousAccountUuid: string | undefined;
 
-    while (true) {
-      if (++retries > maxRetries) {
-        throw new Error(
-          `Exhausted ${maxRetries} retries across all accounts. All attempts failed due to auth errors, rate limits, or token issues.`,
-        );
+    type StatusTransition =
+      | { type: "success"; response: Response }
+      | { type: "handled"; response?: Response }
+      | { type: "retryOuter" };
+
+    async function retryServerErrors(
+      account: ManagedAccount,
+      runtime: Awaited<ReturnType<ExecutorRuntimeFactory["getRuntime"]>>,
+    ): Promise<Response | null> {
+      for (let attempt = 0; attempt < MAX_SERVER_RETRIES_PER_ATTEMPT; attempt++) {
+        const backoff = Math.min(SERVER_RETRY_BASE_MS * 2 ** attempt, SERVER_RETRY_MAX_MS);
+        const jitteredBackoff = backoff * (0.5 + Math.random() * 0.5);
+        await sleep(jitteredBackoff);
+
+        let retryResponse: Response;
+        try {
+          retryResponse = await runtime.fetch(input, init);
+        } catch (error) {
+          if (isAbortError(error)) throw error;
+          if (await handleRuntimeFetchFailure(manager, runtimeFactory, client, account, error)) {
+            return null;
+          }
+          void showToast(client, `${getAccountLabel(account)} network error — switching`, "warning");
+          return null;
+        }
+
+        if (retryResponse.status < 500) return retryResponse;
       }
 
+      return null;
+    }
+
+    const dispatchResponseStatus = async (
+      account: ManagedAccount,
+      accountUuid: string,
+      runtime: Awaited<ReturnType<ExecutorRuntimeFactory["getRuntime"]>>,
+      response: Response,
+      allow401Retry: boolean,
+      from401RefreshRetry: boolean,
+    ): Promise<StatusTransition> => {
+      if (response.status >= 500) {
+        const recovered = await retryServerErrors(account, runtime);
+        if (recovered === null) {
+          return { type: "retryOuter" };
+        }
+        response = recovered;
+      }
+
+      if (response.status === 401) {
+        if (allow401Retry) {
+          runtimeFactory.invalidate(accountUuid);
+          try {
+            const retryRuntime = await runtimeFactory.getRuntime(accountUuid);
+            const retryResponse = await retryRuntime.fetch(input, init);
+            return dispatchResponseStatus(account, accountUuid, retryRuntime, retryResponse, false, true);
+          } catch (error) {
+            if (isAbortError(error)) throw error;
+            if (await handleRuntimeFetchFailure(manager, runtimeFactory, client, account, error)) {
+              return { type: "retryOuter" };
+            }
+            return { type: "retryOuter" };
+          }
+        }
+
+        await manager.markAuthFailure(accountUuid, { ok: false, permanent: false });
+        await manager.refresh();
+
+        if (!manager.hasAnyUsableAccount()) {
+          void showToast(client, "All accounts have auth failures.", "error");
+          throw new Error(
+            `All ${providerName} accounts have authentication failures. Re-authenticate with \`opencode auth login\`.`,
+          );
+        }
+
+        void showToast(client, `${getAccountLabel(account)} auth failed — switching to next account.`, "warning");
+        return { type: "retryOuter" };
+      }
+
+      if (response.status === 403) {
+        const revoked = await isRevokedTokenResponse(response);
+        if (revoked) {
+          await manager.markRevoked(accountUuid);
+          await manager.refresh();
+          void showToast(
+            client,
+            `${getAccountLabel(account)} disabled: OAuth token revoked.`,
+            "error",
+          );
+
+          if (!manager.hasAnyUsableAccount()) {
+            throw new Error(
+              `All ${providerName} accounts have been revoked or disabled. Re-authenticate with \`opencode auth login\`.`,
+            );
+          }
+          return { type: "retryOuter" };
+        }
+
+        if (from401RefreshRetry) {
+          return { type: "handled", response };
+        }
+      }
+
+      if (response.status === 429) {
+        await handleRateLimitResponse(manager, client, account, response);
+        return { type: "handled" };
+      }
+
+      return { type: "success", response };
+    };
+
+    for (let retries = 1; retries <= maxRetries; retries++) {
       await manager.refresh();
       const account = await resolveAccount(manager, client);
       const accountUuid = account.uuid;
@@ -110,102 +213,21 @@ export function createExecutorForProvider(
         continue;
       }
 
-      if (response.status >= 500) {
-        let serverResponse = response;
-        let networkErrorDuringServerRetry = false;
-        let authFailureDuringServerRetry = false;
-
-        for (let attempt = 0; attempt < MAX_SERVER_RETRIES_PER_ATTEMPT; attempt++) {
-          const backoff = Math.min(SERVER_RETRY_BASE_MS * 2 ** attempt, SERVER_RETRY_MAX_MS);
-          const jitteredBackoff = backoff * (0.5 + Math.random() * 0.5);
-          await sleep(jitteredBackoff);
-
-          try {
-            serverResponse = await runtime.fetch(input, init);
-          } catch (error) {
-            if (isAbortError(error)) throw error;
-            if (await handleRuntimeFetchFailure(manager, runtimeFactory, client, account, error)) {
-              authFailureDuringServerRetry = true;
-              break;
-            }
-            networkErrorDuringServerRetry = true;
-            void showToast(client, `${getAccountLabel(account)} network error — switching`, "warning");
-            break;
-          }
-
-          if (serverResponse.status < 500) break;
+      const transition = await dispatchResponseStatus(account, accountUuid, runtime, response, true, false);
+      if (transition.type === "retryOuter" || transition.type === "handled") {
+        if (transition.type === "handled" && transition.response) {
+          return transition.response;
         }
-
-        if (authFailureDuringServerRetry) {
-          continue;
-        }
-
-        if (networkErrorDuringServerRetry || serverResponse.status >= 500) {
-          continue;
-        }
-
-        response = serverResponse;
-      }
-
-      if (response.status === 401) {
-        runtimeFactory.invalidate(accountUuid);
-        try {
-          const retryRuntime = await runtimeFactory.getRuntime(accountUuid);
-          const retryResponse = await retryRuntime.fetch(input, init);
-          if (retryResponse.status !== 401) {
-            await manager.markSuccess(accountUuid);
-            return retryResponse;
-          }
-        } catch (error) {
-          if (isAbortError(error)) throw error;
-          if (await handleRuntimeFetchFailure(manager, runtimeFactory, client, account, error)) {
-            continue;
-          }
-          continue;
-        }
-
-        await manager.markAuthFailure(accountUuid, { ok: false, permanent: false });
-        await manager.refresh();
-
-        if (!manager.hasAnyUsableAccount()) {
-          void showToast(client, "All accounts have auth failures.", "error");
-          throw new Error(
-            `All ${providerName} accounts have authentication failures. Re-authenticate with \`opencode auth login\`.`,
-          );
-        }
-
-        void showToast(client, `${getAccountLabel(account)} auth failed — switching to next account.`, "warning");
-        continue;
-      }
-
-      if (response.status === 403) {
-        const revoked = await isRevokedTokenResponse(response);
-        if (revoked) {
-          await manager.markRevoked(accountUuid);
-          await manager.refresh();
-          void showToast(
-            client,
-            `${getAccountLabel(account)} disabled: OAuth token revoked.`,
-            "error",
-          );
-
-          if (!manager.hasAnyUsableAccount()) {
-            throw new Error(
-              `All ${providerName} accounts have been revoked or disabled. Re-authenticate with \`opencode auth login\`.`,
-            );
-          }
-          continue;
-        }
-      }
-
-      if (response.status === 429) {
-        await handleRateLimitResponse(manager, client, account, response);
         continue;
       }
 
       await manager.markSuccess(accountUuid);
-      return response;
+      return transition.response;
     }
+
+    throw new Error(
+      `Exhausted ${maxRetries} retries across all accounts. All attempts failed due to auth errors, rate limits, or token issues.`,
+    );
   }
 
   async function handleRuntimeFetchFailure(
