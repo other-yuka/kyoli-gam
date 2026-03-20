@@ -1,0 +1,23 @@
+packages/anthropic-multi-account/src/runtime-factory.ts
+  b48293326e3d1e80 56-61,68,78-80,86,91-100,104,110-113,126,133
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.15",
+  "base_commit_sha": "988f507ea90137f1d29e5385145de841f978dbd3",
+  "prompts": {
+    "b48293326e3d1e80": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_2f4874581ffegiNeKSEME2deC8-32627add-1354-4a8e-9b13-e8781ad498df",
+        "model": "unknown"
+      },
+      "human_author": "Sanggyu Kang <other.yuka@gmail.com>",
+      "messages": [],
+      "total_additions": 60,
+      "total_deletions": 46,
+      "accepted_lines": 28,
+      "overriden_lines": 0
+    }
+  }
+}
