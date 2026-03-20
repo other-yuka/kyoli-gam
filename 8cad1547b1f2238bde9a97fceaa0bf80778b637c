@@ -1,0 +1,53 @@
+packages/anthropic-multi-account/tests/pool-chain-executor.test.ts
+  ebbfbccde73036a2 239-284
+packages/multi-account-core/src/executor.ts
+  f319d57542032b52 81-105,107,110,113-120,122-127,129-131,133-135,139,141,156,175-179,185-201,214-220,225,227-230
+packages/multi-account-core/tests/executor.test.ts
+  afddc69fd5c5b931 27-112,228-401
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.15",
+  "base_commit_sha": "8cad1547b1f2238bde9a97fceaa0bf80778b637c",
+  "prompts": {
+    "afddc69fd5c5b931": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_2f40ba222ffePeGXVz2r3ba33Z-8aad9aa6-f32b-4d4a-b43d-08a48a509d9a",
+        "model": "unknown"
+      },
+      "human_author": "Sanggyu Kang <other.yuka@gmail.com>",
+      "messages": [],
+      "total_additions": 261,
+      "total_deletions": 0,
+      "accepted_lines": 261,
+      "overriden_lines": 0
+    },
+    "ebbfbccde73036a2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_2f40ba222ffePeGXVz2r3ba33Z-394f6677-3ccc-45e6-bd6c-ed091da7b970",
+        "model": "unknown"
+      },
+      "human_author": "Sanggyu Kang <other.yuka@gmail.com>",
+      "messages": [],
+      "total_additions": 46,
+      "total_deletions": 0,
+      "accepted_lines": 46,
+      "overriden_lines": 0
+    },
+    "f319d57542032b52": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_2f40ba222ffePeGXVz2r3ba33Z-9685db16-680f-4704-981a-5b03b33dc93b",
+        "model": "unknown"
+      },
+      "human_author": "Sanggyu Kang <other.yuka@gmail.com>",
+      "messages": [],
+      "total_additions": 97,
+      "total_deletions": 75,
+      "accepted_lines": 84,
+      "overriden_lines": 0
+    }
+  }
+}
