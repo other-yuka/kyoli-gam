@@ -1,6 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from "bun:test";
 import * as piAiAdapter from "../src/pi-ai-adapter";
 import * as ansiModule from "../src/ui/ansi";
+import * as authMenuModule from "../src/ui/auth-menu";
 import * as childProcess from "node:child_process";
 import { handleAuthorize } from "../src/auth-handler";
 import { createMockClient } from "./helpers";
@@ -106,5 +107,89 @@ describe("auth-handler", () => {
     expect(callbackResult).toEqual({ type: "failed" });
 
     loginSpy.mockRestore();
+  });
+
+  test("check quotas persists permanent refresh failures and removes invalid account", async () => {
+    ttySpy.mockReturnValue(true);
+
+    const account = {
+      index: 0,
+      uuid: "dead-uuid",
+      email: "dead@example.com",
+      accessToken: "expired-access",
+      refreshToken: "stale-refresh",
+      expiresAt: Date.now() - 1_000,
+      enabled: true,
+      isAuthDisabled: false,
+      consecutiveAuthFailures: 0,
+      addedAt: Date.now() - 5_000,
+      lastUsed: Date.now() - 1_000,
+    };
+
+    let accounts = [account];
+    const manager = {
+      getAccounts: vi.fn(() => accounts),
+      setClient: vi.fn(),
+      ensureValidToken: vi.fn(async () => ({ ok: false, permanent: true })),
+      markAuthFailure: vi.fn(async () => {
+        accounts = [];
+      }),
+      refresh: vi.fn(async () => {}),
+    };
+
+    const showAuthMenuSpy = vi.spyOn(authMenuModule, "showAuthMenu")
+      .mockResolvedValueOnce({ type: "check-quotas" })
+      .mockResolvedValueOnce({ type: "cancel" });
+    const printQuotaErrorSpy = vi.spyOn(authMenuModule, "printQuotaError").mockImplementation(() => {});
+
+    const flow = await handleAuthorize(manager as never, {}, createMockClient());
+
+    expect(manager.ensureValidToken).toHaveBeenCalledWith("dead-uuid", expect.anything());
+    expect(manager.markAuthFailure).toHaveBeenCalledWith("dead-uuid", { ok: false, permanent: true });
+    expect(printQuotaErrorSpy).toHaveBeenCalledWith(account, "Refresh failed permanently; account removed");
+    expect(flow.instructions).toBe("Authentication cancelled");
+
+    printQuotaErrorSpy.mockRestore();
+    showAuthMenuSpy.mockRestore();
+  });
+
+  test("check quotas prints updated auth-disabled reason after transient refresh failure", async () => {
+    ttySpy.mockReturnValue(true);
+
+    const updatedAccount = {
+      index: 0,
+      uuid: "disabled-uuid",
+      email: "disabled@example.com",
+      accessToken: "expired-access",
+      refreshToken: "stale-refresh",
+      expiresAt: Date.now() - 1_000,
+      enabled: true,
+      isAuthDisabled: true,
+      authDisabledReason: "3 consecutive auth failures",
+      consecutiveAuthFailures: 3,
+      addedAt: Date.now() - 5_000,
+      lastUsed: Date.now() - 1_000,
+    };
+
+    const manager = {
+      getAccounts: vi.fn(() => [updatedAccount]),
+      setClient: vi.fn(),
+      ensureValidToken: vi.fn(async () => ({ ok: false, permanent: false })),
+      markAuthFailure: vi.fn(async () => {}),
+      refresh: vi.fn(async () => {}),
+    };
+
+    const showAuthMenuSpy = vi.spyOn(authMenuModule, "showAuthMenu")
+      .mockResolvedValueOnce({ type: "check-quotas" })
+      .mockResolvedValueOnce({ type: "cancel" });
+    const printQuotaErrorSpy = vi.spyOn(authMenuModule, "printQuotaError").mockImplementation(() => {});
+
+    await handleAuthorize(manager as never, {}, createMockClient());
+
+    expect(manager.markAuthFailure).toHaveBeenCalledWith("disabled-uuid", { ok: false, permanent: false });
+    expect(printQuotaErrorSpy).toHaveBeenCalledWith(updatedAccount, "3 consecutive auth failures (refresh failed)");
+
+    printQuotaErrorSpy.mockRestore();
+    showAuthMenuSpy.mockRestore();
   });
 });

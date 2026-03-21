@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { describe, test, expect, beforeEach, afterEach, vi } from "bun:test";
 import { AccountManager } from "../src/account-manager";
 import { AccountStore } from "../src/account-store";
+import * as piAiAdapter from "../src/pi-ai-adapter";
 import { ACCOUNTS_FILENAME } from "../src/constants";
 import { loadConfig, resetConfigCache, updateConfigField } from "../src/config";
 import type {
@@ -529,13 +530,22 @@ describe("account-manager", () => {
         throw new Error("Expected account");
       }
 
+      const refreshSpy = vi.spyOn(piAiAdapter, "refreshWithPiAi").mockResolvedValue({
+        accessToken: "test",
+        refreshToken: "rotated-refresh",
+        expiresAt: Date.now() + 60_000,
+      });
+
       const result = await manager.ensureValidToken(account.uuid, createMockClient());
       expect(result.ok).toBe(true);
 
       const saved = await readStorage();
       const savedAccount = saved.accounts.find((entry) => entry.uuid === account.uuid);
       expect(savedAccount?.accessToken).toBe("test");
+      expect(savedAccount?.refreshToken).toBe("rotated-refresh");
       expect(typeof savedAccount?.expiresAt).toBe("number");
+
+      refreshSpy.mockRestore();
     });
   });
 
@@ -574,6 +584,11 @@ describe("account-manager", () => {
       const client = createMockClient();
       manager.setClient(client);
       const setSpy = vi.spyOn(client.auth, "set");
+      const refreshSpy = vi.spyOn(piAiAdapter, "refreshWithPiAi").mockResolvedValue({
+        accessToken: "refreshed-access",
+        refreshToken: "refreshed-token",
+        expiresAt: Date.now() + 60_000,
+      });
 
       const activeAccount = manager.getActiveAccount();
       if (!activeAccount?.uuid) {
@@ -591,6 +606,8 @@ describe("account-manager", () => {
       const activeResult = await manager.ensureValidToken(activeAccount.uuid, client);
       expect(activeResult.ok).toBe(true);
       expect(setSpy.mock.calls.length).toBe(1);
+
+      refreshSpy.mockRestore();
     });
   });
 });

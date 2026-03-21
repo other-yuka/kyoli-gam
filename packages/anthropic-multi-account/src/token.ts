@@ -10,6 +10,13 @@ import type {
 } from "./types";
 
 const PERMANENT_FAILURE_HTTP_STATUSES = new Set([400, 401, 403]);
+const PERMANENT_FAILURE_MESSAGE_PATTERNS = [
+  /\binvalid_grant\b/i,
+  /\binvalid_scope\b/i,
+  /\bunauthorized_client\b/i,
+  /\brefresh token\b.*\b(invalid|expired|revoked|no longer valid)\b/i,
+  /\bauth(?:entication)?(?:[_\s-]+)?invalid\b/i,
+];
 const refreshMutexByAccountId = new Map<string, Promise<TokenRefreshResult>>();
 
 export function isTokenExpired(account: Pick<ManagedAccount, "accessToken" | "expiresAt">): boolean {
@@ -34,8 +41,11 @@ export async function refreshToken(
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const statusMatch = message.match(/\b(400|401|403)\b/);
-      const isPermanent = statusMatch !== null
+      const hasPermanentStatus = statusMatch !== null
         && PERMANENT_FAILURE_HTTP_STATUSES.has(Number(statusMatch[1]));
+      const hasPermanentMessage = PERMANENT_FAILURE_MESSAGE_PATTERNS
+        .some((pattern) => pattern.test(message));
+      const isPermanent = hasPermanentStatus || hasPermanentMessage;
 
       await client.app
         .log({

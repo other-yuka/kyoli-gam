@@ -366,8 +366,19 @@ async function checkAccountQuota(
 
     const refreshResult = await manager.ensureValidToken(account.uuid, client);
     if (!refreshResult.ok) {
-      printQuotaError(account, account.isAuthDisabled
-        ? `${account.authDisabledReason ?? "Auth disabled"} (refresh failed)`
+      await manager.markAuthFailure(account.uuid, refreshResult);
+      await manager.refresh();
+
+      const updatedAccount = manager.getAccounts().find((candidate) => candidate.uuid === account.uuid);
+      if (!updatedAccount) {
+        printQuotaError(account, refreshResult.permanent
+          ? "Refresh failed permanently; account removed"
+          : "Failed to refresh token");
+        return;
+      }
+
+      printQuotaError(updatedAccount, updatedAccount.isAuthDisabled
+        ? `${updatedAccount.authDisabledReason ?? "Auth disabled"} (refresh failed)`
         : "Failed to refresh token");
       return;
     }
