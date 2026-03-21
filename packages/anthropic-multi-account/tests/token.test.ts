@@ -157,6 +157,28 @@ describe("token", () => {
       expect(client.logs[0]?.level).toBe("warn");
       expect(client.logs[0]?.message).toContain("network error");
     });
+
+    test("returns permanent failure for wrapped pi-ai auth-invalid errors without numeric status", async () => {
+      const permanentMessages = [
+        "[pi-ai] refreshWithPiAi failed: body={\"error\":\"invalid_grant\",\"error_description\":\"Refresh token revoked\"}",
+        "refresh failed: invalid_scope requested scope is invalid",
+        "Token refresh failed: unauthorized_client: refresh token is no longer valid",
+      ];
+
+      for (const [index, message] of permanentMessages.entries()) {
+        const client = createMockClient();
+        refreshWithPiAiSpy.mockReset();
+        refreshWithPiAiSpy.mockRejectedValue(new Error(message));
+
+        const result = await refreshToken("old-refresh", `account-auth-invalid-${index}`, client);
+
+        expect(result).toEqual({ ok: false, permanent: true });
+        expect(client.logs.length).toBe(1);
+        expect(client.logs[0]?.service).toBe(ANTHROPIC_OAUTH_ADAPTER.serviceLogName);
+        expect(client.logs[0]?.level).toBe("error");
+        expect(client.logs[0]?.message).toContain(message);
+      }
+    });
   });
 
   describe("refreshToken Promise dedup", () => {
