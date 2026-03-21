@@ -1,5 +1,11 @@
 # opencode-multi-account-core
 
+## 0.2.5
+
+### Patch Changes
+
+- [`49305d2`](https://github.com/other-yuka/kyoli-gam/commit/49305d26a65b27943953d69a2c3bf3efbee03382) Thanks [@other-yuka](https://github.com/other-yuka)! - Fix Anthropic multi-auth token refresh handling by proxying token endpoint requests through an external Node process, preserving token lifecycle updates for permanent failures and refresh token rotation. This works around Bun request header behavior documented in oven-sh/bun#17012.
+
 ## 0.2.4
 
 ### Patch Changes
