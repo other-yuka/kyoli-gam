@@ -1,0 +1,178 @@
+packages/anthropic-multi-account/src/runtime-factory.ts
+  b9e2b9bbdac74d6c 102-104
+packages/multi-account-core/tests/adapter-contract.test.ts
+  ea131d5425305466 34-50,119
+packages/multi-account-core/src/adapters/anthropic.ts
+  3b21300225b24a37 15
+  5038324b6a85b426 11
+packages/anthropic-multi-account/tests/pi-ai-adapter.test.ts
+  9a78d8d3b3ebea58 174-201,264
+packages/anthropic-multi-account/src/request-transform.ts
+  f2f5996cceb95df4 106,144,146
+packages/anthropic-multi-account/src/pi-ai-adapter.ts
+  34c4fe5a15ab1ee7 47
+  75aad4a29d2a83b4 10
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.19",
+  "base_commit_sha": "ecd91ba8e101551459d6805cacda410461176333",
+  "prompts": {
+    "2ca0d20b8e938d3e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_2daaf1033ffenV2hUKdOiyv9AS-bbd0096c-1275-4618-911d-723ce52105e5",
+        "model": "unknown"
+      },
+      "human_author": "Sanggyu Kang <other.yuka@gmail.com>",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 0,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "34c4fe5a15ab1ee7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_2daaf1033ffenV2hUKdOiyv9AS-4ac6fbd5-be6d-448e-b78e-d3282f3ed9db",
+        "model": "unknown"
+      },
+      "human_author": "Sanggyu Kang <other.yuka@gmail.com>",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 1,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    },
+    "3b21300225b24a37": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_2dab9255dffeC4nhAdUrPgFs8r-139f559a-2672-4b17-8d35-f0ade1e46ab3",
+        "model": "unknown"
+      },
+      "human_author": "Sanggyu Kang <other.yuka@gmail.com>",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 1,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    },
+    "3ff77be1b4cb5eaf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_2dad16cf5ffdN8BNPgWjzmMaRT-cfe295a8-4a5e-4ac3-acfa-181958614f82",
+        "model": "unknown"
+      },
+      "human_author": "Sanggyu Kang <other.yuka@gmail.com>",
+      "messages": [],
+      "total_additions": 6,
+      "total_deletions": 1,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "5038324b6a85b426": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_2dab9255dffeC4nhAdUrPgFs8r-9064bf37-a846-4744-b9c3-58de0baa049a",
+        "model": "unknown"
+      },
+      "human_author": "Sanggyu Kang <other.yuka@gmail.com>",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 1,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    },
+    "75aad4a29d2a83b4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_2daaf1033ffenV2hUKdOiyv9AS-50f27911-330c-4040-991f-2fb1a92e4705",
+        "model": "unknown"
+      },
+      "human_author": "Sanggyu Kang <other.yuka@gmail.com>",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 0,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    },
+    "87bb795345111633": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_2daaf1033ffenV2hUKdOiyv9AS-fb0664c8-ee32-42c4-97f8-d1adaf60380e",
+        "model": "unknown"
+      },
+      "human_author": "Sanggyu Kang <other.yuka@gmail.com>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 3,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "9a78d8d3b3ebea58": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_2daaf1033ffenV2hUKdOiyv9AS-13f05946-cd9a-41e0-b356-132299d9a26d",
+        "model": "unknown"
+      },
+      "human_author": "Sanggyu Kang <other.yuka@gmail.com>",
+      "messages": [],
+      "total_additions": 32,
+      "total_deletions": 0,
+      "accepted_lines": 29,
+      "overriden_lines": 0
+    },
+    "b9e2b9bbdac74d6c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_2dad16cf5ffdN8BNPgWjzmMaRT-9d02527d-42f2-46d8-85f3-5027c617146d",
+        "model": "unknown"
+      },
+      "human_author": "Sanggyu Kang <other.yuka@gmail.com>",
+      "messages": [],
+      "total_additions": 3,
+      "total_deletions": 3,
+      "accepted_lines": 3,
+      "overriden_lines": 0
+    },
+    "ba479269f36cce1e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_2dad16cf5ffdN8BNPgWjzmMaRT-7d6c3166-1dd0-4cf4-af19-1221a00c4237",
+        "model": "unknown"
+      },
+      "human_author": "Sanggyu Kang <other.yuka@gmail.com>",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 6,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "ea131d5425305466": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_2dab9255dffeC4nhAdUrPgFs8r-cbe78285-a985-4d12-bc01-70c6337076ab",
+        "model": "unknown"
+      },
+      "human_author": "Sanggyu Kang <other.yuka@gmail.com>",
+      "messages": [],
+      "total_additions": 18,
+      "total_deletions": 0,
+      "accepted_lines": 18,
+      "overriden_lines": 0
+    },
+    "f2f5996cceb95df4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_2dad16cf5ffdN8BNPgWjzmMaRT-b8319da5-3703-4d5a-8f43-afef95addb23",
+        "model": "unknown"
+      },
+      "human_author": "Sanggyu Kang <other.yuka@gmail.com>",
+      "messages": [],
+      "total_additions": 3,
+      "total_deletions": 1,
+      "accepted_lines": 3,
+      "overriden_lines": 0
+    }
+  }
+}
