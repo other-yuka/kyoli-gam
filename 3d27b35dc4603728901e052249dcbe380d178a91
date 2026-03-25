@@ -1,0 +1,38 @@
+packages/anthropic-multi-account/src/ui/auth-menu.ts
+  4d3c5d4c84ab258c 206
+packages/codex-multi-account/src/ui/auth-menu.ts
+  2228755b6f80a80c 206
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.17",
+  "base_commit_sha": "3d27b35dc4603728901e052249dcbe380d178a91",
+  "prompts": {
+    "2228755b6f80a80c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_2dad16cf5ffdN8BNPgWjzmMaRT-e3fbb35f-7e8a-4fdf-a3cc-c0d2873d0ade",
+        "model": "unknown"
+      },
+      "human_author": "Sanggyu Kang <other.yuka@gmail.com>",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 1,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    },
+    "4d3c5d4c84ab258c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_2dad16cf5ffdN8BNPgWjzmMaRT-1d163e29-2f6f-40be-a3cb-d7beff4bc2e7",
+        "model": "unknown"
+      },
+      "human_author": "Sanggyu Kang <other.yuka@gmail.com>",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 1,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    }
+  }
+}
