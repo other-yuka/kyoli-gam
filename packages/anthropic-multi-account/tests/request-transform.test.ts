@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  buildBillingHeader,
   buildRequestHeaders,
   createResponseStreamTransform,
   getSystemPrompt,
@@ -92,6 +93,37 @@ describe("buildRequestHeaders", () => {
     expect(headers.get("x-request-header")).toBe("request-value");
     expect(headers.get("x-init-header")).toBe("init-value");
     expect(headers.get("x-api-key")).toBe(null);
+  });
+
+  test("sets x-anthropic-billing-header from first user text", () => {
+    const firstUserText = "hello from first user";
+    const body = JSON.stringify({
+      messages: [
+        { role: "system", content: "rules" },
+        { role: "user", content: firstUserText },
+      ],
+    });
+
+    const headers = buildRequestHeaders(
+      "https://api.anthropic.com/v1/messages",
+      { headers: {}, body },
+      "token-789",
+    );
+
+    expect(headers.get("x-anthropic-billing-header")).toBe(buildBillingHeader(firstUserText));
+  });
+
+  test("falls back gracefully when first user text is missing", () => {
+    const headers = buildRequestHeaders(
+      "https://api.anthropic.com/v1/messages",
+      {
+        headers: {},
+        body: JSON.stringify({ messages: [{ role: "assistant", content: "no user" }] }),
+      },
+      "token-999",
+    );
+
+    expect(headers.get("x-anthropic-billing-header")).toBe(buildBillingHeader(""));
   });
 });
 

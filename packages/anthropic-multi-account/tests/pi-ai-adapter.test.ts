@@ -1,12 +1,24 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import {
+  applyAnthropicTokenRequestOverrides,
+  loginWithPiAi,
   resetAnthropicTokenProxyStateForTest,
+  rewriteAnthropicAuthUrl,
   withAnthropicTokenProxyFetch,
 } from "../src/pi-ai-adapter";
+import {
+  ANTHROPIC_AUTHORIZE_ENDPOINT,
+  ANTHROPIC_CLIENT_ID,
+  ANTHROPIC_REDIRECT_URI,
+  ANTHROPIC_SCOPES,
+  ANTHROPIC_TOKEN_ENDPOINT,
+} from "../src/constants";
 import {
   setNodeTokenRequestRunnerForTest,
   type NodeTokenRequestOptions,
 } from "../src/token-node-request";
+import * as piAiOauth from "@mariozechner/pi-ai/oauth";
+import * as usageModule from "../src/usage";
 
 describe("pi-ai-adapter token endpoint proxy", () => {
   let originalFetch: typeof globalThis.fetch;
@@ -47,6 +59,21 @@ describe("pi-ai-adapter token endpoint proxy", () => {
     const runnerSpy = vi.fn(async (options: NodeTokenRequestOptions) => {
       expect(options.endpoint).toBe("https://platform.claude.com/v1/oauth/token");
       expect(typeof options.body).toBe("string");
+      if (options.body.trim().startsWith("{")) {
+        const parsed = JSON.parse(options.body) as {
+          client_id?: string;
+          redirect_uri?: string;
+          scope?: string;
+        };
+        expect(parsed.client_id).toBe(ANTHROPIC_CLIENT_ID);
+        expect(parsed.redirect_uri).toBe(ANTHROPIC_REDIRECT_URI);
+        expect(parsed.scope).toBe(ANTHROPIC_SCOPES);
+      } else {
+        const params = new URLSearchParams(options.body);
+        expect(params.get("client_id")).toBe(ANTHROPIC_CLIENT_ID);
+        expect(params.get("redirect_uri")).toBe(ANTHROPIC_REDIRECT_URI);
+        expect(params.get("scope")).toBe(ANTHROPIC_SCOPES);
+      }
 
       return JSON.stringify({
         ok: true,
@@ -143,5 +170,96 @@ describe("pi-ai-adapter token endpoint proxy", () => {
 
     expect(thrown).toBeInstanceOf(Error);
     expect((thrown as Error).message).toContain("status=429");
+  });
+
+  test("proxy uses adapter token endpoint as source-of-truth, not a hardcoded URL", async () => {
+    const runnerSpy = vi.fn(async (options: NodeTokenRequestOptions) => {
+      expect(options.endpoint).toBe(ANTHROPIC_TOKEN_ENDPOINT);
+      return JSON.stringify({
+        ok: true,
+        body: JSON.stringify({
+          access_token: "refreshed-access",
+          refresh_token: "refreshed-refresh",
+          expires_in: 3600,
+        }),
+      });
+    });
+    setNodeTokenRequestRunnerForTest(runnerSpy);
+
+    installPassthroughFetch();
+
+    const response = await withAnthropicTokenProxyFetch(async () => {
+      return await fetch(ANTHROPIC_TOKEN_ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ grant_type: "refresh_token", refresh_token: "tok" }),
+      });
+    });
+
+    const result = await response.json() as { access_token: string };
+    expect(result.access_token).toBe("refreshed-access");
+    expect(runnerSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test("rewriteAnthropicAuthUrl uses configured authorize endpoint and oauth params", () => {
+    const rewritten = rewriteAnthropicAuthUrl("https://claude.ai/oauth/authorize?state=abc&scope=old");
+    const parsed = new URL(rewritten);
+    const configured = new URL(ANTHROPIC_AUTHORIZE_ENDPOINT);
+
+    expect(parsed.origin).toBe(configured.origin);
+    expect(parsed.pathname).toBe(configured.pathname);
+    expect(parsed.searchParams.get("state")).toBe("abc");
+    expect(parsed.searchParams.get("client_id")).toBe(ANTHROPIC_CLIENT_ID);
+    expect(parsed.searchParams.get("redirect_uri")).toBe(ANTHROPIC_REDIRECT_URI);
+    expect(parsed.searchParams.get("scope")).toBe(ANTHROPIC_SCOPES);
+  });
+
+  test("applyAnthropicTokenRequestOverrides rewrites oauth body fields for authorization code exchange", () => {
+    const overridden = applyAnthropicTokenRequestOverrides(new URLSearchParams({
+      grant_type: "authorization_code",
+      code: "auth-code",
+      client_id: "old-client",
+      redirect_uri: "https://old.example/callback",
+      scope: "old-scope",
+    }).toString());
+
+    const params = new URLSearchParams(overridden);
+    expect(params.get("client_id")).toBe(ANTHROPIC_CLIENT_ID);
+    expect(params.get("redirect_uri")).toBe(ANTHROPIC_REDIRECT_URI);
+    expect(params.get("scope")).toBe(ANTHROPIC_SCOPES);
+  });
+
+  test("loginWithPiAi forwards rewritten auth url through onAuth callback", async () => {
+    const onAuthSpy = vi.fn();
+    const loginSpy = vi.spyOn(piAiOauth, "loginAnthropic").mockImplementation(async ({ onAuth }) => {
+      onAuth({
+        url: "https://claude.ai/oauth/authorize?state=xyz&client_id=legacy",
+        instructions: "continue",
+      });
+
+      return {
+        access: "access-token",
+        refresh: "refresh-token",
+        expires: Date.now() + 3_600_000,
+      };
+    });
+    const profileSpy = vi.spyOn(usageModule, "fetchProfile").mockResolvedValue({
+      ok: true,
+      data: { email: "user@example.com", planTier: "pro" },
+    });
+
+    await loginWithPiAi({
+      onAuth: onAuthSpy,
+      onPrompt: async () => "",
+    });
+
+    const authInfo = onAuthSpy.mock.calls[0]?.[0] as { url: string };
+    const parsed = new URL(authInfo.url);
+    expect(parsed.searchParams.get("client_id")).toBe(ANTHROPIC_CLIENT_ID);
+    expect(parsed.searchParams.get("redirect_uri")).toBe(ANTHROPIC_REDIRECT_URI);
+    expect(parsed.searchParams.get("scope")).toBe(ANTHROPIC_SCOPES);
+
+    loginSpy.mockRestore();
+    profileSpy.mockRestore();
   });
 });
