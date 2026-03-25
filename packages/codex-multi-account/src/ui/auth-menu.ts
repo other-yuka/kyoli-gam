@@ -203,7 +203,7 @@ function printUsageEntry(name: string, entry: { utilization: number; resets_at: 
     return;
   }
   const bar = createProgressBar(entry.utilization);
-  const resetInfo = entry.utilization >= 100 && entry.resets_at
+  const resetInfo = entry.resets_at
     ? formatResetTime(entry.resets_at)
     : "";
   console.log(`     ${connector} ${name.padEnd(16)} ${bar}${resetInfo}`);
