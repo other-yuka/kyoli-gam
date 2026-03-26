@@ -1,5 +1,11 @@
 # opencode-multi-account-core
 
+## 0.2.6
+
+### Patch Changes
+
+- [`508d0a7`](https://github.com/other-yuka/kyoli-gam/commit/508d0a705efcfbd5d9ec1a930d23edacdead3421) Thanks [@other-yuka](https://github.com/other-yuka)! - Add missing beta flags, move billing header to HTTP transport, add env var overrides for OAuth params, and unify token endpoint source
+
 ## 0.2.5
 
 ### Patch Changes
