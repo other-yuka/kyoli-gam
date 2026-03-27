@@ -1,5 +1,11 @@
 # opencode-multi-account-core
 
+## 0.2.7
+
+### Patch Changes
+
+- Revert the anthropic oauth alignment change so the published packages match the restored stable behavior.
+
 ## 0.2.6
 
 ### Patch Changes
