@@ -3,7 +3,6 @@ import * as piAiAdapter from "../src/pi-ai-adapter";
 import { AccountRuntimeFactory } from "../src/runtime-factory";
 import { AccountStore } from "../src/account-store";
 import { TOKEN_EXPIRY_BUFFER_MS } from "../src/constants";
-import { buildBillingHeader } from "../src/request-transform";
 import { clearRefreshMutex } from "../src/token";
 import { createMockClient, setupTestEnv } from "./helpers";
 
@@ -58,10 +57,7 @@ describe("runtime-factory", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         tools: [{ name: "calc" }],
-        messages: [
-          { role: "user", content: "runtime billing text" },
-          { content: [{ type: "tool_use", name: "calc" }] },
-        ],
+        messages: [{ content: [{ type: "tool_use", name: "calc" }] }],
       }),
     });
 
@@ -76,9 +72,8 @@ describe("runtime-factory", () => {
     expect(transformedUrl).toContain("/v1/messages?beta=true");
     expect(headers.get("authorization")).toBe("Bearer access-1");
     expect(headers.get("anthropic-beta")).toBeTruthy();
-    expect(headers.get("x-anthropic-billing-header")).toBe(buildBillingHeader("runtime billing text"));
     expect(body.tools[0]?.name).not.toBe("calc");
-    expect(body.messages[1]?.content[0]?.name).not.toBe("calc");
+    expect(body.messages[0]?.content[0]?.name).not.toBe("calc");
   });
 
   test("refreshes expired token through pi-ai adapter", async () => {

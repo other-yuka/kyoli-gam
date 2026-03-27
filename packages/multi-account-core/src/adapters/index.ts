@@ -1,6 +1,3 @@
 export type { OAuthAdapter, OAuthAdapterTransformConfig, OAuthAdapterPlanLabels } from "./types";
-export {
-  anthropicOAuthAdapter,
-  resolveAnthropicOAuthEnv,
-} from "./anthropic";
+export { anthropicOAuthAdapter } from "./anthropic";
 export { openAIOAuthAdapter } from "./openai";

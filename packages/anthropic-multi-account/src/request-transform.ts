@@ -27,7 +27,7 @@ export function buildBillingHeader(firstUserMessage: string): string {
     .update(`${salt}${sampled}${version}`)
     .digest("hex")
     .slice(0, 3);
-  return `cc_version=${version}.${hash}; cc_entrypoint=cli; cch=00000;`;
+  return `x-anthropic-billing-header: cc_version=${version}.${hash}; cc_entrypoint=cli; cch=00000;`;
 }
 
 const OPENCODE_CAMEL_RE = /OpenCode/g;
@@ -36,36 +36,13 @@ const TOOL_PREFIX_RESPONSE_RE = /"name"\s*:\s*"mcp_([^"]+)"/g;
 
 type SystemTextEntry = { type: string; text?: string };
 type ToolEntry = { name?: string };
-type MessageContentBlock = { type?: string; name?: string; text?: string };
-type MessageEntry = { role?: string; content?: string | MessageContentBlock[] };
+type MessageContentBlock = { type: string; name?: string };
+type MessageEntry = { content?: MessageContentBlock[] };
 type RequestPayload = {
   system?: SystemTextEntry[];
   tools?: ToolEntry[];
   messages?: MessageEntry[];
 };
-
-function extractFirstUserTextFromBody(body: string | undefined): string {
-  if (!body) return "";
-
-  try {
-    const parsed = JSON.parse(body) as RequestPayload;
-    if (!Array.isArray(parsed.messages)) return "";
-
-    for (const message of parsed.messages) {
-      if (message.role !== "user") continue;
-      if (typeof message.content === "string") return message.content;
-      if (!Array.isArray(message.content)) continue;
-
-      for (const block of message.content) {
-        if (block.type === "text" && typeof block.text === "string") {
-          return block.text;
-        }
-      }
-    }
-  } catch {}
-
-  return "";
-}
 
 function addToolPrefix(name: string | undefined): string | undefined {
   if (!ANTHROPIC_OAUTH_ADAPTER.transform.addToolPrefix) {
@@ -103,7 +80,6 @@ export function buildRequestHeaders(
   input: RequestInfo | URL,
   init: RequestInit | undefined,
   accessToken: string,
-  bodyString?: string,
 ): Headers {
   const headers = new Headers();
 
@@ -140,15 +116,6 @@ export function buildRequestHeaders(
   headers.set("user-agent", CLAUDE_CLI_USER_AGENT);
   headers.set("anthropic-dangerous-direct-browser-access", "true");
   headers.set("x-app", "cli");
-
-  const resolvedBody = bodyString ?? (typeof init?.body === "string" ? init.body : undefined);
-  const billingHeader = buildBillingHeader(
-    extractFirstUserTextFromBody(resolvedBody),
-  );
-  if (billingHeader) {
-    headers.set("x-anthropic-billing-header", billingHeader);
-  }
-
   headers.delete("x-api-key");
 
   return headers;

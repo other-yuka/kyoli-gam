@@ -11,7 +11,7 @@ import { AccountManager } from "./account-manager";
 import { executeWithAccountRotation } from "./executor";
 import { getPlanLabel, getUsageSummary } from "./usage";
 import { handleAuthorize } from "./auth-handler";
-import { getSystemPrompt } from "./request-transform";
+import { getSystemPrompt, buildBillingHeader } from "./request-transform";
 import { ANTHROPIC_BETA_HEADER, CLAUDE_CLI_USER_AGENT } from "./constants";
 import { loadConfig } from "./config";
 import { ProactiveRefreshQueue } from "./proactive-refresh";
@@ -20,6 +20,25 @@ import { AccountRuntimeFactory } from "./runtime-factory";
 import { formatWaitTime, getAccountLabel, showToast } from "./utils";
 import { ANTHROPIC_OAUTH_ADAPTER } from "./constants";
 import type { OAuthCredentials, PluginClient } from "./types";
+
+function extractFirstUserText(input: Record<string, unknown>): string {
+  try {
+    const raw = input as { messages?: unknown; request?: { messages?: unknown } };
+    const messages = (raw.messages ?? raw.request?.messages) as
+      Array<{ role?: string; content?: string | Array<{ type?: string; text?: string }> }> | undefined;
+    if (!Array.isArray(messages)) return "";
+    for (const msg of messages) {
+      if (msg.role !== "user") continue;
+      if (typeof msg.content === "string") return msg.content;
+      if (Array.isArray(msg.content)) {
+        for (const block of msg.content) {
+          if (block.type === "text" && block.text) return block.text;
+        }
+      }
+    }
+  } catch {}
+  return "";
+}
 
 function injectSystemPrompt(output: { system?: string[] }): void {
   const systemPrompt = getSystemPrompt();
@@ -48,8 +67,12 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
   let poolChainConfig: PoolChainConfig = { pools: [], chains: [] };
 
   return {
-    "experimental.chat.system.transform": (_input: Record<string, unknown>, output: { system?: string[] }) => {
+    "experimental.chat.system.transform": (input: Record<string, unknown>, output: { system?: string[] }) => {
       injectSystemPrompt(output);
+      const billingHeader = buildBillingHeader(extractFirstUserText(input));
+      if (billingHeader && !output.system?.includes(billingHeader)) {
+        output.system?.unshift(billingHeader);
+      }
     },
 
     tool: {
