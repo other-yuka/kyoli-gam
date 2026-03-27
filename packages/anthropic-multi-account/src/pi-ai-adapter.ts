@@ -2,12 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import * as piAiOauth from "@mariozechner/pi-ai/oauth";
 import type { OAuthCredentials as PiAiOAuthCredentials, OAuthPrompt } from "@mariozechner/pi-ai/oauth";
 import {
-  ANTHROPIC_AUTHORIZE_ENDPOINT,
-  ANTHROPIC_CLIENT_ID,
   ANTHROPIC_OAUTH_ADAPTER,
-  ANTHROPIC_REDIRECT_URI,
-  ANTHROPIC_SCOPES,
-  ANTHROPIC_TOKEN_ENDPOINT,
   TOKEN_REFRESH_TIMEOUT_MS,
 } from "./constants";
 import * as tokenNodeRequest from "./token-node-request";
@@ -44,14 +39,12 @@ export interface LoginWithPiAiCallbacks {
   onManualCodeInput?: () => Promise<string>;
 }
 
-const ANTHROPIC_REFRESH_ENDPOINT = ANTHROPIC_TOKEN_ENDPOINT;
-const LEGACY_ANTHROPIC_TOKEN_ENDPOINT = "https://platform.claude.com/v1/oauth/token";
+const ANTHROPIC_REFRESH_ENDPOINT = "https://platform.claude.com/v1/oauth/token";
 const REFRESH_NODE_EXECUTABLE = process.env.OPENCODE_REFRESH_NODE_EXECUTABLE || "node";
 const tokenProxyContext = new AsyncLocalStorage<boolean>();
 let tokenProxyInstalled = false;
 let tokenProxyOriginalFetch: typeof globalThis.fetch | null = null;
 const refreshEndpointUrl = new URL(ANTHROPIC_REFRESH_ENDPOINT);
-const legacyRefreshEndpointUrl = new URL(LEGACY_ANTHROPIC_TOKEN_ENDPOINT);
 
 function buildRefreshRequestError(details: string): Error {
   return new Error(`Anthropic token refresh request failed. url=${ANTHROPIC_REFRESH_ENDPOINT}; details=${details}`);
@@ -72,83 +65,10 @@ function isAnthropicTokenEndpoint(input: RequestInfo | URL): boolean {
 
   try {
     const url = new URL(rawUrl);
-    const isConfiguredEndpoint =
-      url.origin === refreshEndpointUrl.origin
+    return url.origin === refreshEndpointUrl.origin
       && url.pathname === refreshEndpointUrl.pathname;
-    const isLegacyEndpoint =
-      url.origin === legacyRefreshEndpointUrl.origin
-      && url.pathname === legacyRefreshEndpointUrl.pathname;
-
-    return isConfiguredEndpoint || isLegacyEndpoint;
   } catch {
-    return rawUrl === ANTHROPIC_REFRESH_ENDPOINT || rawUrl === LEGACY_ANTHROPIC_TOKEN_ENDPOINT;
-  }
-}
-
-function applyOverridesToTokenParams(params: URLSearchParams): void {
-  params.set("client_id", ANTHROPIC_CLIENT_ID);
-
-  if (params.get("grant_type") === "authorization_code") {
-    params.set("redirect_uri", ANTHROPIC_REDIRECT_URI);
-    params.set("scope", ANTHROPIC_SCOPES);
-  }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-export function applyAnthropicTokenRequestOverrides(rawBody: string): string {
-  const trimmed = rawBody.trim();
-  if (trimmed.length === 0) {
-    return rawBody;
-  }
-
-  if (trimmed.startsWith("{")) {
-    try {
-      const parsed = JSON.parse(trimmed) as unknown;
-      if (!isRecord(parsed)) {
-        return rawBody;
-      }
-
-      const grantType = typeof parsed.grant_type === "string" ? parsed.grant_type : "";
-      parsed.client_id = ANTHROPIC_CLIENT_ID;
-      if (grantType === "authorization_code") {
-        parsed.redirect_uri = ANTHROPIC_REDIRECT_URI;
-        parsed.scope = ANTHROPIC_SCOPES;
-      }
-
-      return JSON.stringify(parsed);
-    } catch {
-      return rawBody;
-    }
-  }
-
-  const params = new URLSearchParams(rawBody);
-  applyOverridesToTokenParams(params);
-  return params.toString();
-}
-
-export function rewriteAnthropicAuthUrl(rawUrl: string): string {
-  try {
-    const configuredAuthorizeUrl = new URL(ANTHROPIC_AUTHORIZE_ENDPOINT);
-    const rewritten = new URL(rawUrl);
-
-    rewritten.protocol = configuredAuthorizeUrl.protocol;
-    rewritten.host = configuredAuthorizeUrl.host;
-    rewritten.pathname = configuredAuthorizeUrl.pathname;
-
-    for (const [key, value] of configuredAuthorizeUrl.searchParams.entries()) {
-      rewritten.searchParams.set(key, value);
-    }
-
-    rewritten.searchParams.set("client_id", ANTHROPIC_CLIENT_ID);
-    rewritten.searchParams.set("redirect_uri", ANTHROPIC_REDIRECT_URI);
-    rewritten.searchParams.set("scope", ANTHROPIC_SCOPES);
-
-    return rewritten.toString();
-  } catch {
-    return rawUrl;
+    return rawUrl === ANTHROPIC_REFRESH_ENDPOINT;
   }
 }
 
@@ -197,12 +117,10 @@ function shouldProxyTokenRequest(input: RequestInfo | URL): boolean {
 }
 
 async function postAnthropicTokenViaNode(body: string): Promise<Response> {
-  const overriddenBody = applyAnthropicTokenRequestOverrides(body);
-
   let output: string;
   try {
     output = await tokenNodeRequest.runNodeTokenRequest({
-      body: overriddenBody,
+      body,
       endpoint: ANTHROPIC_REFRESH_ENDPOINT,
       executable: REFRESH_NODE_EXECUTABLE,
       timeoutMs: TOKEN_REFRESH_TIMEOUT_MS,
@@ -285,12 +203,7 @@ export async function loginWithPiAi(
   callbacks: LoginWithPiAiCallbacks,
 ): Promise<Partial<StoredAccount>> {
   const piCreds = await withAnthropicTokenProxyFetch(() => piAiOauth.loginAnthropic({
-    onAuth: (info) => {
-      callbacks.onAuth({
-        ...info,
-        url: info.url ? rewriteAnthropicAuthUrl(info.url) : info.url,
-      });
-    },
+    onAuth: callbacks.onAuth,
     onPrompt: callbacks.onPrompt,
     onProgress: callbacks.onProgress,
     onManualCodeInput: callbacks.onManualCodeInput,

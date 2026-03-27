@@ -99,9 +99,9 @@ export class AccountRuntimeFactory {
     accessToken: string,
   ): Promise<Response> {
     const transformedInput = transformRequestUrl(input);
-    const rawBody = typeof init?.body === "string" ? init.body : undefined;
-    const headers = buildRequestHeaders(transformedInput, init, accessToken, rawBody);
-    const transformedBody = rawBody !== undefined ? transformRequestBody(rawBody) : init?.body;
+    const headers = buildRequestHeaders(transformedInput, init, accessToken);
+    const transformedBody =
+      typeof init?.body === "string" ? transformRequestBody(init.body) : init?.body;
 
     const response = await fetch(transformedInput, {
       ...init,

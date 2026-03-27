@@ -1,14 +1,9 @@
-import { anthropicOAuthAdapter, resolveAnthropicOAuthEnv } from "opencode-multi-account-core";
-
-const resolvedAnthropicOAuthEnv = resolveAnthropicOAuthEnv();
+import { anthropicOAuthAdapter } from "opencode-multi-account-core";
 
 /** Anthropic OAuth adapter config */
 export const ANTHROPIC_OAUTH_ADAPTER = anthropicOAuthAdapter;
 
 export const ANTHROPIC_CLIENT_ID = ANTHROPIC_OAUTH_ADAPTER.oauthClientId;
-export const ANTHROPIC_AUTHORIZE_ENDPOINT = resolvedAnthropicOAuthEnv.authorizeUrl;
-export const ANTHROPIC_REDIRECT_URI = resolvedAnthropicOAuthEnv.redirectUri;
-export const ANTHROPIC_SCOPES = resolvedAnthropicOAuthEnv.scopes;
 
 /** Token exchange / refresh endpoint */
 export const ANTHROPIC_TOKEN_ENDPOINT =
