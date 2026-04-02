@@ -1,5 +1,16 @@
 # opencode-codex-multi-account
 
+## 0.2.8
+
+### Patch Changes
+
+- ec78b60: fix: switch build toolchain from esbuild to tsup for proper CJS interop
+
+  esbuild was converting `import lockfile from 'proper-lockfile'` to `import * as lockfile` in the published dist, causing `lockfile.lock is not a function` at runtime. tsup handles CJS-to-ESM interop correctly.
+
+- Updated dependencies [ec78b60]
+  - opencode-multi-account-core@0.2.8
+
 ## 0.2.7
 
 ### Patch Changes
