@@ -1,0 +1,21 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.3",
+  "base_commit_sha": "9d0a01047a4b2257860feb9d153ad9b384f2c934",
+  "prompts": {
+    "977cd518ffe98c8f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_2b30947cbffeUx6RfzJJEavc7z-696f1638-3ed8-4635-8c4f-0efe7f262f13",
+        "model": "unknown"
+      },
+      "human_author": "Sanggyu Kang",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 1,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    }
+  }
+}
