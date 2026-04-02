@@ -1,0 +1,23 @@
+.changeset/fix-tsup-migration.md
+  6618a4f3118c0d43 1-9
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.3",
+  "base_commit_sha": "ec78b60c9d75455e0eca6af842ea2f64c15e9217",
+  "prompts": {
+    "6618a4f3118c0d43": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_2b30947cbffeUx6RfzJJEavc7z-1a83af9b-0e22-411a-a62e-5df6290e91f5",
+        "model": "unknown"
+      },
+      "human_author": "Sanggyu Kang",
+      "messages": [],
+      "total_additions": 9,
+      "total_deletions": 0,
+      "accepted_lines": 9,
+      "overriden_lines": 0
+    }
+  }
+}
