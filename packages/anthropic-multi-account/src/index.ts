@@ -20,7 +20,15 @@ import { AccountRuntimeFactory } from "./runtime-factory";
 import { formatWaitTime, getAccountLabel, showToast } from "./utils";
 import { ANTHROPIC_OAUTH_ADAPTER } from "./constants";
 import { getUserAgent } from "./model-config";
+import { syncBootstrapAuth } from "./bootstrap-auth";
 import type { OAuthCredentials, PluginClient } from "./types";
+
+const EMPTY_OAUTH_CREDENTIALS: OAuthCredentials = {
+  type: "oauth",
+  refresh: "",
+  access: "",
+  expires: 0,
+};
 
 function extractFirstUserText(input: Record<string, unknown>): string {
   try {
@@ -60,12 +68,77 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
   await loadConfig();
 
   const store = new AccountStore();
+  await syncBootstrapAuth(client, store).catch(() => {});
+
   let manager: AccountManager | null = null;
   let runtimeFactory: AccountRuntimeFactory | null = null;
   let refreshQueue: ProactiveRefreshQueue | null = null;
   let poolManager: PoolManager | null = null;
   let cascadeStateManager: CascadeStateManager | null = null;
   let poolChainConfig: PoolChainConfig = { pools: [], chains: [] };
+
+  async function ensureExecutionInfrastructure(): Promise<void> {
+    runtimeFactory ??= new AccountRuntimeFactory(store, client);
+    poolChainConfig = await loadPoolChainConfig();
+
+    poolManager ??= new PoolManager();
+    poolManager.loadPools(poolChainConfig.pools);
+    cascadeStateManager ??= new CascadeStateManager();
+
+    if (manager) {
+      manager.setRuntimeFactory(runtimeFactory);
+      manager.setClient(client);
+    }
+  }
+
+  async function startRefreshQueueIfNeeded(): Promise<void> {
+    if (!manager || manager.getAccountCount() === 0) {
+      return;
+    }
+
+    await ensureExecutionInfrastructure();
+
+    if (refreshQueue) {
+      return;
+    }
+
+    refreshQueue = new ProactiveRefreshQueue(
+      client,
+      store,
+      (uuid) => {
+        runtimeFactory?.invalidate(uuid);
+        void manager?.refresh();
+      },
+    );
+    refreshQueue.start();
+  }
+
+  async function initializeManagerFromStore(): Promise<boolean> {
+    if (manager) {
+      return manager.getAccountCount() > 0;
+    }
+
+    const storage = await store.load();
+    if (storage.accounts.length === 0) {
+      return false;
+    }
+
+    manager = await AccountManager.create(store, EMPTY_OAUTH_CREDENTIALS, client);
+    await ensureExecutionInfrastructure();
+    await startRefreshQueueIfNeeded();
+    return manager.getAccountCount() > 0;
+  }
+
+  async function initializeManagerFromAuth(credentials: OAuthCredentials): Promise<void> {
+    if (!manager) {
+      manager = await AccountManager.create(store, credentials, client);
+    }
+
+    await ensureExecutionInfrastructure();
+    await startRefreshQueueIfNeeded();
+  }
+
+  await initializeManagerFromStore().catch(() => {});
 
   return {
     "experimental.chat.system.transform": (input: Record<string, unknown>, output: { system?: string[] }) => {
@@ -173,25 +246,24 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
 
         const credentials = auth as OAuthCredentials;
         await migrateFromAuthJson("anthropic", store);
-        manager = await AccountManager.create(store, credentials, client);
-        runtimeFactory = new AccountRuntimeFactory(store, client);
-        manager.setRuntimeFactory(runtimeFactory);
+        await initializeManagerFromAuth(credentials);
 
-        poolChainConfig = await loadPoolChainConfig();
-        poolManager = new PoolManager();
-        poolManager.loadPools(poolChainConfig.pools);
-        cascadeStateManager = new CascadeStateManager();
+        const initializedManager = manager;
+        if (!initializedManager) {
+          return { apiKey: "", fetch };
+        }
 
-        if (manager.getAccountCount() > 0) {
-          const activeLabel = manager.getActiveAccount() ? getAccountLabel(manager.getActiveAccount()!) : "none";
+        if (initializedManager.getAccountCount() > 0) {
+          const activeAccount = initializedManager.getActiveAccount();
+          const activeLabel = activeAccount ? getAccountLabel(activeAccount) : "none";
           void showToast(
             client,
-            `Multi-Auth: ${manager.getAccountCount()} account(s) loaded. Active: ${activeLabel}`,
+            `Multi-Auth: ${initializedManager.getAccountCount()} account(s) loaded. Active: ${activeLabel}`,
             "info",
           );
-          await manager.validateNonActiveTokens(client);
+          await initializedManager.validateNonActiveTokens(client);
 
-          const disabledCount = manager.getAccounts().filter((a) => a.isAuthDisabled).length;
+          const disabledCount = initializedManager.getAccounts().filter((a) => a.isAuthDisabled).length;
           if (disabledCount > 0) {
             void showToast(
               client,
@@ -199,19 +271,6 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
               "warning",
             );
           }
-
-          if (refreshQueue) {
-            await refreshQueue.stop();
-          }
-          refreshQueue = new ProactiveRefreshQueue(
-            client,
-            store,
-            (uuid) => {
-              runtimeFactory?.invalidate(uuid);
-              void manager?.refresh();
-            },
-          );
-          refreshQueue.start();
         }
 
         return {
@@ -223,11 +282,11 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
             output.headers["x-app"] = "cli";
           },
           async fetch(input: RequestInfo | URL, init?: RequestInit) {
-            if (!manager || !runtimeFactory) {
+            if (!initializedManager || !runtimeFactory) {
               return fetch(input, init);
             }
 
-            if (manager.getAccountCount() === 0) {
+            if (initializedManager.getAccountCount() === 0) {
               throw new Error(
                 "No Anthropic accounts configured. Run `opencode auth login` to add an account.",
               );
@@ -240,7 +299,7 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
             }
 
             return executeWithAccountRotation(
-              manager,
+              initializedManager,
               runtimeFactory,
               client,
               input,
