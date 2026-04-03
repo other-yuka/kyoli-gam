@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import {
   ANTHROPIC_OAUTH_ADAPTER,
-  ANTHROPIC_BETA_HEADER,
-  CLAUDE_CLI_USER_AGENT,
   TOOL_PREFIX,
 } from "./constants";
+import { getModelBetas } from "./betas";
+import { getUserAgent } from "./model-config";
 import { SYSTEM_PROMPT } from "./anthropic-prompt";
 
 export function getSystemPrompt(): string {
@@ -80,6 +80,8 @@ export function buildRequestHeaders(
   input: RequestInfo | URL,
   init: RequestInit | undefined,
   accessToken: string,
+  modelId = "unknown",
+  excludedBetas?: Set<string>,
 ): Headers {
   const headers = new Headers();
 
@@ -106,14 +108,15 @@ export function buildRequestHeaders(
     .map((b) => b.trim())
     .filter(Boolean);
 
+  const modelBetas = getModelBetas(modelId, excludedBetas);
   const mergedBetas = [...new Set([
-    ...ANTHROPIC_BETA_HEADER.split(","),
+    ...modelBetas,
     ...incomingBetas,
   ])].join(",");
 
   headers.set("authorization", `Bearer ${accessToken}`);
   headers.set("anthropic-beta", mergedBetas);
-  headers.set("user-agent", CLAUDE_CLI_USER_AGENT);
+  headers.set("user-agent", getUserAgent());
   headers.set("anthropic-dangerous-direct-browser-access", "true");
   headers.set("x-app", "cli");
   headers.delete("x-api-key");
@@ -169,6 +172,19 @@ export function transformRequestBody(body: string | undefined): string | undefin
     return JSON.stringify(parsed);
   } catch {
     return body;
+  }
+}
+
+export function extractModelIdFromBody(body: BodyInit | null | undefined): string {
+  if (typeof body !== "string") {
+    return "unknown";
+  }
+
+  try {
+    const parsed = JSON.parse(body) as { model?: string };
+    return parsed.model ?? "unknown";
+  } catch {
+    return "unknown";
   }
 }
 
