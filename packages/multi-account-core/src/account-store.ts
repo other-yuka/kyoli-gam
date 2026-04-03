@@ -1,19 +1,15 @@
 import { promises as fs } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
-import * as lockfile from "proper-lockfile";
 import * as v from "valibot";
 import { loadAccounts, readStorageFromDisk } from "./storage";
 import { ACCOUNTS_FILENAME } from "./constants";
+import { withDirectoryLock } from "./file-lock";
 import { AccountStorageSchema } from "./types";
 import { getConfigDir, getErrorCode } from "./utils";
 import type { AccountStorage, StoredAccount } from "./types";
 
 const FILE_MODE = 0o600;
-const LOCK_OPTIONS = {
-  stale: 10_000,
-  retries: { retries: 10, minTimeout: 50, maxTimeout: 2000, factor: 2 },
-};
 
 function getStoragePath(): string {
   return join(getConfigDir(), ACCOUNTS_FILENAME);
@@ -64,18 +60,7 @@ async function ensureStorageFileExists(targetPath: string): Promise<void> {
 async function withFileLock<T>(fn: (storagePath: string) => Promise<T>): Promise<T> {
   const storagePath = getStoragePath();
   await ensureStorageFileExists(storagePath);
-
-  let release: (() => Promise<void>) | null = null;
-  try {
-    release = await lockfile.lock(storagePath, LOCK_OPTIONS);
-    return await fn(storagePath);
-  } finally {
-    if (release) {
-      try {
-        await release();
-      } catch {}
-    }
-  }
+  return await withDirectoryLock(storagePath, () => fn(storagePath));
 }
 
 export interface DiskCredentials {
