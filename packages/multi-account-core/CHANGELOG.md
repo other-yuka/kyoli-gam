@@ -1,5 +1,11 @@
 # opencode-multi-account-core
 
+## 0.2.10
+
+### Patch Changes
+
+- [`f98f557`](https://github.com/other-yuka/kyoli-gam/commit/f98f5577645c6182d028738ce1d0fc62785c6ecb) Thanks [@other-yuka](https://github.com/other-yuka)! - Fix serve and web provider loading by eagerly initializing Anthropic auth state and using ESM-safe proper-lockfile imports.
+
 ## 0.2.9
 
 ## 0.2.8
