@@ -12,13 +12,14 @@ import { executeWithAccountRotation } from "./executor";
 import { getPlanLabel, getUsageSummary } from "./usage";
 import { handleAuthorize } from "./auth-handler";
 import { getSystemPrompt, buildBillingHeader } from "./request-transform";
-import { ANTHROPIC_BETA_HEADER, CLAUDE_CLI_USER_AGENT } from "./constants";
+import { ANTHROPIC_BETA_HEADER } from "./constants";
 import { loadConfig } from "./config";
 import { ProactiveRefreshQueue } from "./proactive-refresh";
 import { AccountStore } from "./account-store";
 import { AccountRuntimeFactory } from "./runtime-factory";
 import { formatWaitTime, getAccountLabel, showToast } from "./utils";
 import { ANTHROPIC_OAUTH_ADAPTER } from "./constants";
+import { getUserAgent } from "./model-config";
 import type { OAuthCredentials, PluginClient } from "./types";
 
 function extractFirstUserText(input: Record<string, unknown>): string {
@@ -217,7 +218,7 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
           apiKey: "",
           "chat.headers": async (input: { provider?: { info?: { id?: string } } }, output: { headers: Record<string, string> }) => {
             if (input.provider?.info?.id !== ANTHROPIC_OAUTH_ADAPTER.authProviderId) return;
-            output.headers["user-agent"] = CLAUDE_CLI_USER_AGENT;
+            output.headers["user-agent"] = getUserAgent();
             output.headers["anthropic-beta"] = ANTHROPIC_BETA_HEADER;
             output.headers["x-app"] = "cli";
           },
