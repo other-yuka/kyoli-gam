@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
-import lockfile from "proper-lockfile";
+import * as lockfile from "proper-lockfile";
 import * as v from "valibot";
 import { loadAccounts, readStorageFromDisk } from "./storage";
 import { ACCOUNTS_FILENAME } from "./constants";
