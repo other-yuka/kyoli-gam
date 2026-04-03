@@ -1,5 +1,12 @@
 # opencode-codex-multi-account
 
+## 0.2.10
+
+### Patch Changes
+
+- Updated dependencies [[`f98f557`](https://github.com/other-yuka/kyoli-gam/commit/f98f5577645c6182d028738ce1d0fc62785c6ecb)]:
+  - opencode-multi-account-core@0.2.10
+
 ## 0.2.9
 
 ### Patch Changes
