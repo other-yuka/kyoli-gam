@@ -1,5 +1,11 @@
 # opencode-multi-account-core
 
+## 0.2.11
+
+### Patch Changes
+
+- [`72c4692`](https://github.com/other-yuka/kyoli-gam/commit/72c469275ee402e4e977ee0784a0c222cb8c44b5) Thanks [@other-yuka](https://github.com/other-yuka)! - Replace proper-lockfile with a built-in directory lock to avoid serve and web runtime interop issues.
+
 ## 0.2.10
 
 ### Patch Changes
