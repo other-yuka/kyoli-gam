@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  extractModelIdFromBody,
   buildRequestHeaders,
   createResponseStreamTransform,
   getSystemPrompt,
@@ -7,10 +8,12 @@ import {
   transformRequestUrl,
 } from "../src/request-transform";
 import {
-  ANTHROPIC_BETA_HEADER,
   CLAUDE_CLI_USER_AGENT,
   TOOL_PREFIX,
 } from "../src/constants";
+import { resetExcludedBetas } from "../src/betas";
+
+const DEFAULT_BETAS = "oauth-2025-04-20,interleaved-thinking-2025-05-14";
 
 function createChunkedStream(chunks: string[]): ReadableStream<Uint8Array> {
   return new ReadableStream<Uint8Array>({
@@ -47,6 +50,19 @@ describe("getSystemPrompt", () => {
 });
 
 describe("buildRequestHeaders", () => {
+  test("adds model-specific betas for Claude 4.6 models", () => {
+    const headers = buildRequestHeaders(
+      "https://api.anthropic.com/v1/messages",
+      { headers: {} },
+      "token-123",
+      "claude-sonnet-4-6",
+    );
+
+    expect(headers.get("anthropic-beta")).toBe(
+      `${DEFAULT_BETAS},effort-2025-11-24`,
+    );
+  });
+
   test("sets auth, merged beta, user-agent, removes x-api-key, and preserves init headers", () => {
     const headers = buildRequestHeaders(
       "https://api.anthropic.com/v1/messages",
@@ -62,7 +78,7 @@ describe("buildRequestHeaders", () => {
 
     expect(headers.get("authorization")).toBe("Bearer token-123");
     expect(headers.get("anthropic-beta")).toBe(
-      `${ANTHROPIC_BETA_HEADER},custom-beta`,
+      `${DEFAULT_BETAS},custom-beta`,
     );
     expect(headers.get("user-agent")).toBe(CLAUDE_CLI_USER_AGENT);
     expect(headers.get("anthropic-dangerous-direct-browser-access")).toBe("true");
@@ -87,11 +103,39 @@ describe("buildRequestHeaders", () => {
     );
 
     expect(headers.get("anthropic-beta")).toBe(
-      `${ANTHROPIC_BETA_HEADER},request-beta`,
+      `${DEFAULT_BETAS},request-beta`,
     );
     expect(headers.get("x-request-header")).toBe("request-value");
     expect(headers.get("x-init-header")).toBe("init-value");
     expect(headers.get("x-api-key")).toBe(null);
+  });
+
+  test("can enable 1m beta through environment variable", () => {
+    process.env.ANTHROPIC_ENABLE_1M_CONTEXT = "true";
+    try {
+      const headers = buildRequestHeaders(
+        "https://api.anthropic.com/v1/messages",
+        { headers: {} },
+        "token-123",
+        "claude-sonnet-4-6",
+      );
+
+      expect(headers.get("anthropic-beta")).toContain("context-1m-2025-08-07");
+    } finally {
+      delete process.env.ANTHROPIC_ENABLE_1M_CONTEXT;
+      resetExcludedBetas();
+    }
+  });
+});
+
+describe("extractModelIdFromBody", () => {
+  test("returns model id when present in JSON body", () => {
+    expect(extractModelIdFromBody(JSON.stringify({ model: "claude-sonnet-4-6" }))).toBe("claude-sonnet-4-6");
+  });
+
+  test("returns unknown for invalid JSON or missing model", () => {
+    expect(extractModelIdFromBody("not-json")).toBe("unknown");
+    expect(extractModelIdFromBody(JSON.stringify({ messages: [] }))).toBe("unknown");
   });
 });
 
