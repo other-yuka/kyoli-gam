@@ -1,18 +1,14 @@
 import { promises as fs } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
-import * as lockfile from "proper-lockfile";
 import * as v from "valibot";
+import { withDirectoryLock } from "./file-lock";
 import { getConfigDir, getErrorCode } from "./utils";
 import { PoolChainConfigSchema } from "./pool-types";
 import type { PoolChainConfig } from "./pool-types";
 
 const POOL_CONFIG_FILENAME = "multiauth-pools.json";
 const FILE_MODE = 0o600;
-const LOCK_OPTIONS = {
-  stale: 10_000,
-  retries: { retries: 10, minTimeout: 50, maxTimeout: 2000, factor: 2 },
-};
 
 function createEmptyConfig(): PoolChainConfig {
   return { pools: [], chains: [] };
@@ -65,18 +61,7 @@ async function writeAtomicText(targetPath: string, content: string): Promise<voi
 async function withConfigLock<T>(fn: (configPath: string) => Promise<T>): Promise<T> {
   const configPath = await resolveConfigPath();
   await ensureConfigFileExists(configPath);
-
-  let release: (() => Promise<void>) | null = null;
-  try {
-    release = await lockfile.lock(configPath, LOCK_OPTIONS);
-    return await fn(configPath);
-  } finally {
-    if (release) {
-      try {
-        await release();
-      } catch {}
-    }
-  }
+  return await withDirectoryLock(configPath, () => fn(configPath));
 }
 
 function parsePoolChainConfig(content: string): PoolChainConfig | null {

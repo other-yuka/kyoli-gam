@@ -4,6 +4,7 @@ export * from "./claims";
 export * from "./config";
 export * from "./constants";
 export * from "./executor";
+export * from "./file-lock";
 export * from "./proactive-refresh";
 export * from "./rate-limit";
 export * from "./storage";
