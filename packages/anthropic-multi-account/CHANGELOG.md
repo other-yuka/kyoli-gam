@@ -1,5 +1,14 @@
 # opencode-anthropic-multi-account
 
+## 0.2.9
+
+### Patch Changes
+
+- [`c95506b`](https://github.com/other-yuka/kyoli-gam/commit/c95506b7af2ca6b58790d735b9da685a4a96c5dc) Thanks [@other-yuka](https://github.com/other-yuka)! - Add model-aware Anthropic beta handling, including Claude 4.6 effort headers and long-context fallback retries.
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.9
+
 ## 0.2.8
 
 ### Patch Changes

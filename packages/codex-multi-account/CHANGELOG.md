@@ -1,5 +1,12 @@
 # opencode-codex-multi-account
 
+## 0.2.9
+
+### Patch Changes
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.9
+
 ## 0.2.8
 
 ### Patch Changes
