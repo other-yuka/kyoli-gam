@@ -3,11 +3,19 @@ import { ANTHROPIC_OAUTH_ADAPTER } from "./constants";
 import { isTokenExpired, refreshToken } from "./token";
 import { TokenRefreshError } from "opencode-multi-account-core";
 import {
+  extractModelIdFromBody,
   buildRequestHeaders,
   createResponseStreamTransform,
   transformRequestBody,
   transformRequestUrl,
 } from "./request-transform";
+import {
+  addExcludedBeta,
+  getExcludedBetas,
+  getNextBetaToExclude,
+  isLongContextError,
+  LONG_CONTEXT_BETAS,
+} from "./betas";
 import type { PluginClient, StoredAccount } from "./types";
 import { debugLog } from "./utils";
 
@@ -99,15 +107,49 @@ export class AccountRuntimeFactory {
     accessToken: string,
   ): Promise<Response> {
     const transformedInput = transformRequestUrl(input);
-    const headers = buildRequestHeaders(transformedInput, init, accessToken);
+    const modelId = extractModelIdFromBody(init?.body);
+    const excludedBetas = getExcludedBetas(modelId);
+    const headers = buildRequestHeaders(transformedInput, init, accessToken, modelId, excludedBetas);
     const transformedBody =
       typeof init?.body === "string" ? transformRequestBody(init.body) : init?.body;
 
-    const response = await fetch(transformedInput, {
+    let response = await fetch(transformedInput, {
       ...init,
       headers,
       body: transformedBody,
     });
+
+    for (let attempt = 0; attempt < LONG_CONTEXT_BETAS.length; attempt += 1) {
+      if (response.status !== 400 && response.status !== 429) {
+        break;
+      }
+
+      const responseBody = await response.clone().text();
+      if (!isLongContextError(responseBody)) {
+        break;
+      }
+
+      const betaToExclude = getNextBetaToExclude(modelId);
+      if (!betaToExclude) {
+        break;
+      }
+
+      addExcludedBeta(modelId, betaToExclude);
+
+      const retryHeaders = buildRequestHeaders(
+        transformedInput,
+        init,
+        accessToken,
+        modelId,
+        getExcludedBetas(modelId),
+      );
+
+      response = await fetch(transformedInput, {
+        ...init,
+        headers: retryHeaders,
+        body: transformedBody,
+      });
+    }
 
     return createResponseStreamTransform(response);
   }

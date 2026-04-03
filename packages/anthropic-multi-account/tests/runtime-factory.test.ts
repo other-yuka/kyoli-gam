@@ -3,6 +3,7 @@ import * as piAiAdapter from "../src/pi-ai-adapter";
 import { AccountRuntimeFactory } from "../src/runtime-factory";
 import { AccountStore } from "../src/account-store";
 import { TOKEN_EXPIRY_BUFFER_MS } from "../src/constants";
+import { resetExcludedBetas } from "../src/betas";
 import { clearRefreshMutex } from "../src/token";
 import { createMockClient, setupTestEnv } from "./helpers";
 
@@ -41,6 +42,7 @@ describe("runtime-factory", () => {
   afterEach(async () => {
     globalThis.fetch = originalFetch;
     clearRefreshMutex();
+    resetExcludedBetas();
     await cleanup();
   });
 
@@ -56,6 +58,7 @@ describe("runtime-factory", () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
+        model: "claude-sonnet-4-6",
         tools: [{ name: "calc" }],
         messages: [{ content: [{ type: "tool_use", name: "calc" }] }],
       }),
@@ -72,8 +75,38 @@ describe("runtime-factory", () => {
     expect(transformedUrl).toContain("/v1/messages?beta=true");
     expect(headers.get("authorization")).toBe("Bearer access-1");
     expect(headers.get("anthropic-beta")).toBeTruthy();
+    expect(headers.get("anthropic-beta")).toContain("effort-2025-11-24");
     expect(body.tools[0]?.name).not.toBe("calc");
     expect(body.messages[0]?.content[0]?.name).not.toBe("calc");
+  });
+
+  test("retries without long-context beta when provider rejects it", async () => {
+    process.env.ANTHROPIC_ENABLE_1M_CONTEXT = "true";
+    try {
+      const uuid = await seedAccount();
+      const factory = new AccountRuntimeFactory(store, client);
+      const runtime = await factory.getRuntime(uuid);
+
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: "Extra usage is required for long context requests" } }), { status: 400 }))
+        .mockResolvedValueOnce(new Response("ok"));
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      await runtime.fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        body: JSON.stringify({ model: "claude-sonnet-4-6", messages: [] }),
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+
+      const firstHeaders = fetchMock.mock.calls[0]?.[1]?.headers as Headers;
+      const secondHeaders = fetchMock.mock.calls[1]?.[1]?.headers as Headers;
+      expect(firstHeaders.get("anthropic-beta")).toContain("context-1m-2025-08-07");
+      expect(secondHeaders.get("anthropic-beta")).not.toContain("context-1m-2025-08-07");
+    } finally {
+      delete process.env.ANTHROPIC_ENABLE_1M_CONTEXT;
+    }
   });
 
   test("refreshes expired token through pi-ai adapter", async () => {
