@@ -6,7 +6,7 @@ import { AccountStorageSchema } from "./types";
 import { getConfigDir, getErrorCode } from "./utils";
 import type { AccountStorage, StoredAccount } from "./types";
 
-function getStoragePath(): string {
+function getDefaultStoragePath(): string {
   return join(getConfigDir(), ACCOUNTS_FILENAME);
 }
 
@@ -85,9 +85,9 @@ export function deduplicateAccounts(accounts: StoredAccount[]): StoredAccount[] 
   return deduplicated;
 }
 
-export async function loadAccounts(): Promise<AccountStorage | null> {
-  const storagePath = getStoragePath();
-  const storage = await readStorageFromDisk(storagePath, true);
+export async function loadAccounts(storagePath?: string): Promise<AccountStorage | null> {
+  const effectivePath = storagePath ?? getDefaultStoragePath();
+  const storage = await readStorageFromDisk(effectivePath, true);
   if (!storage) {
     return null;
   }

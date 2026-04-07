@@ -1,10 +1,18 @@
-import { setAccountsFilename } from "opencode-multi-account-core";
+import {
+  loadAccounts as coreLoadAccounts,
+  deduplicateAccounts,
+  readStorageFromDisk,
+} from "opencode-multi-account-core";
 import { ACCOUNTS_FILENAME } from "./constants";
+import { getConfigDir } from "./utils";
+import { join } from "node:path";
+import type { AccountStorage } from "opencode-multi-account-core";
 
-setAccountsFilename(ACCOUNTS_FILENAME);
+export async function loadAccounts(): Promise<AccountStorage | null> {
+  return coreLoadAccounts(join(getConfigDir(), ACCOUNTS_FILENAME));
+}
 
 export {
   deduplicateAccounts,
-  loadAccounts,
   readStorageFromDisk,
-} from "opencode-multi-account-core";
+};
