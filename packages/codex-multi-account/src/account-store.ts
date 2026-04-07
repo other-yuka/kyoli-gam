@@ -1,13 +1,13 @@
 import {
-  AccountStore,
-  setAccountsFilename,
+  AccountStore as CoreAccountStore,
   type DiskCredentials,
 } from "opencode-multi-account-core";
 import { ACCOUNTS_FILENAME } from "./constants";
 
-setAccountsFilename(ACCOUNTS_FILENAME);
+export class AccountStore extends CoreAccountStore {
+  constructor() {
+    super(ACCOUNTS_FILENAME);
+  }
+}
 
-export {
-  AccountStore,
-  type DiskCredentials,
-};
+export type { DiskCredentials };

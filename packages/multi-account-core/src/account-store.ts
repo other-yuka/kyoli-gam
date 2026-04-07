@@ -11,8 +11,8 @@ import type { AccountStorage, StoredAccount } from "./types";
 
 const FILE_MODE = 0o600;
 
-function getStoragePath(): string {
-  return join(getConfigDir(), ACCOUNTS_FILENAME);
+function resolveStoragePath(filename: string): string {
+  return join(getConfigDir(), filename);
 }
 
 function createEmptyStorage(): AccountStorage {
@@ -57,12 +57,6 @@ async function ensureStorageFileExists(targetPath: string): Promise<void> {
   }
 }
 
-async function withFileLock<T>(fn: (storagePath: string) => Promise<T>): Promise<T> {
-  const storagePath = getStoragePath();
-  await ensureStorageFileExists(storagePath);
-  return await withDirectoryLock(storagePath, () => fn(storagePath));
-}
-
 export interface DiskCredentials {
   refreshToken: string;
   accessToken?: string;
@@ -71,14 +65,24 @@ export interface DiskCredentials {
 }
 
 export class AccountStore {
+  private readonly storagePath: string;
+
+  constructor(filename?: string) {
+    this.storagePath = resolveStoragePath(filename ?? ACCOUNTS_FILENAME);
+  }
+
+  private async withLock<T>(fn: (storagePath: string) => Promise<T>): Promise<T> {
+    await ensureStorageFileExists(this.storagePath);
+    return await withDirectoryLock(this.storagePath, () => fn(this.storagePath));
+  }
+
   async load(): Promise<AccountStorage> {
-    const storage = await loadAccounts();
+    const storage = await loadAccounts(this.storagePath);
     return storage ?? createEmptyStorage();
   }
 
   async readCredentials(uuid: string): Promise<DiskCredentials | null> {
-    const storagePath = getStoragePath();
-    const storage = await readStorageFromDisk(storagePath, false);
+    const storage = await readStorageFromDisk(this.storagePath, false);
     if (!storage) return null;
 
     const account = storage.accounts.find((a) => a.uuid === uuid);
@@ -96,7 +100,7 @@ export class AccountStore {
     uuid: string,
     fn: (account: StoredAccount) => void,
   ): Promise<StoredAccount | null> {
-    return await withFileLock(async (storagePath) => {
+    return await this.withLock(async (storagePath) => {
       const current = await readStorageFromDisk(storagePath, false);
       if (!current) return null;
 
@@ -113,7 +117,7 @@ export class AccountStore {
   async mutateStorage(
     fn: (storage: AccountStorage) => void,
   ): Promise<void> {
-    await withFileLock(async (storagePath) => {
+    await this.withLock(async (storagePath) => {
       const current = await readStorageFromDisk(storagePath, false) ?? createEmptyStorage();
       fn(current);
       await writeStorageAtomic(storagePath, current);
@@ -121,7 +125,7 @@ export class AccountStore {
   }
 
   async addAccount(account: StoredAccount): Promise<void> {
-    await withFileLock(async (storagePath) => {
+    await this.withLock(async (storagePath) => {
       const current = await readStorageFromDisk(storagePath, false) ?? createEmptyStorage();
       const exists = current.accounts.some(
         (a) => a.uuid === account.uuid || a.refreshToken === account.refreshToken,
@@ -134,7 +138,7 @@ export class AccountStore {
   }
 
   async removeAccount(uuid: string): Promise<boolean> {
-    return await withFileLock(async (storagePath) => {
+    return await this.withLock(async (storagePath) => {
       const current = await readStorageFromDisk(storagePath, false);
       if (!current) return false;
 
@@ -158,7 +162,7 @@ export class AccountStore {
   }
 
   async clear(): Promise<void> {
-    await withFileLock(async (storagePath) => {
+    await this.withLock(async (storagePath) => {
       await writeStorageAtomic(storagePath, createEmptyStorage());
     });
   }
