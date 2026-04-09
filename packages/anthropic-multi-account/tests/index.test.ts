@@ -1,6 +1,6 @@
 import { describe, test, expect } from "bun:test";
 import { ClaudeMultiAuthPlugin } from "../src/index";
-import { getSystemPrompt } from "../src/request-transform";
+import { getInjectedSystemPrompt } from "../src/request-transform";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { createMockClient, setupTestEnv } from "./helpers";
@@ -17,7 +17,7 @@ describe("index", () => {
     transform({}, output);
     transform({}, output);
 
-    const systemPrompt = getSystemPrompt();
+    const systemPrompt = getInjectedSystemPrompt();
     expect(output.system).toContain(systemPrompt);
     expect(output.system?.filter((entry) => entry === systemPrompt)).toHaveLength(1);
   });
