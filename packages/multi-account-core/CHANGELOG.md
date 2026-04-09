@@ -1,5 +1,13 @@
 # opencode-multi-account-core
 
+## 0.2.14
+
+### Patch Changes
+
+- [`1d23edb`](https://github.com/other-yuka/kyoli-gam/commit/1d23edb8637e9ff63d4f271aa05e67f971a28244) Thanks [@other-yuka](https://github.com/other-yuka)! - Remove shared plugin state that caused load-order collisions across multi-auth providers.
+
+  Provider configs and claims are now isolated by filename, account-manager dependencies are injected per provider, and the Anthropic OAuth flow no longer temporarily overwrites the global fetch handler during login.
+
 ## 0.2.13
 
 ## 0.2.12
