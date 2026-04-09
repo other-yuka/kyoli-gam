@@ -1,5 +1,14 @@
 # opencode-anthropic-multi-account
 
+## 0.2.13
+
+### Patch Changes
+
+- [`e6417f9`](https://github.com/other-yuka/kyoli-gam/commit/e6417f993f679a7d9824891de526caf99c235cbc) Thanks [@other-yuka](https://github.com/other-yuka)! - Refine Anthropic prompt transformation to preserve core injected identity while relocating non-core system guidance into the first user message.
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.13
+
 ## 0.2.12
 
 ### Patch Changes
