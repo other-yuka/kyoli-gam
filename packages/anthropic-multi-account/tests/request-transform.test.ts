@@ -3,6 +3,7 @@ import {
   extractModelIdFromBody,
   buildRequestHeaders,
   createResponseStreamTransform,
+  getInjectedSystemPrompt,
   getSystemPrompt,
   transformRequestBody,
   transformRequestUrl,
@@ -12,6 +13,7 @@ import {
   TOOL_PREFIX,
 } from "../src/constants";
 import { resetExcludedBetas } from "../src/betas";
+import { createRealisticRequestPayload } from "./fixtures/realistic-request-payload";
 
 const DEFAULT_BETAS = "oauth-2025-04-20,interleaved-thinking-2025-05-14";
 
@@ -46,6 +48,12 @@ describe("getSystemPrompt", () => {
 
   test("returns the same value on repeated calls", () => {
     expect(getSystemPrompt()).toBe(getSystemPrompt());
+  });
+
+  test("exposes a slimmer injected identity prompt", () => {
+    const prompt = getInjectedSystemPrompt();
+    expect(prompt).toContain("Claude Code");
+    expect(prompt.length).toBeLessThan(getSystemPrompt().length);
   });
 });
 
@@ -170,6 +178,126 @@ describe("transformRequestBody", () => {
     expect(parsed.system[0].text.includes("Claude, Claude")).toBe(true);
     expect(parsed.system[0].text.includes("/opencode")).toBe(true);
     expect(parsed.system[0].text.includes("OpenCode")).toBe(false);
+  });
+
+  test("relocates non-core system text into the first user message", () => {
+    const body = JSON.stringify({
+      system: [
+        { type: "text", text: getSystemPrompt() },
+        { type: "text", text: "OpenCode should explain the workspace before acting." },
+      ],
+      messages: [
+        { role: "user", content: "Fix the bug" },
+      ],
+    });
+
+    const transformed = transformRequestBody(body);
+    expect(transformed).toBeDefined();
+
+    const parsed = JSON.parse(transformed as string) as {
+      system: Array<{ type: string; text: string }>;
+      messages: Array<{ role?: string; content?: string }>;
+    };
+
+    expect(parsed.system).toHaveLength(1);
+    expect(parsed.system[0]?.text).toBe(getSystemPrompt());
+    expect(parsed.messages[0]?.content).toContain("Claude Code should explain the workspace before acting.");
+    expect(parsed.messages[0]?.content).toContain("Fix the bug");
+  });
+
+  test("removes paragraphs matched by sanitization anchors before relocation", () => {
+    const body = JSON.stringify({
+      system: [
+        {
+          type: "text",
+          text: [
+            "Keep this instruction.",
+            "See https://opencode.ai/docs for more details.",
+            "OpenCode must remain concise.",
+          ].join("\n\n"),
+        },
+      ],
+      messages: [
+        { role: "user", content: "Do the task" },
+      ],
+    });
+
+    const transformed = transformRequestBody(body);
+    expect(transformed).toBeDefined();
+
+    const parsed = JSON.parse(transformed as string) as {
+      system: Array<{ type: string; text: string }>;
+      messages: Array<{ content?: string }>;
+    };
+
+    expect(parsed.system).toEqual([]);
+    expect(parsed.messages[0]?.content).toContain("Keep this instruction.");
+    expect(parsed.messages[0]?.content).toContain("Claude Code must remain concise.");
+    expect(parsed.messages[0]?.content).not.toContain("opencode.ai/docs");
+  });
+
+  test("preserves sanitized system text when no user message exists", () => {
+    const body = JSON.stringify({
+      system: [
+        { type: "text", text: "OpenCode should summarize findings." },
+      ],
+      messages: [
+        { role: "assistant", content: "Hello" },
+      ],
+    });
+
+    const transformed = transformRequestBody(body);
+    expect(transformed).toBeDefined();
+
+    const parsed = JSON.parse(transformed as string) as {
+      system: Array<{ type: string; text: string }>;
+      messages: Array<{ role?: string; content?: string }>;
+    };
+
+    expect(parsed.system).toHaveLength(1);
+    expect(parsed.system[0]?.text).toBe("Claude Code should summarize findings.");
+    expect(parsed.messages[0]?.content).toBe("Hello");
+  });
+
+  test("handles a realistic payload with prompt relocation and tool prefixing", () => {
+    const body = JSON.stringify(createRealisticRequestPayload());
+
+    const transformed = transformRequestBody(body);
+    expect(transformed).toBeDefined();
+
+    const parsed = JSON.parse(transformed as string) as {
+      system: Array<{ type: string; text: string }>;
+      tools: Array<{ name?: string }>;
+      messages: Array<{
+        role?: string;
+        content?: string | Array<{ type: string; name?: string; text?: string }>;
+      }>;
+    };
+
+    expect(parsed.system).toHaveLength(2);
+    expect(parsed.system[0]?.text).toBe(getSystemPrompt());
+    expect(parsed.system[1]?.text.startsWith("x-anthropic-billing-header:")).toBe(true);
+    expect(parsed.messages[0]?.role).toBe("user");
+    expect(typeof parsed.messages[0]?.content).toBe("string");
+    expect(parsed.messages[0]?.content).toContain("Claude Code should inspect the repository before proposing changes.");
+    expect(parsed.messages[0]?.content).toContain("Keep answers concise and actionable.");
+    expect(parsed.messages[0]?.content).not.toContain("opencode.ai/docs");
+    expect(parsed.messages[0]?.content).toContain("Please debug the failing request.");
+    expect(parsed.tools[0]?.name).toBe(`${TOOL_PREFIX}search_docs`);
+    expect(parsed.tools[1]?.name).toBe(`${TOOL_PREFIX}run_command`);
+    expect(Array.isArray(parsed.messages[1]?.content)).toBe(true);
+    if (Array.isArray(parsed.messages[1]?.content)) {
+      expect(parsed.messages[1].content[0]?.name).toBe(`${TOOL_PREFIX}search_docs`);
+    }
+  });
+
+  test("is stable when transformed twice", () => {
+    const body = JSON.stringify(createRealisticRequestPayload());
+
+    const firstPass = transformRequestBody(body);
+    const secondPass = transformRequestBody(firstPass);
+
+    expect(secondPass).toBe(firstPass);
   });
 
   test("adds mcp_ prefix to tool names", () => {
