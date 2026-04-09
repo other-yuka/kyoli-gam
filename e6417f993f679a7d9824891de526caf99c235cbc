@@ -1,0 +1,23 @@
+.changeset/tall-dodos-pretend.md
+  508bb6757a1b3947 1-5
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.6",
+  "base_commit_sha": "e6417f993f679a7d9824891de526caf99c235cbc",
+  "prompts": {
+    "508bb6757a1b3947": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_28f930d3fffeFHt8i2Pr6xLBfL",
+        "model": "openai/gpt-5.4"
+      },
+      "human_author": "Sanggyu Kang",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 5,
+      "overriden_lines": 0
+    }
+  }
+}
