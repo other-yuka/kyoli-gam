@@ -8,8 +8,15 @@ const CLAIM_EXPIRY_MS = 60_000;
 
 export type ClaimsMap = Record<string, { pid: number; at: number }>;
 
-function getClaimsPath(): string {
-  return join(getConfigDir(), CLAIMS_FILENAME);
+export interface ClaimsManager {
+  readClaims(): Promise<ClaimsMap>;
+  writeClaim(accountId: string): Promise<void>;
+  releaseClaim(accountId: string): Promise<void>;
+  isClaimedByOther(claims: ClaimsMap, accountId: string | undefined): boolean;
+}
+
+function getClaimsPath(filename: string): string {
+  return join(getConfigDir(), filename);
 }
 
 function isClaimShape(value: unknown): value is { pid: number; at: number } {
@@ -77,8 +84,7 @@ function cleanClaims(
   return { cleaned, changed };
 }
 
-async function writeClaimsFile(claims: ClaimsMap): Promise<void> {
-  const path = getClaimsPath();
+async function writeClaimsFile(path: string, claims: ClaimsMap): Promise<void> {
   const tempPath = `${path}.${randomBytes(6).toString("hex")}.tmp`;
   await fs.mkdir(dirname(path), { recursive: true });
 
@@ -95,71 +101,98 @@ async function writeClaimsFile(claims: ClaimsMap): Promise<void> {
   }
 }
 
-export async function readClaims(): Promise<ClaimsMap> {
-  try {
-    const data = await fs.readFile(getClaimsPath(), "utf-8");
-    const parsed = parseClaims(data);
-    const now = Date.now();
-    const { cleaned, changed } = cleanClaims(parsed, now);
+export function createClaimsManager(filename: string = CLAIMS_FILENAME): ClaimsManager {
+  async function readClaims(): Promise<ClaimsMap> {
+    const claimsPath = getClaimsPath(filename);
+    try {
+      const data = await fs.readFile(claimsPath, "utf-8");
+      const parsed = parseClaims(data);
+      const now = Date.now();
+      const { cleaned, changed } = cleanClaims(parsed, now);
 
-    if (changed) {
-      try {
-        await writeClaimsFile(cleaned);
-      } catch {
-        // best-effort cleanup
+      if (changed) {
+        try {
+          await writeClaimsFile(claimsPath, cleaned);
+        } catch {
+        }
       }
+
+      return cleaned;
+    } catch {
+      return {};
+    }
+  }
+
+  async function writeClaim(accountId: string): Promise<void> {
+    const claimsPath = getClaimsPath(filename);
+    const now = Date.now();
+    const claims = await readClaims();
+    const { cleaned } = cleanClaims(claims, now);
+
+    cleaned[accountId] = { pid: process.pid, at: now };
+
+    try {
+      await writeClaimsFile(claimsPath, cleaned);
+    } catch {
+    }
+  }
+
+  async function releaseClaim(accountId: string): Promise<void> {
+    const claimsPath = getClaimsPath(filename);
+    const now = Date.now();
+    const claims = await readClaims();
+    const { cleaned } = cleanClaims(claims, now);
+
+    const currentClaim = cleaned[accountId];
+    if (!currentClaim || currentClaim.pid !== process.pid) {
+      return;
     }
 
-    return cleaned;
-  } catch {
-    return {};
+    delete cleaned[accountId];
+
+    try {
+      await writeClaimsFile(claimsPath, cleaned);
+    } catch {
+    }
   }
+
+  function isClaimedByOther(
+    claims: ClaimsMap,
+    accountId: string | undefined,
+  ): boolean {
+    if (!accountId) return false;
+    const claim = claims[accountId];
+    if (!claim) return false;
+    if (Date.now() - claim.at > CLAIM_EXPIRY_MS) return false;
+    if (!isProcessAlive(claim.pid)) return false;
+    return claim.pid !== process.pid;
+  }
+
+  return {
+    readClaims,
+    writeClaim,
+    releaseClaim,
+    isClaimedByOther,
+  };
 }
 
-// Best-effort read-modify-write: not atomic across processes, but acceptable
-// because stale/duplicate claims self-expire via CLAIM_EXPIRY_MS and zombie detection.
-export async function writeClaim(accountId: string): Promise<void> {
-  const now = Date.now();
-  const claims = await readClaims();
-  const { cleaned } = cleanClaims(claims, now);
+const defaultClaimsManager = createClaimsManager();
 
-  cleaned[accountId] = { pid: process.pid, at: now };
-
-  try {
-    await writeClaimsFile(cleaned);
-  } catch {
-    // best-effort claim update
-  }
+export function readClaims(): Promise<ClaimsMap> {
+  return defaultClaimsManager.readClaims();
 }
 
-// Best-effort read-modify-write: same rationale as writeClaim above.
-export async function releaseClaim(accountId: string): Promise<void> {
-  const now = Date.now();
-  const claims = await readClaims();
-  const { cleaned } = cleanClaims(claims, now);
+export function writeClaim(accountId: string): Promise<void> {
+  return defaultClaimsManager.writeClaim(accountId);
+}
 
-  const currentClaim = cleaned[accountId];
-  if (!currentClaim || currentClaim.pid !== process.pid) {
-    return;
-  }
-
-  delete cleaned[accountId];
-
-  try {
-    await writeClaimsFile(cleaned);
-  } catch {
-    // best-effort release
-  }
+export function releaseClaim(accountId: string): Promise<void> {
+  return defaultClaimsManager.releaseClaim(accountId);
 }
 
 export function isClaimedByOther(
   claims: ClaimsMap,
   accountId: string | undefined,
 ): boolean {
-  if (!accountId) return false;
-  const claim = claims[accountId];
-  if (!claim) return false;
-  if (Date.now() - claim.at > CLAIM_EXPIRY_MS) return false;
-  if (!isProcessAlive(claim.pid)) return false;
-  return claim.pid !== process.pid;
+  return defaultClaimsManager.isClaimedByOther(claims, accountId);
 }

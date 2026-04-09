@@ -3,14 +3,13 @@ import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import * as v from "valibot";
-import { ACCOUNTS_FILENAME } from "../src/constants";
+import { ACCOUNTS_FILENAME, CLAIMS_FILENAME } from "../src/constants";
 import { AccountStore } from "../src/account-store";
 import { loadAccounts } from "../src/storage";
 import { AccountStorageSchema } from "../src/types";
 import type { AccountStorage, StoredAccount } from "../src/types";
 import { setupTestEnv } from "../tests/helpers";
 
-const CLAIMS_FILENAME = "multiauth-claims.json";
 const STORAGE_WORKER_PATH = join(process.cwd(), "tests/workers/storage-worker.ts");
 const CLAIM_WORKER_PATH = join(process.cwd(), "tests/workers/claim-worker.ts");
 

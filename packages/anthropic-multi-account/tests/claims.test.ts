@@ -3,9 +3,8 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { join } from "node:path";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { isClaimedByOther, readClaims, releaseClaim, type ClaimsMap, writeClaim } from "../src/claims";
+import { CLAIMS_FILENAME } from "../src/constants";
 import { setupTestEnv } from "../tests/helpers";
-
-const CLAIMS_FILENAME = "multiauth-claims.json";
 const CLAIM_EXPIRY_MS = 60_000;
 const ZOMBIE_PID = 99999999;
 
@@ -162,7 +161,6 @@ describe("writeClaim", () => {
     await writeClaim("perm-account");
 
     if (process.platform === "win32") {
-      expect(true).toBe(true);
       return;
     }
 

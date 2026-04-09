@@ -1,16 +1,11 @@
 import {
-  getConfig,
-  initCoreConfig,
-  loadConfig,
-  resetConfigCache,
-  updateConfigField,
+  createConfigLoader,
 } from "opencode-multi-account-core";
 
-initCoreConfig("codex-multiauth.json");
+const configLoader = createConfigLoader("codex-multiauth.json");
 
 export {
-  getConfig,
-  loadConfig,
-  resetConfigCache,
-  updateConfigField,
+  configLoader,
 };
+
+export const { getConfig, loadConfig, resetConfigCache, updateConfigField } = configLoader;

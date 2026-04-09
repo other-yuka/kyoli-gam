@@ -37,11 +37,18 @@ export interface LoginWithPiAiCallbacks {
   onPrompt: (prompt: OAuthPrompt) => Promise<string>;
   onProgress?: (message: string) => void;
   onManualCodeInput?: () => Promise<string>;
+  userAgent?: string;
 }
 
 const ANTHROPIC_REFRESH_ENDPOINT = "https://platform.claude.com/v1/oauth/token";
+const ANTHROPIC_TOKEN_HOST = "platform.claude.com";
 const REFRESH_NODE_EXECUTABLE = process.env.OPENCODE_REFRESH_NODE_EXECUTABLE || "node";
-const tokenProxyContext = new AsyncLocalStorage<boolean>();
+type AnthropicFetchContext = {
+  proxyTokenRequests: boolean;
+  userAgent?: string;
+};
+
+const tokenProxyContext = new AsyncLocalStorage<AnthropicFetchContext>();
 let tokenProxyInstalled = false;
 let tokenProxyOriginalFetch: typeof globalThis.fetch | null = null;
 const refreshEndpointUrl = new URL(ANTHROPIC_REFRESH_ENDPOINT);
@@ -113,7 +120,20 @@ function getRequestMethod(input: RequestInfo | URL, init?: RequestInit): string 
 }
 
 function shouldProxyTokenRequest(input: RequestInfo | URL): boolean {
-  return tokenProxyContext.getStore() === true && isAnthropicTokenEndpoint(input);
+  return tokenProxyContext.getStore()?.proxyTokenRequests === true && isAnthropicTokenEndpoint(input);
+}
+
+function shouldInjectAnthropicUserAgent(input: RequestInfo | URL): boolean {
+  const userAgent = tokenProxyContext.getStore()?.userAgent;
+  if (!userAgent) return false;
+  const rawUrl = getRequestUrlString(input);
+
+  try {
+    const url = new URL(rawUrl);
+    return url.host === ANTHROPIC_TOKEN_HOST;
+  } catch {
+    return rawUrl.includes(ANTHROPIC_TOKEN_HOST);
+  }
 }
 
 async function postAnthropicTokenViaNode(body: string): Promise<Response> {
@@ -157,16 +177,21 @@ async function postAnthropicTokenViaNode(body: string): Promise<Response> {
 
 function createAnthropicTokenProxyFetch(originalFetch: typeof globalThis.fetch): typeof globalThis.fetch {
   return (async (input: RequestInfo | URL, init?: RequestInit) => {
-    if (!shouldProxyTokenRequest(input)) {
-      return originalFetch(input, init);
+    if (shouldProxyTokenRequest(input)) {
+      const method = getRequestMethod(input, init).toUpperCase();
+      if (method !== "POST") {
+        throw buildRefreshRequestError(`Unsupported token endpoint method: ${method}`);
+      }
+      return await postAnthropicTokenViaNode(await getRequestBody(input, init));
     }
 
-    const method = getRequestMethod(input, init).toUpperCase();
-    if (method !== "POST") {
-      throw buildRefreshRequestError(`Unsupported token endpoint method: ${method}`);
+    if (shouldInjectAnthropicUserAgent(input)) {
+      const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+      headers.set("user-agent", tokenProxyContext.getStore()!.userAgent!);
+      return originalFetch(input, { ...init, headers });
     }
 
-    return await postAnthropicTokenViaNode(await getRequestBody(input, init));
+    return originalFetch(input, init);
   }) as typeof globalThis.fetch;
 }
 
@@ -178,9 +203,12 @@ function ensureAnthropicTokenProxyFetchInstalled(): void {
   tokenProxyInstalled = true;
 }
 
-export async function withAnthropicTokenProxyFetch<T>(operation: () => Promise<T>): Promise<T> {
+export async function withAnthropicTokenProxyFetch<T>(
+  operation: () => Promise<T>,
+  options?: { userAgent?: string },
+): Promise<T> {
   ensureAnthropicTokenProxyFetchInstalled();
-  return await tokenProxyContext.run(true, operation);
+  return await tokenProxyContext.run({ proxyTokenRequests: true, userAgent: options?.userAgent }, operation);
 }
 
 export function resetAnthropicTokenProxyStateForTest(): void {
@@ -202,12 +230,15 @@ async function fetchProfileWithSingleRetry(accessToken: string): Promise<Awaited
 export async function loginWithPiAi(
   callbacks: LoginWithPiAiCallbacks,
 ): Promise<Partial<StoredAccount>> {
-  const piCreds = await withAnthropicTokenProxyFetch(() => piAiOauth.loginAnthropic({
-    onAuth: callbacks.onAuth,
-    onPrompt: callbacks.onPrompt,
-    onProgress: callbacks.onProgress,
-    onManualCodeInput: callbacks.onManualCodeInput,
-  }));
+  const piCreds = await withAnthropicTokenProxyFetch(
+    () => piAiOauth.loginAnthropic({
+      onAuth: callbacks.onAuth,
+      onPrompt: callbacks.onPrompt,
+      onProgress: callbacks.onProgress,
+      onManualCodeInput: callbacks.onManualCodeInput,
+    }),
+    { userAgent: callbacks.userAgent },
+  );
 
   const base = fromPiAiCredentials(piCreds);
 

@@ -4,7 +4,7 @@ import { describe, test, expect, beforeEach, afterEach, vi } from "bun:test";
 import { AccountManager } from "../src/account-manager";
 import { AccountStore } from "../src/account-store";
 import * as piAiAdapter from "../src/pi-ai-adapter";
-import { ACCOUNTS_FILENAME } from "../src/constants";
+import { ACCOUNTS_FILENAME, CLAIMS_FILENAME } from "../src/constants";
 import { loadConfig, resetConfigCache, updateConfigField } from "../src/config";
 import type {
   AccountSelectionStrategy,
@@ -33,7 +33,7 @@ function getStoragePath(): string {
 }
 
 function getClaimsPath(): string {
-  return join(requireConfigDir(), "multiauth-claims.json");
+  return join(requireConfigDir(), CLAIMS_FILENAME);
 }
 
 function createAuth(id: string): OAuthCredentials {

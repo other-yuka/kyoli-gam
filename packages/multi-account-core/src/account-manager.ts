@@ -6,10 +6,11 @@ import type { AccountStore } from "./account-store";
 import type {
   ManagedAccount,
   OAuthCredentials,
-  PluginClient,
-  StoredAccount,
-  TokenRefreshResult,
-  UsageLimits,
+    PluginClient,
+    PluginConfig,
+    StoredAccount,
+    TokenRefreshResult,
+    UsageLimits,
 } from "./types";
 
 const STARTUP_REFRESH_CONCURRENCY = 3;
@@ -27,12 +28,16 @@ export interface RuntimeFactoryLike {
 
 export interface AccountManagerDependencies {
   providerAuthId: string;
+  getConfig?: () => Pick<PluginConfig, "soft_quota_threshold_percent" | "cross_process_claims" | "account_selection_strategy" | "max_consecutive_auth_failures" | "rate_limit_min_backoff_ms">;
   isTokenExpired: (account: Pick<ManagedAccount, "accessToken" | "expiresAt">) => boolean;
   refreshToken: (
     currentRefreshToken: string,
     accountId: string,
     client: PluginClient,
   ) => Promise<TokenRefreshResult>;
+  readClaims?: () => Promise<ClaimsMap>;
+  writeClaim?: (accountId: string) => Promise<void>;
+  isClaimedByOther?: (claims: ClaimsMap, accountId: string | undefined) => boolean;
 }
 
 export interface AccountManagerInstance {
@@ -72,8 +77,12 @@ export interface AccountManagerClass {
 export function createAccountManagerForProvider(dependencies: AccountManagerDependencies): AccountManagerClass {
   const {
     providerAuthId,
+    getConfig: getProviderConfig = getConfig,
     isTokenExpired,
     refreshToken,
+    readClaims: readProviderClaims = readClaims,
+    writeClaim: writeProviderClaim = writeClaim,
+    isClaimedByOther: isClaimedByOtherProvider = isClaimedByOther,
   } = dependencies;
 
   return class AccountManager {
@@ -193,7 +202,7 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
     }
 
     private exceedsSoftQuota(account: ManagedAccount): boolean {
-      const threshold = getConfig().soft_quota_threshold_percent;
+      const threshold = getProviderConfig().soft_quota_threshold_percent;
       if (threshold >= 100) return false;
 
       const usage = account.cachedUsage;
@@ -285,8 +294,8 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       const eligible = this.getEligibleAccounts();
       if (eligible.length === 0) return null;
 
-      const config = getConfig();
-      const claims = config.cross_process_claims ? await readClaims() : {};
+      const config = getProviderConfig();
+      const claims = config.cross_process_claims ? await readProviderClaims() : {};
 
       const strategy = config.account_selection_strategy;
       let selected: ManagedAccount | null;
@@ -309,7 +318,7 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       }
 
       if (config.cross_process_claims && selected?.uuid) {
-        writeClaim(selected.uuid).catch(() => {});
+        writeProviderClaim(selected.uuid).catch(() => {});
       }
 
       return selected;
@@ -342,8 +351,8 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
         return current;
       }
 
-      const unclaimed = eligible.find(
-        (account) => this.isUsable(account) && !isClaimedByOther(claims, account.uuid),
+        const unclaimed = eligible.find(
+        (account) => this.isUsable(account) && !isClaimedByOtherProvider(claims, account.uuid),
       );
       if (unclaimed) {
         this.activateAccount(unclaimed);
@@ -363,7 +372,7 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       for (let i = 0; i < eligible.length; i++) {
         const index = (this.roundRobinCursor + i) % eligible.length;
         const account = eligible[index]!;
-        if (this.isUsable(account) && !isClaimedByOther(claims, account.uuid)) {
+        if (this.isUsable(account) && !isClaimedByOtherProvider(claims, account.uuid)) {
           this.roundRobinCursor = (index + 1) % eligible.length;
           this.activateAccount(account);
           return account;
@@ -423,14 +432,14 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       const maxUtilization = Math.min(100, Math.max(0, this.getMaxUtilization(account)));
       const usageScore = ((100 - maxUtilization) / 100) * 450;
 
-      const maxFailures = Math.max(1, getConfig().max_consecutive_auth_failures);
+      const maxFailures = Math.max(1, getProviderConfig().max_consecutive_auth_failures);
       const healthScore = Math.max(0, ((maxFailures - account.consecutiveAuthFailures) / maxFailures) * 250);
 
       const secondsSinceUsed = (Date.now() - account.lastUsed) / 1000;
       const freshnessScore = (Math.min(secondsSinceUsed, 900) / 900) * 60;
 
       const stickinessBonus = isActive ? 120 : 0;
-      const claimPenalty = isClaimedByOther(claims, account.uuid) ? -200 : 0;
+      const claimPenalty = isClaimedByOtherProvider(claims, account.uuid) ? -200 : 0;
 
       return usageScore + healthScore + freshnessScore + stickinessBonus + claimPenalty;
     }
@@ -453,7 +462,7 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
     }
 
     async markRateLimited(uuid: string, backoffMs?: number): Promise<void> {
-      const effectiveBackoff = backoffMs ?? getConfig().rate_limit_min_backoff_ms;
+      const effectiveBackoff = backoffMs ?? getProviderConfig().rate_limit_min_backoff_ms;
       this.last429Map.set(uuid, Date.now());
       await this.store.mutateAccount(uuid, (account) => {
         account.rateLimitResetAt = Date.now() + effectiveBackoff;
@@ -521,7 +530,7 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
         if (!account) return;
 
         account.consecutiveAuthFailures = (account.consecutiveAuthFailures ?? 0) + 1;
-        const maxFailures = getConfig().max_consecutive_auth_failures;
+        const maxFailures = getProviderConfig().max_consecutive_auth_failures;
         const usableCount = storage.accounts.filter(
           (entry) => entry.enabled && !entry.isAuthDisabled && entry.uuid !== uuid,
         ).length;
