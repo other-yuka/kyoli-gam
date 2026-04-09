@@ -3,9 +3,8 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { join } from "node:path";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { isClaimedByOther, readClaims, releaseClaim, type ClaimsMap, writeClaim } from "../src/claims";
+import { CLAIMS_FILENAME } from "../src/constants";
 import { setupTestEnv } from "../tests/helpers";
-
-const CLAIMS_FILENAME = "multiauth-claims.json";
 const CLAIM_EXPIRY_MS = 60_000;
 const ZOMBIE_PID = 99999999;
 
@@ -31,11 +30,7 @@ async function writeRawClaims(claims: Record<string, { pid: number; at: number }
 
 async function readRawClaims(): Promise<ClaimsMap> {
   const raw = await fs.readFile(claimsPath, "utf-8");
-  const parsed = JSON.parse(raw);
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("Claims file has invalid format");
-  }
-  return parsed as ClaimsMap;
+  return JSON.parse(raw) as ClaimsMap;
 }
 
 function spawnAliveProcess(): ChildProcess {
@@ -160,7 +155,6 @@ describe("writeClaim", () => {
     await writeClaim("perm-account");
 
     if (process.platform === "win32") {
-      expect(true).toBe(true);
       return;
     }
 

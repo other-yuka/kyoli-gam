@@ -1,7 +1,13 @@
-export {
+import { createClaimsManager, type ClaimsMap } from "opencode-multi-account-core";
+import { CLAIMS_FILENAME } from "./constants";
+
+const claimsManager = createClaimsManager(CLAIMS_FILENAME);
+
+export const {
   isClaimedByOther,
   readClaims,
   releaseClaim,
   writeClaim,
-  type ClaimsMap,
-} from "opencode-multi-account-core";
+} = claimsManager;
+
+export type { ClaimsMap };

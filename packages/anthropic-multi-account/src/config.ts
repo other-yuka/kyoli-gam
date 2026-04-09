@@ -1,16 +1,11 @@
 import {
-  getConfig,
-  initCoreConfig,
-  loadConfig,
-  resetConfigCache,
-  updateConfigField,
+  createConfigLoader,
 } from "opencode-multi-account-core";
 
-initCoreConfig("claude-multiauth.json");
+const configLoader = createConfigLoader("claude-multiauth.json");
 
 export {
-  getConfig,
-  loadConfig,
-  resetConfigCache,
-  updateConfigField,
+  configLoader,
 };
+
+export const { getConfig, loadConfig, resetConfigCache, updateConfigField } = configLoader;

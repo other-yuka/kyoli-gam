@@ -81,19 +81,7 @@ function normalizePromptMessage(prompt: OAuthPromptLike): string {
   );
 }
 
-const ANTHROPIC_TOKEN_HOST = "platform.claude.com";
-
 async function startPiAiFlow(): Promise<OAuthFlowResult> {
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.href : (input as Request).url;
-    if (url.includes(ANTHROPIC_TOKEN_HOST)) {
-      const headers = new Headers(init?.headers);
-      headers.set("user-agent", CLAUDE_CLI_USER_AGENT);
-      return originalFetch(input, { ...init, headers });
-    }
-    return originalFetch(input, init);
-  }) as typeof globalThis.fetch;
   try {
     const completedAccount = await loginWithPiAi({
       onAuth: (info) => {
@@ -109,6 +97,7 @@ async function startPiAiFlow(): Promise<OAuthFlowResult> {
         const text = normalizePromptMessage(prompt as OAuthPromptLike);
         return promptLine(text.endsWith(":") || text.endsWith("?") ? `${text} ` : `${text}: `);
       },
+      userAgent: CLAUDE_CLI_USER_AGENT,
     });
 
     const completedResult = asOAuthCallbackResponse(completedAccount);
@@ -123,8 +112,6 @@ async function startPiAiFlow(): Promise<OAuthFlowResult> {
     };
   } catch {
     return makeFailedFlowResult("Failed to start OAuth flow");
-  } finally {
-    globalThis.fetch = originalFetch;
   }
 }
 
@@ -139,7 +126,7 @@ function wrapCallbackWithAccountReplace(
     callback: async function (code?: string) {
       const callbackResult = await originalCallback(code);
 
-      if (callbackResult?.type === "success" && callbackResult.refresh) {
+      if (callbackResult.type === "success" && callbackResult.refresh) {
         if (targetAccount.uuid) {
           await manager.replaceAccountCredentials(targetAccount.uuid, toOAuthCredentials(callbackResult));
         }
@@ -162,7 +149,7 @@ function wrapCallbackWithManagerSync(
     callback: async function (code?: string) {
       const callbackResult = await originalCallback(code);
 
-      if (callbackResult?.type === "success" && callbackResult.refresh) {
+      if (callbackResult.type === "success" && callbackResult.refresh) {
         const auth = toOAuthCredentials(callbackResult);
 
         if (manager) {
@@ -184,17 +171,6 @@ function wrapCallbackWithManagerSync(
   };
 }
 
-function promptYesNo(message: string): Promise<boolean> {
-  if (!isTTY()) return Promise.resolve(false);
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise((resolve) => {
-    rl.question(message, (answer) => {
-      rl.close();
-      resolve(answer.trim().toLowerCase() === "y");
-    });
-  });
-}
-
 function openBrowser(url: string): void {
   const commands: Record<string, string> = {
     darwin: "open",
@@ -202,53 +178,6 @@ function openBrowser(url: string): void {
   };
   const cmd = commands[process.platform] ?? "xdg-open";
   exec(`${cmd} ${JSON.stringify(url)}`);
-}
-
-async function addMoreAccountsLoop(
-  manager: AccountManager,
-): Promise<void> {
-  while (true) {
-    const currentCount = manager.getAccounts().length;
-    const shouldAdd = await promptYesNo(`Add another account? (${currentCount} added) (y/n): `);
-    if (!shouldAdd) break;
-
-    let flow: OAuthFlowResult;
-    try {
-      flow = await startPiAiFlow();
-    } catch {
-      console.log("\n❌ Failed to start OAuth flow.\n");
-      break;
-    }
-
-    if (flow.url) {
-      openBrowser(flow.url);
-    }
-    if (flow.instructions) {
-      console.log(`\n${flow.instructions}\n`);
-    }
-
-    let callbackResult: OAuthCallbackResponse;
-    try {
-      callbackResult = await flow.callback();
-    } catch {
-      console.log("\n❌ Authentication failed.\n");
-      break;
-    }
-
-    if (callbackResult?.type !== "success" || !("refresh" in callbackResult)) {
-      console.log("\n❌ Authentication failed.\n");
-      break;
-    }
-
-    const flowEmail = (flow as OAuthFlowResult & { _email?: string })._email;
-    const countBefore = manager.getAccounts().length;
-    await manager.addAccount(toOAuthCredentials(callbackResult), flowEmail);
-    const countAfter = manager.getAccounts().length;
-    const added = countAfter > countBefore;
-    console.log(added
-      ? `\n✅ Account added to multi-auth pool (${countAfter} total).\n`
-      : `\nℹ️  Account already exists in multi-auth pool (${countAfter} total).\n`);
-  }
 }
 
 async function persistFallback(auth: OAuthCredentials): Promise<void> {
@@ -296,8 +225,7 @@ async function loadManagerFromDisk(client?: PluginClient): Promise<AccountManage
   const stored = await store.load();
   if (stored.accounts.length === 0) return null;
   const emptyAuth: OAuthCredentials = { type: "oauth", refresh: "", access: "", expires: 0 };
-  const mgr = await AccountManager.create(store, emptyAuth, client);
-  return mgr;
+  return AccountManager.create(store, emptyAuth, client);
 }
 
 async function runAccountManagementMenu(
