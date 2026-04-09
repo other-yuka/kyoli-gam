@@ -5,10 +5,14 @@ import {
 } from "./constants";
 import { getModelBetas } from "./betas";
 import { getUserAgent } from "./model-config";
-import { SYSTEM_PROMPT } from "./anthropic-prompt";
+import { INJECTED_SYSTEM_PROMPT, SYSTEM_PROMPT } from "./anthropic-prompt";
 
 export function getSystemPrompt(): string {
   return SYSTEM_PROMPT;
+}
+
+export function getInjectedSystemPrompt(): string {
+  return INJECTED_SYSTEM_PROMPT;
 }
 
 function sampleCodeUnits(text: string, indices: number[]): string {
@@ -33,16 +37,28 @@ export function buildBillingHeader(firstUserMessage: string): string {
 const OPENCODE_CAMEL_RE = /OpenCode/g;
 const OPENCODE_LOWER_RE = /(?<!\/)opencode/gi;
 const TOOL_PREFIX_RESPONSE_RE = /"name"\s*:\s*"mcp_([^"]+)"/g;
+const PARAGRAPH_REMOVAL_ANCHORS = [
+  "github.com/anomalyco/opencode",
+  "opencode.ai/docs",
+] as const;
+const BILLING_HEADER_PREFIX = "x-anthropic-billing-header:";
 
-type SystemTextEntry = { type: string; text?: string };
+type TextContentBlock = { type: string; text?: string; [key: string]: unknown };
+type SystemTextEntry = { type: string; text?: string; [key: string]: unknown };
 type ToolEntry = { name?: string };
-type MessageContentBlock = { type: string; name?: string };
-type MessageEntry = { content?: MessageContentBlock[] };
+type MessageContentBlock = { type: string; name?: string; text?: string; [key: string]: unknown };
+type MessageEntry = {
+  role?: string;
+  content?: string | MessageContentBlock[];
+  [key: string]: unknown;
+};
 type RequestPayload = {
-  system?: SystemTextEntry[];
+  system?: unknown;
   tools?: ToolEntry[];
   messages?: MessageEntry[];
 };
+
+type NormalizedSystemEntry = SystemTextEntry & { type: "text"; text: string };
 
 function addToolPrefix(name: string | undefined): string | undefined {
   if (!ANTHROPIC_OAUTH_ADAPTER.transform.addToolPrefix) {
@@ -54,6 +70,170 @@ function addToolPrefix(name: string | undefined): string | undefined {
   }
 
   return `${TOOL_PREFIX}${name}`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isProtectedSystemText(text: string): boolean {
+  return text === SYSTEM_PROMPT
+    || text === INJECTED_SYSTEM_PROMPT
+    || text.startsWith(BILLING_HEADER_PREFIX);
+}
+
+function sanitizeSystemText(text: string): string {
+  const paragraphs = text
+    .split(/\n\n+/)
+    .map((paragraph) => paragraph.trim())
+    .filter(Boolean)
+    .filter((paragraph) => !PARAGRAPH_REMOVAL_ANCHORS.some((anchor) => paragraph.includes(anchor)));
+
+  return paragraphs
+    .join("\n\n")
+    .replace(OPENCODE_CAMEL_RE, "Claude Code")
+    .replace(OPENCODE_LOWER_RE, "Claude")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function normalizeSystemEntries(system: unknown): NormalizedSystemEntry[] {
+  if (typeof system === "string") {
+    const text = system.trim();
+    return text ? [{ type: "text", text }] : [];
+  }
+
+  if (!Array.isArray(system)) {
+    return [];
+  }
+
+  const normalized: NormalizedSystemEntry[] = [];
+  for (const entry of system) {
+    if (typeof entry === "string") {
+      const text = entry.trim();
+      if (text) {
+        normalized.push({ type: "text", text });
+      }
+      continue;
+    }
+
+    if (!isRecord(entry)) {
+      continue;
+    }
+
+    const rawText = typeof entry.text === "string" ? entry.text.trim() : "";
+    if (!rawText) {
+      continue;
+    }
+
+    normalized.push({
+      ...entry,
+      type: "text",
+      text: rawText,
+    });
+  }
+
+  return normalized;
+}
+
+function prependToMessageContent(
+  content: MessageEntry["content"],
+  prefix: string,
+): MessageEntry["content"] {
+  if (!prefix) {
+    return content;
+  }
+
+  if (typeof content === "string") {
+    return content ? `${prefix}\n\n${content}` : prefix;
+  }
+
+  if (!Array.isArray(content)) {
+    return [{ type: "text", text: prefix }];
+  }
+
+  const firstTextIndex = content.findIndex(
+    (block) => isRecord(block) && block.type === "text" && typeof block.text === "string",
+  );
+
+  if (firstTextIndex === -1) {
+    return [{ type: "text", text: prefix }, ...content];
+  }
+
+  return content.map((block, index) => {
+    if (index !== firstTextIndex || !isRecord(block) || typeof block.text !== "string") {
+      return block;
+    }
+
+    return {
+      ...block,
+      text: block.text ? `${prefix}\n\n${block.text}` : prefix,
+    } satisfies TextContentBlock;
+  });
+}
+
+function relocateSystemTextToFirstUser(parsed: RequestPayload, systemEntries: NormalizedSystemEntry[]): NormalizedSystemEntry[] {
+  if (!Array.isArray(parsed.messages) || parsed.messages.length === 0) {
+    return systemEntries.map((entry) => (
+      isProtectedSystemText(entry.text)
+        ? entry
+        : { ...entry, text: sanitizeSystemText(entry.text) }
+    )).filter((entry) => entry.text);
+  }
+
+  const preservedEntries: NormalizedSystemEntry[] = [];
+  const relocatedTexts: string[] = [];
+
+  for (const entry of systemEntries) {
+    if (isProtectedSystemText(entry.text)) {
+      preservedEntries.push(entry);
+      continue;
+    }
+
+    const sanitizedText = sanitizeSystemText(entry.text);
+    if (!sanitizedText) {
+      continue;
+    }
+
+    relocatedTexts.push(sanitizedText);
+  }
+
+  if (relocatedTexts.length === 0) {
+    return systemEntries.map((entry) => (
+      isProtectedSystemText(entry.text)
+        ? entry
+        : { ...entry, text: sanitizeSystemText(entry.text) }
+    )).filter((entry) => entry.text);
+  }
+
+  const prefix = relocatedTexts.join("\n\n");
+  const nextMessages = [...parsed.messages];
+  const userMessageIndex = nextMessages.findIndex((message) => message.role === "user");
+
+  if (userMessageIndex === -1) {
+    return systemEntries.map((entry) => (
+      isProtectedSystemText(entry.text)
+        ? entry
+        : { ...entry, text: sanitizeSystemText(entry.text) }
+    )).filter((entry) => entry.text);
+  }
+
+  const userMessage = nextMessages[userMessageIndex];
+  if (!userMessage) {
+    return systemEntries.map((entry) => (
+      isProtectedSystemText(entry.text)
+        ? entry
+        : { ...entry, text: sanitizeSystemText(entry.text) }
+    )).filter((entry) => entry.text);
+  }
+
+  nextMessages[userMessageIndex] = {
+    ...userMessage,
+    content: prependToMessageContent(userMessage.content, prefix),
+  };
+  parsed.messages = nextMessages;
+
+  return preservedEntries;
 }
 
 function stripToolPrefixFromLine(line: string): string {
@@ -130,22 +310,9 @@ export function transformRequestBody(body: string | undefined): string | undefin
   try {
     const parsed: RequestPayload = JSON.parse(body);
 
-    if (parsed.system && Array.isArray(parsed.system)) {
-      parsed.system = parsed.system.map((systemEntry) => {
-        if (
-          ANTHROPIC_OAUTH_ADAPTER.transform.rewriteOpenCodeBranding
-          && systemEntry.type === "text"
-          && systemEntry.text
-        ) {
-          return {
-            ...systemEntry,
-            text: systemEntry.text
-              .replace(OPENCODE_CAMEL_RE, "Claude Code")
-              .replace(OPENCODE_LOWER_RE, "Claude"),
-          };
-        }
-        return systemEntry;
-      });
+    if (ANTHROPIC_OAUTH_ADAPTER.transform.rewriteOpenCodeBranding) {
+      const normalizedSystemEntries = normalizeSystemEntries(parsed.system);
+      parsed.system = relocateSystemTextToFirstUser(parsed, normalizedSystemEntries);
     }
 
     if (parsed.tools && Array.isArray(parsed.tools)) {

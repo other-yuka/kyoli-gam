@@ -11,7 +11,7 @@ import { AccountManager } from "./account-manager";
 import { executeWithAccountRotation } from "./executor";
 import { getPlanLabel, getUsageSummary } from "./usage";
 import { handleAuthorize } from "./auth-handler";
-import { getSystemPrompt, buildBillingHeader } from "./request-transform";
+import { getInjectedSystemPrompt, buildBillingHeader } from "./request-transform";
 import { ANTHROPIC_BETA_HEADER } from "./constants";
 import { loadConfig } from "./config";
 import { ProactiveRefreshQueue } from "./proactive-refresh";
@@ -50,7 +50,7 @@ function extractFirstUserText(input: Record<string, unknown>): string {
 }
 
 function injectSystemPrompt(output: { system?: string[] }): void {
-  const systemPrompt = getSystemPrompt();
+  const systemPrompt = getInjectedSystemPrompt();
 
   if (!Array.isArray(output.system)) {
     output.system = [systemPrompt];
