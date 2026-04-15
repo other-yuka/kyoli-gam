@@ -4,8 +4,10 @@ import { isTokenExpired, refreshToken } from "./token";
 import { TokenRefreshError } from "opencode-multi-account-core";
 import {
   extractModelIdFromBody,
+  extractRequestToolMaskMap,
   buildRequestHeaders,
   createResponseStreamTransform,
+  extractToolNamesFromRequestBody,
   transformRequestBody,
   transformRequestUrl,
 } from "./request-transform";
@@ -17,6 +19,7 @@ import {
   LONG_CONTEXT_BETAS,
 } from "./betas";
 import type { PluginClient, StoredAccount } from "./types";
+import { recordObservedToolNames } from "./tool-observation";
 import { debugLog } from "./utils";
 
 type BaseFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -110,6 +113,12 @@ export class AccountRuntimeFactory {
     const modelId = extractModelIdFromBody(init?.body);
     const excludedBetas = getExcludedBetas(modelId);
     const headers = buildRequestHeaders(transformedInput, init, accessToken, modelId, excludedBetas);
+    if (typeof init?.body === "string") {
+      void recordObservedToolNames(extractToolNamesFromRequestBody(init.body)).catch(() => {});
+    }
+    const toolMaskMap = typeof init?.body === "string"
+      ? extractRequestToolMaskMap(init.body)
+      : new Map<string, string>();
     const transformedBody =
       typeof init?.body === "string" ? transformRequestBody(init.body) : init?.body;
 
@@ -151,7 +160,7 @@ export class AccountRuntimeFactory {
       });
     }
 
-    return createResponseStreamTransform(response);
+    return createResponseStreamTransform(response, toolMaskMap);
   }
 
   private async createRuntime(uuid: string): Promise<AccountRuntime> {

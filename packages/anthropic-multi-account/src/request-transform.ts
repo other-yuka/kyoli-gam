@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import {
   ANTHROPIC_OAUTH_ADAPTER,
-  TOOL_PREFIX,
 } from "./constants";
 import { getModelBetas } from "./betas";
 import { getUserAgent } from "./model-config";
@@ -36,17 +35,55 @@ export function buildBillingHeader(firstUserMessage: string): string {
 
 const OPENCODE_CAMEL_RE = /OpenCode/g;
 const OPENCODE_LOWER_RE = /(?<!\/)opencode/gi;
-const TOOL_PREFIX_RESPONSE_RE = /"name"\s*:\s*"mcp_([^"]+)"/g;
+const TOOL_MASK_PREFIX = "tool_";
 const PARAGRAPH_REMOVAL_ANCHORS = [
   "github.com/anomalyco/opencode",
   "opencode.ai/docs",
 ] as const;
 const BILLING_HEADER_PREFIX = "x-anthropic-billing-header:";
+const DOCUMENTED_BUILTIN_TOOL_NAMES = new Set([
+  "Agent",
+  "AskUserQuestion",
+  "Bash",
+  "CronCreate",
+  "CronDelete",
+  "CronList",
+  "Edit",
+  "EnterPlanMode",
+  "EnterWorktree",
+  "ExitPlanMode",
+  "ExitWorktree",
+  "Glob",
+  "Grep",
+  "ListMcpResourcesTool",
+  "LSP",
+  "Monitor",
+  "NotebookEdit",
+  "PowerShell",
+  "Read",
+  "ReadMcpResourceTool",
+  "SendMessage",
+  "Skill",
+  "TaskCreate",
+  "TaskGet",
+  "TaskList",
+  "TaskOutput",
+  "TaskStop",
+  "TaskUpdate",
+  "TeamCreate",
+  "TeamDelete",
+  "TodoWrite",
+  "ToolSearch",
+  "WebFetch",
+  "WebSearch",
+  "Write",
+]);
 
 type TextContentBlock = { type: string; text?: string; [key: string]: unknown };
 type SystemTextEntry = { type: string; text?: string; [key: string]: unknown };
-type ToolEntry = { name?: string };
+type ToolEntry = { name?: string; type?: string; [key: string]: unknown };
 type MessageContentBlock = { type: string; name?: string; text?: string; [key: string]: unknown };
+type ToolChoice = { type?: string; name?: string; [key: string]: unknown };
 type MessageEntry = {
   role?: string;
   content?: string | MessageContentBlock[];
@@ -56,20 +93,172 @@ type RequestPayload = {
   system?: unknown;
   tools?: ToolEntry[];
   messages?: MessageEntry[];
+  tool_choice?: ToolChoice;
 };
 
 type NormalizedSystemEntry = SystemTextEntry & { type: "text"; text: string };
+type ToolMaskMap = Map<string, string>;
 
-function addToolPrefix(name: string | undefined): string | undefined {
-  if (!ANTHROPIC_OAUTH_ADAPTER.transform.addToolPrefix) {
+function isTypedTool(tool: ToolEntry): boolean {
+  return typeof tool.type === "string" && tool.type.trim().length > 0;
+}
+
+function shouldMaskToolName(name: string | undefined): name is string {
+  if (!name) {
+    return false;
+  }
+
+  return !DOCUMENTED_BUILTIN_TOOL_NAMES.has(name)
+    && !name.startsWith(TOOL_MASK_PREFIX);
+}
+
+function extractFirstUserTextFromMessageContent(content: MessageEntry["content"]): string {
+  if (typeof content === "string") {
+    return content;
+  }
+
+  if (!Array.isArray(content)) {
+    return "";
+  }
+
+  return content
+    .filter((block) => isRecord(block) && block.type === "text" && typeof block.text === "string")
+    .map((block) => String(block.text))
+    .join("\n\n");
+}
+
+function extractFirstUserText(parsed: RequestPayload): string {
+  if (!Array.isArray(parsed.messages)) {
+    return "";
+  }
+
+  const firstUserMessage = parsed.messages.find((message) => message.role === "user");
+  if (!firstUserMessage) {
+    return "";
+  }
+
+  return extractFirstUserTextFromMessageContent(firstUserMessage.content).trim();
+}
+
+function buildMaskedToolName(seed: string, toolName: string, length = 8): string {
+  const digest = createHash("sha256")
+    .update(`tool-mask:${seed}:${toolName}`)
+    .digest("hex")
+    .slice(0, length);
+
+  return `${TOOL_MASK_PREFIX}${digest}`;
+}
+
+function collectMaskCandidates(parsed: RequestPayload): string[] {
+  const candidates = new Set<string>();
+
+  if (Array.isArray(parsed.tools)) {
+    for (const tool of parsed.tools) {
+      if (!isRecord(tool) || isTypedTool(tool) || !shouldMaskToolName(tool.name)) {
+        continue;
+      }
+
+      candidates.add(tool.name);
+    }
+  }
+
+  if (Array.isArray(parsed.messages)) {
+    for (const message of parsed.messages) {
+      if (!Array.isArray(message.content)) {
+        continue;
+      }
+
+      for (const contentBlock of message.content) {
+        if (contentBlock.type !== "tool_use" || !shouldMaskToolName(contentBlock.name)) {
+          continue;
+        }
+
+        candidates.add(contentBlock.name);
+      }
+    }
+  }
+
+  if (parsed.tool_choice?.type === "tool" && shouldMaskToolName(parsed.tool_choice.name)) {
+    candidates.add(parsed.tool_choice.name);
+  }
+
+  return [...candidates];
+}
+
+function buildToolMaskMap(parsed: RequestPayload): ToolMaskMap {
+  const maskMap: ToolMaskMap = new Map();
+  const candidates = collectMaskCandidates(parsed);
+  const firstUserText = extractFirstUserText(parsed);
+  const usedMaskedNames = new Set<string>();
+
+  for (const candidate of candidates) {
+    let hashLength = 8;
+    let maskedName = buildMaskedToolName(firstUserText, candidate, hashLength);
+
+    while (usedMaskedNames.has(maskedName)) {
+      hashLength += 2;
+      maskedName = buildMaskedToolName(firstUserText, candidate, hashLength);
+    }
+
+    maskMap.set(candidate, maskedName);
+    usedMaskedNames.add(maskedName);
+  }
+
+  return maskMap;
+}
+
+export function extractRequestToolMaskMap(body: string | undefined): ToolMaskMap {
+  if (!body) {
+    return new Map();
+  }
+
+  try {
+    const parsed = JSON.parse(body) as RequestPayload;
+    return buildToolMaskMap(parsed);
+  } catch {
+    return new Map();
+  }
+}
+
+function renameMaskedToolName(name: string | undefined, maskMap: ToolMaskMap): string | undefined {
+  if (!name) {
     return name;
   }
 
-  if (!name || name.startsWith(TOOL_PREFIX)) {
-    return name;
+  return maskMap.get(name) ?? name;
+}
+
+function remapToolUseNames(messages: MessageEntry[] | undefined, maskMap: ToolMaskMap): MessageEntry[] | undefined {
+  if (!Array.isArray(messages)) {
+    return messages;
   }
 
-  return `${TOOL_PREFIX}${name}`;
+  return messages.map((message) => {
+    if (!Array.isArray(message.content)) {
+      return message;
+    }
+
+    return {
+      ...message,
+      content: message.content.map((contentBlock) => {
+        if (contentBlock.type !== "tool_use" || !contentBlock.name) {
+          return contentBlock;
+        }
+
+        const nextName = renameMaskedToolName(contentBlock.name, maskMap);
+        return nextName === contentBlock.name ? contentBlock : { ...contentBlock, name: nextName };
+      }),
+    };
+  });
+}
+
+function remapToolChoice(toolChoice: ToolChoice | undefined, maskMap: ToolMaskMap): ToolChoice | undefined {
+  if (!toolChoice || toolChoice.type !== "tool" || typeof toolChoice.name !== "string") {
+    return toolChoice;
+  }
+
+  const nextName = renameMaskedToolName(toolChoice.name, maskMap);
+  return nextName === toolChoice.name ? toolChoice : { ...toolChoice, name: nextName };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -236,15 +425,43 @@ function relocateSystemTextToFirstUser(parsed: RequestPayload, systemEntries: No
   return preservedEntries;
 }
 
-function stripToolPrefixFromLine(line: string): string {
+export function extractToolNamesFromRequestBody(body: string | undefined): string[] {
+  if (!body) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(body) as RequestPayload;
+    if (!Array.isArray(parsed.tools)) {
+      return [];
+    }
+
+    return parsed.tools
+      .map((tool) => (typeof tool.name === "string" ? tool.name : null))
+      .filter((toolName): toolName is string => Boolean(toolName));
+  } catch {
+    return [];
+  }
+}
+
+function stripToolPrefixFromLine(line: string, maskMap: ToolMaskMap): string {
   if (!ANTHROPIC_OAUTH_ADAPTER.transform.stripToolPrefixInResponse) {
     return line;
   }
 
-  return line.replace(TOOL_PREFIX_RESPONSE_RE, '"name": "$1"');
+  let nextLine = line;
+
+  for (const [originalName, maskedName] of maskMap) {
+    nextLine = nextLine.replace(
+      new RegExp(`"name"\\s*:\\s*"${maskedName}"`, "g"),
+      `"name": "${originalName}"`,
+    );
+  }
+
+  return nextLine;
 }
 
-function processCompleteLines(buffer: string): { output: string; remaining: string } {
+function processCompleteLines(buffer: string, maskMap: ToolMaskMap): { output: string; remaining: string } {
   const lines = buffer.split("\n");
   const remaining = lines.pop() ?? "";
 
@@ -252,7 +469,7 @@ function processCompleteLines(buffer: string): { output: string; remaining: stri
     return { output: "", remaining };
   }
 
-  const output = `${lines.map(stripToolPrefixFromLine).join("\n")}\n`;
+  const output = `${lines.map((line) => stripToolPrefixFromLine(line, maskMap)).join("\n")}\n`;
   return { output, remaining };
 }
 
@@ -309,6 +526,7 @@ export function transformRequestBody(body: string | undefined): string | undefin
 
   try {
     const parsed: RequestPayload = JSON.parse(body);
+    const toolMaskMap = buildToolMaskMap(parsed);
 
     if (ANTHROPIC_OAUTH_ADAPTER.transform.rewriteOpenCodeBranding) {
       const normalizedSystemEntries = normalizeSystemEntries(parsed.system);
@@ -318,23 +536,12 @@ export function transformRequestBody(body: string | undefined): string | undefin
     if (parsed.tools && Array.isArray(parsed.tools)) {
       parsed.tools = parsed.tools.map((tool) => ({
         ...tool,
-        name: addToolPrefix(tool.name),
+        name: renameMaskedToolName(tool.name, toolMaskMap),
       }));
     }
 
-    if (parsed.messages && Array.isArray(parsed.messages)) {
-      parsed.messages = parsed.messages.map((message) => {
-        if (message.content && Array.isArray(message.content)) {
-          message.content = message.content.map((contentBlock) => {
-            if (contentBlock.type === "tool_use" && contentBlock.name) {
-              return { ...contentBlock, name: addToolPrefix(contentBlock.name) };
-            }
-            return contentBlock;
-          });
-        }
-        return message;
-      });
-    }
+    parsed.messages = remapToolUseNames(parsed.messages, toolMaskMap);
+    parsed.tool_choice = remapToolChoice(parsed.tool_choice, toolMaskMap);
 
     return JSON.stringify(parsed);
   } catch {
@@ -380,7 +587,7 @@ export function transformRequestUrl(input: RequestInfo | URL): RequestInfo | URL
   return input;
 }
 
-export function createResponseStreamTransform(response: Response): Response {
+export function createResponseStreamTransform(response: Response, maskMap: ToolMaskMap = new Map()): Response {
   if (!response.body) return response;
 
   const reader = response.body.getReader();
@@ -397,7 +604,7 @@ export function createResponseStreamTransform(response: Response): Response {
           if (done) {
             buffer += decoder.decode();
             if (buffer) {
-              controller.enqueue(encoder.encode(stripToolPrefixFromLine(buffer)));
+              controller.enqueue(encoder.encode(stripToolPrefixFromLine(buffer, maskMap)));
               buffer = "";
             }
             controller.close();
@@ -405,7 +612,7 @@ export function createResponseStreamTransform(response: Response): Response {
           }
 
           buffer += decoder.decode(value, { stream: true });
-          const { output, remaining } = processCompleteLines(buffer);
+          const { output, remaining } = processCompleteLines(buffer, maskMap);
           buffer = remaining;
 
           if (output) {
