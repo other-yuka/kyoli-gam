@@ -1,5 +1,14 @@
 # opencode-codex-multi-account
 
+## 0.2.15
+
+### Patch Changes
+
+- Release the Anthropic OAuth compatibility updates, including the fixed base URL, first-message-seeded tool masking for undocumented flat tools, and outbound tool observation for diagnostics.
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.15
+
 ## 0.2.14
 
 ### Patch Changes
