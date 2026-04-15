@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   extractModelIdFromBody,
+  extractRequestToolMaskMap,
   buildRequestHeaders,
   createResponseStreamTransform,
   getInjectedSystemPrompt,
@@ -10,7 +11,6 @@ import {
 } from "../src/request-transform";
 import {
   CLAUDE_CLI_USER_AGENT,
-  TOOL_PREFIX,
 } from "../src/constants";
 import { resetExcludedBetas } from "../src/betas";
 import { createRealisticRequestPayload } from "./fixtures/realistic-request-payload";
@@ -29,8 +29,8 @@ function createChunkedStream(chunks: string[]): ReadableStream<Uint8Array> {
   });
 }
 
-async function readTransformedText(response: Response): Promise<string> {
-  const transformed = createResponseStreamTransform(response);
+async function readTransformedText(response: Response, requestBody?: string): Promise<string> {
+  const transformed = createResponseStreamTransform(response, extractRequestToolMaskMap(requestBody));
   return new Response(transformed.body).text();
 }
 
@@ -259,7 +259,7 @@ describe("transformRequestBody", () => {
     expect(parsed.messages[0]?.content).toBe("Hello");
   });
 
-  test("handles a realistic payload with prompt relocation and tool prefixing", () => {
+  test("handles a realistic payload with prompt relocation and custom tool masking", () => {
     const body = JSON.stringify(createRealisticRequestPayload());
 
     const transformed = transformRequestBody(body);
@@ -283,11 +283,12 @@ describe("transformRequestBody", () => {
     expect(parsed.messages[0]?.content).toContain("Keep answers concise and actionable.");
     expect(parsed.messages[0]?.content).not.toContain("opencode.ai/docs");
     expect(parsed.messages[0]?.content).toContain("Please debug the failing request.");
-    expect(parsed.tools[0]?.name).toBe(`${TOOL_PREFIX}search_docs`);
-    expect(parsed.tools[1]?.name).toBe(`${TOOL_PREFIX}run_command`);
+    const maskMap = extractRequestToolMaskMap(body);
+    expect(parsed.tools[0]?.name).toBe(maskMap.get("search_docs"));
+    expect(parsed.tools[1]?.name).toBe(maskMap.get("run_command"));
     expect(Array.isArray(parsed.messages[1]?.content)).toBe(true);
     if (Array.isArray(parsed.messages[1]?.content)) {
-      expect(parsed.messages[1].content[0]?.name).toBe(`${TOOL_PREFIX}search_docs`);
+      expect(parsed.messages[1].content[0]?.name).toBe(maskMap.get("search_docs"));
     }
   });
 
@@ -300,7 +301,7 @@ describe("transformRequestBody", () => {
     expect(secondPass).toBe(firstPass);
   });
 
-  test("adds mcp_ prefix to tool names", () => {
+  test("adds tool_ prefix to undocumented flat tool names", () => {
     const body = JSON.stringify({
       tools: [{ name: "search_docs" }, { name: "run_command" }],
     });
@@ -312,11 +313,12 @@ describe("transformRequestBody", () => {
       tools: Array<{ name?: string }>;
     };
 
-    expect(parsed.tools[0].name).toBe(`${TOOL_PREFIX}search_docs`);
-    expect(parsed.tools[1].name).toBe(`${TOOL_PREFIX}run_command`);
+    const maskMap = extractRequestToolMaskMap(body);
+    expect(parsed.tools[0].name).toBe(maskMap.get("search_docs"));
+    expect(parsed.tools[1].name).toBe(maskMap.get("run_command"));
   });
 
-  test("adds mcp_ prefix to tool_use content block names", () => {
+  test("adds tool_ prefix to tool_use content block names", () => {
     const body = JSON.stringify({
       messages: [
         {
@@ -335,15 +337,16 @@ describe("transformRequestBody", () => {
       messages: Array<{ content?: Array<{ type: string; name?: string }> }>;
     };
 
-    expect(parsed.messages[0].content?.[1].name).toBe(`${TOOL_PREFIX}lookup`);
+    const maskMap = extractRequestToolMaskMap(body);
+    expect(parsed.messages[0].content?.[1].name).toBe(maskMap.get("lookup"));
   });
 
-  test("does not double-prefix names that already start with mcp_", () => {
+  test("does not double-prefix names that already start with tool_", () => {
     const body = JSON.stringify({
-      tools: [{ name: "mcp_already_tool" }],
+      tools: [{ name: "tool_already_tool" }],
       messages: [
         {
-          content: [{ type: "tool_use", name: "mcp_already_block" }],
+          content: [{ type: "tool_use", name: "tool_already_block" }],
         },
       ],
     });
@@ -356,10 +359,76 @@ describe("transformRequestBody", () => {
       messages: Array<{ content?: Array<{ type: string; name?: string }> }>;
     };
 
-    expect(parsed.tools[0].name).toBe("mcp_already_tool");
-    expect(parsed.messages[0].content?.[0].name).toBe("mcp_already_block");
-    expect(parsed.tools[0].name?.startsWith("mcp_mcp_")).toBe(false);
-    expect(parsed.messages[0].content?.[0].name?.startsWith("mcp_mcp_")).toBe(false);
+    expect(parsed.tools[0].name).toBe("tool_already_tool");
+    expect(parsed.messages[0].content?.[0].name).toBe("tool_already_block");
+    expect(parsed.tools[0].name?.startsWith("tool_tool_")).toBe(false);
+    expect(parsed.messages[0].content?.[0].name?.startsWith("tool_tool_")).toBe(false);
+  });
+
+  test("preserves documented built-in tool names", () => {
+    const body = JSON.stringify({
+      tools: [{ name: "Read" }, { name: "TodoWrite" }, { name: "WebFetch" }],
+      messages: [
+        {
+          content: [
+            { type: "tool_use", name: "Read" },
+            { type: "tool_use", name: "TodoWrite" },
+            { type: "tool_use", name: "WebFetch" },
+          ],
+        },
+      ],
+      tool_choice: { type: "tool", name: "TodoWrite" },
+    });
+
+    const transformed = transformRequestBody(body);
+    expect(transformed).toBeDefined();
+
+    const parsed = JSON.parse(transformed as string) as {
+      tools: Array<{ name?: string }>;
+      messages: Array<{ content?: Array<{ type: string; name?: string }> }>;
+      tool_choice?: { type?: string; name?: string };
+    };
+
+    expect(parsed.tools.map((tool) => tool.name)).toEqual(["Read", "TodoWrite", "WebFetch"]);
+    expect(parsed.messages[0].content?.[0].name).toBe("Read");
+    expect(parsed.messages[0].content?.[1].name).toBe("TodoWrite");
+    expect(parsed.messages[0].content?.[2].name).toBe("WebFetch");
+    expect(parsed.tool_choice).toEqual({ type: "tool", name: "TodoWrite" });
+  });
+
+  test("remaps tool_choice for masked custom tools", () => {
+    const body = JSON.stringify({
+      tool_choice: { type: "tool", name: "search_docs" },
+      tools: [{ name: "search_docs" }, { name: "Read" }],
+    });
+
+    const transformed = transformRequestBody(body);
+    expect(transformed).toBeDefined();
+
+    const parsed = JSON.parse(transformed as string) as {
+      tool_choice?: { type?: string; name?: string };
+    };
+
+    const maskMap = extractRequestToolMaskMap(body);
+    expect(parsed.tool_choice).toEqual({ type: "tool", name: maskMap.get("search_docs") });
+  });
+
+  test("uses first user message as the masking seed", () => {
+    const bodyA = JSON.stringify({
+      messages: [{ role: "user", content: "alpha seed" }],
+      tools: [{ name: "search_docs" }],
+    });
+    const bodyB = JSON.stringify({
+      messages: [{ role: "user", content: "beta seed" }],
+      tools: [{ name: "search_docs" }],
+    });
+
+    const parsedA = JSON.parse(transformRequestBody(bodyA) as string) as { tools: Array<{ name?: string }> };
+    const parsedB = JSON.parse(transformRequestBody(bodyB) as string) as { tools: Array<{ name?: string }> };
+
+    expect(parsedA.tools[0]?.name?.startsWith("tool_")).toBe(true);
+    expect(parsedB.tools[0]?.name?.startsWith("tool_")).toBe(true);
+    expect(parsedA.tools[0]?.name).not.toBe(parsedB.tools[0]?.name);
   });
 
   test("handles empty tools array", () => {
@@ -438,44 +507,52 @@ describe("createResponseStreamTransform", () => {
     expect(transformed).toBe(response);
   });
 
-  test("strips mcp_ prefix from tool names in complete lines", async () => {
+  test("restores masked tool names in complete lines", async () => {
+    const requestBody = JSON.stringify({ messages: [{ role: "user", content: "mask seed" }], tools: [{ name: "my_tool" }] });
+    const maskedName = extractRequestToolMaskMap(requestBody).get("my_tool");
     const chunks = [
-      'data: {"type":"content_block_start","content_block":{"type":"tool_use","name":"mcp_my_tool"}}\n\n',
+      `data: {"type":"content_block_start","content_block":{"type":"tool_use","name":"${maskedName}"}}\n\n`,
     ];
     const response = new Response(createChunkedStream(chunks));
-    const text = await readTransformedText(response);
+    const text = await readTransformedText(response, requestBody);
 
     expect(/"name"\s*:\s*"my_tool"/.test(text)).toBe(true);
-    expect(text.includes('"name":"mcp_my_tool"')).toBe(false);
+    expect(text.includes(String(maskedName))).toBe(false);
   });
 
-  test("strips mcp_ prefix across chunk boundaries", async () => {
+  test("restores masked tool names across chunk boundaries", async () => {
+    const requestBody = JSON.stringify({ messages: [{ role: "user", content: "mask seed" }], tools: [{ name: "my_tool" }] });
+    const maskedName = extractRequestToolMaskMap(requestBody).get("my_tool");
     const chunks = [
       'data: {"type":"content_block_start","content_block":{"type":"tool_use","na',
-      'me":"mcp_my_tool"}}\n\n',
+      `me":"${maskedName}"}}\n\n`,
     ];
     const response = new Response(createChunkedStream(chunks));
-    const text = await readTransformedText(response);
+    const text = await readTransformedText(response, requestBody);
 
     expect(/"name"\s*:\s*"my_tool"/.test(text)).toBe(true);
-    expect(text.includes('"name":"mcp_my_tool"')).toBe(false);
+    expect(text.includes(String(maskedName))).toBe(false);
   });
 
   test("flushes remaining buffer on stream end", async () => {
+    const requestBody = JSON.stringify({ messages: [{ role: "user", content: "tail seed" }], tools: [{ name: "tail_tool" }] });
+    const maskedName = extractRequestToolMaskMap(requestBody).get("tail_tool");
     const chunks = [
-      'data: {"type":"content_block_start","content_block":{"type":"tool_use","name":"mcp_tail_tool"}}',
+      `data: {"type":"content_block_start","content_block":{"type":"tool_use","name":"${maskedName}"}}`,
     ];
     const response = new Response(createChunkedStream(chunks));
-    const text = await readTransformedText(response);
+    const text = await readTransformedText(response, requestBody);
 
     expect(/"name"\s*:\s*"tail_tool"/.test(text)).toBe(true);
-    expect(text.includes('"name":"mcp_tail_tool"')).toBe(false);
+    expect(text.includes(String(maskedName))).toBe(false);
   });
 
   test("handles empty chunks", async () => {
-    const chunks = ["", 'data: {"name":"mcp_empty_test"}\n', ""];
+    const requestBody = JSON.stringify({ messages: [{ role: "user", content: "empty seed" }], tools: [{ name: "empty_test" }] });
+    const maskedName = extractRequestToolMaskMap(requestBody).get("empty_test");
+    const chunks = ["", `data: {"name":"${maskedName}"}\n`, ""];
     const response = new Response(createChunkedStream(chunks));
-    const text = await readTransformedText(response);
+    const text = await readTransformedText(response, requestBody);
 
     expect(/"name"\s*:\s*"empty_test"/.test(text)).toBe(true);
   });

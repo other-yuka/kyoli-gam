@@ -76,8 +76,8 @@ describe("runtime-factory", () => {
     expect(headers.get("authorization")).toBe("Bearer access-1");
     expect(headers.get("anthropic-beta")).toBeTruthy();
     expect(headers.get("anthropic-beta")).toContain("effort-2025-11-24");
-    expect(body.tools[0]?.name).not.toBe("calc");
-    expect(body.messages[0]?.content[0]?.name).not.toBe("calc");
+    expect(body.tools[0]?.name?.startsWith("tool_")).toBe(true);
+    expect(body.messages[0]?.content[0]?.name).toBe(body.tools[0]?.name);
   });
 
   test("retries without long-context beta when provider rejects it", async () => {
