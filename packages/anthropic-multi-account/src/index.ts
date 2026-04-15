@@ -275,6 +275,7 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
 
         return {
           apiKey: "",
+          baseURL: "https://api.anthropic.com/v1",
           "chat.headers": async (input: { provider?: { info?: { id?: string } } }, output: { headers: Record<string, string> }) => {
             if (input.provider?.info?.id !== ANTHROPIC_OAUTH_ADAPTER.authProviderId) return;
             output.headers["user-agent"] = getUserAgent();
