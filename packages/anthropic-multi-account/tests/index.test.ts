@@ -34,6 +34,18 @@ describe("index", () => {
     expect(loaded.fetch).toBe(fetch);
   });
 
+  test("auth loader returns Anthropic v1 baseURL for oauth mode", async () => {
+    const plugin = await ClaudeMultiAuthPlugin({ client: createMockClient() } as any);
+    const auth = plugin.auth!;
+    const loaded = await auth.loader!(
+      async () => ({ type: "oauth", access: "access", refresh: "refresh", expires: Date.now() + 60_000 }),
+      { id: "anthropic", name: "Anthropic", env: {}, models: {} } as any,
+    );
+
+    expect(loaded.apiKey).toBe("");
+    expect(loaded.baseURL).toBe("https://api.anthropic.com/v1");
+  });
+
   test("plugin init bootstraps auth from stored account", async () => {
     const { dir, cleanup } = await setupTestEnv();
     try {
