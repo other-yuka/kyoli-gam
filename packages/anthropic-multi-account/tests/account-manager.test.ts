@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { describe, test, expect, beforeEach, afterEach, vi } from "bun:test";
 import { AccountManager } from "../src/account-manager";
 import { AccountStore } from "../src/account-store";
-import * as piAiAdapter from "../src/pi-ai-adapter";
+import * as anthropicOAuth from "../src/anthropic-oauth";
 import { ACCOUNTS_FILENAME, CLAIMS_FILENAME } from "../src/constants";
 import { loadConfig, resetConfigCache, updateConfigField } from "../src/config";
 import type {
@@ -530,7 +530,7 @@ describe("account-manager", () => {
         throw new Error("Expected account");
       }
 
-      const refreshSpy = vi.spyOn(piAiAdapter, "refreshWithPiAi").mockResolvedValue({
+      const refreshSpy = vi.spyOn(anthropicOAuth, "refreshWithOAuth").mockResolvedValue({
         accessToken: "test",
         refreshToken: "rotated-refresh",
         expiresAt: Date.now() + 60_000,
@@ -584,7 +584,7 @@ describe("account-manager", () => {
       const client = createMockClient();
       manager.setClient(client);
       const setSpy = vi.spyOn(client.auth, "set");
-      const refreshSpy = vi.spyOn(piAiAdapter, "refreshWithPiAi").mockResolvedValue({
+      const refreshSpy = vi.spyOn(anthropicOAuth, "refreshWithOAuth").mockResolvedValue({
         accessToken: "refreshed-access",
         refreshToken: "refreshed-token",
         expiresAt: Date.now() + 60_000,

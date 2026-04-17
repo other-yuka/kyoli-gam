@@ -11,16 +11,30 @@ import { AccountManager } from "./account-manager";
 import { executeWithAccountRotation } from "./executor";
 import { getPlanLabel, getUsageSummary } from "./usage";
 import { handleAuthorize } from "./auth-handler";
-import { getInjectedSystemPrompt, buildBillingHeader } from "./request-transform";
-import { ANTHROPIC_BETA_HEADER } from "./constants";
 import { loadConfig } from "./config";
 import { ProactiveRefreshQueue } from "./proactive-refresh";
 import { AccountStore } from "./account-store";
 import { AccountRuntimeFactory } from "./runtime-factory";
 import { formatWaitTime, getAccountLabel, showToast } from "./utils";
 import { ANTHROPIC_OAUTH_ADAPTER } from "./constants";
-import { getUserAgent } from "./model-config";
+import { loadCCDerivedAuthProfile, loadCCDerivedRequestProfile } from "./cc-derived-profile";
+import {
+  checkCCCompat,
+  detectDrift,
+  loadTemplate,
+  refreshLiveFingerprintAsync,
+} from "./fingerprint-capture";
+import {
+  getBetaHeader,
+  getPerRequestHeaders,
+  getStaticHeaders,
+  orderHeadersForOutbound,
+} from "./upstream-headers";
+import { computeBuildTag, getUpstreamSessionId } from "./upstream-request";
+import { loadClaudeIdentity } from "./claude-identity";
 import { syncBootstrapAuth } from "./bootstrap-auth";
+import { sanitizeError } from "./error-utils";
+import { getSessionId, startHeartbeat } from "./session-heartbeat";
 import type { OAuthCredentials, PluginClient } from "./types";
 
 const EMPTY_OAUTH_CREDENTIALS: OAuthCredentials = {
@@ -49,23 +63,137 @@ function extractFirstUserText(input: Record<string, unknown>): string {
   return "";
 }
 
-function injectSystemPrompt(output: { system?: string[] }): void {
-  const systemPrompt = getInjectedSystemPrompt();
+function composeBillingSystemEntry(firstUserMessage: string, version: string): string {
+  const buildTag = computeBuildTag(firstUserMessage, version);
+  return `x-anthropic-billing-header: cc_version=${version}.${buildTag}; cc_entrypoint=cli; cch=00000;`;
+}
 
-  if (!Array.isArray(output.system)) {
-    output.system = [systemPrompt];
-    return;
-  }
+function prependMissingSystemEntries(output: { system?: string[] }, entries: string[]): void {
+  output.system ??= [];
 
-  if (!output.system.includes(systemPrompt)) {
-    output.system.unshift(systemPrompt);
+  for (const entry of entries.toReversed()) {
+    if (entry && !output.system.includes(entry)) {
+      output.system.unshift(entry);
+    }
   }
+}
+
+function applyOrderedHeaders(
+  output: { headers: Record<string, string> },
+  headers: Record<string, string>,
+): void {
+  const orderedHeaders = orderHeadersForOutbound(headers);
+  output.headers = Array.isArray(orderedHeaders)
+    ? Object.fromEntries(orderedHeaders)
+    : orderedHeaders;
 }
 
 export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
   const { client } = ctx as unknown as { client: PluginClient } & Record<string, unknown>;
 
   await loadConfig();
+
+  const requestProfile = loadCCDerivedRequestProfile();
+  const template = requestProfile.template;
+  const claudeIdentity = loadClaudeIdentity();
+  const claudeCodeVersion = template.cc_version ?? requestProfile.cliVersion;
+  const upstreamAgentIdentity = template.agent_identity;
+  const upstreamSystemPrompt = template.system_prompt;
+
+  let heartbeatHandle: { stop(): void } | null = null;
+  let heartbeatToken: string | null = null;
+  let heartbeatSessionId: string | null = null;
+
+  const stopHeartbeat = (): void => {
+    heartbeatHandle?.stop();
+    heartbeatHandle = null;
+    heartbeatToken = null;
+    heartbeatSessionId = null;
+  };
+
+  const ensureHeartbeat = (accessToken: string | undefined): void => {
+    if (!accessToken || !claudeIdentity.deviceId) {
+      stopHeartbeat();
+      return;
+    }
+
+    const sessionId = getSessionId();
+
+    if (heartbeatHandle && heartbeatToken === accessToken && heartbeatSessionId === sessionId) {
+      return;
+    }
+
+    stopHeartbeat();
+    heartbeatToken = accessToken;
+    heartbeatSessionId = sessionId;
+    heartbeatHandle = startHeartbeat({
+      sessionId,
+      deviceId: claudeIdentity.deviceId,
+      accessToken,
+    });
+  };
+
+  const startupDrift = detectDrift(template);
+  if (startupDrift.drifted) {
+    client.app.log({
+      body: {
+        service: ANTHROPIC_OAUTH_ADAPTER.serviceLogName,
+        level: "warn",
+        message: startupDrift.message,
+        extra: {
+          cachedVersion: startupDrift.cachedVersion,
+          installedVersion: startupDrift.installedVersion,
+        },
+      },
+    }).catch(() => {});
+  }
+
+  const compat = checkCCCompat();
+  if (compat.status !== "ok" && compat.status !== "unknown") {
+    client.app.log({
+      body: {
+        service: ANTHROPIC_OAUTH_ADAPTER.serviceLogName,
+        level: "warn",
+        message: compat.message,
+        extra: {
+          installedVersion: compat.installedVersion,
+          range: compat.range,
+        },
+      },
+    }).catch(() => {});
+  }
+
+  void refreshLiveFingerprintAsync({ silent: true })
+    .then((refreshedTemplate) => {
+      const refreshedDrift = detectDrift(refreshedTemplate ?? template);
+      if (!refreshedDrift.drifted) {
+        return;
+      }
+
+      return client.app.log({
+        body: {
+          service: ANTHROPIC_OAUTH_ADAPTER.serviceLogName,
+          level: "warn",
+          message: refreshedDrift.message,
+          extra: {
+            cachedVersion: refreshedDrift.cachedVersion,
+            installedVersion: refreshedDrift.installedVersion,
+          },
+        },
+      }).catch(() => {});
+    })
+    .catch((error) => {
+      client.app.log({
+        body: {
+          service: ANTHROPIC_OAUTH_ADAPTER.serviceLogName,
+          level: "debug",
+          message: "live fingerprint refresh failed",
+          extra: {
+            error: sanitizeError(error),
+          },
+        },
+      }).catch(() => {});
+    });
 
   const store = new AccountStore();
   await syncBootstrapAuth(client, store).catch(() => {});
@@ -78,7 +206,7 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
   let poolChainConfig: PoolChainConfig = { pools: [], chains: [] };
 
   async function ensureExecutionInfrastructure(): Promise<void> {
-    runtimeFactory ??= new AccountRuntimeFactory(store, client);
+    runtimeFactory ??= new AccountRuntimeFactory(store, client, claudeIdentity);
     poolChainConfig = await loadPoolChainConfig();
 
     poolManager ??= new PoolManager();
@@ -126,6 +254,7 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
     manager = await AccountManager.create(store, EMPTY_OAUTH_CREDENTIALS, client);
     await ensureExecutionInfrastructure();
     await startRefreshQueueIfNeeded();
+    ensureHeartbeat(manager.getActiveAccount()?.accessToken);
     return manager.getAccountCount() > 0;
   }
 
@@ -136,17 +265,19 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
 
     await ensureExecutionInfrastructure();
     await startRefreshQueueIfNeeded();
+    ensureHeartbeat(manager.getActiveAccount()?.accessToken);
   }
 
   await initializeManagerFromStore().catch(() => {});
 
   return {
     "experimental.chat.system.transform": (input: Record<string, unknown>, output: { system?: string[] }) => {
-      injectSystemPrompt(output);
-      const billingHeader = buildBillingHeader(extractFirstUserText(input));
-      if (billingHeader && !output.system?.includes(billingHeader)) {
-        output.system?.unshift(billingHeader);
-      }
+      const billingHeader = composeBillingSystemEntry(extractFirstUserText(input), claudeCodeVersion);
+      prependMissingSystemEntries(output, [
+        billingHeader,
+        upstreamAgentIdentity,
+        upstreamSystemPrompt,
+      ]);
     },
 
     tool: {
@@ -235,6 +366,7 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
       ) {
         const auth = await getAuth() as Record<string, unknown>;
         if (auth.type !== "oauth") {
+          stopHeartbeat();
           return { apiKey: "", fetch };
         }
 
@@ -273,25 +405,36 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
           }
         }
 
+        const authProfile = await loadCCDerivedAuthProfile();
+
         return {
           apiKey: "",
-          baseURL: "https://api.anthropic.com/v1",
+          baseURL: authProfile.apiV1BaseUrl,
           "chat.headers": async (input: { provider?: { info?: { id?: string } } }, output: { headers: Record<string, string> }) => {
             if (input.provider?.info?.id !== ANTHROPIC_OAUTH_ADAPTER.authProviderId) return;
-            output.headers["user-agent"] = getUserAgent();
-            output.headers["anthropic-beta"] = ANTHROPIC_BETA_HEADER;
-            output.headers["x-app"] = "cli";
+
+            const sessionId = getUpstreamSessionId();
+            applyOrderedHeaders(output, {
+              ...output.headers,
+              ...getStaticHeaders(),
+              ...getPerRequestHeaders(sessionId),
+              "anthropic-beta": getBetaHeader(),
+            });
           },
           async fetch(input: RequestInfo | URL, init?: RequestInit) {
             if (!initializedManager || !runtimeFactory) {
+              stopHeartbeat();
               return fetch(input, init);
             }
 
             if (initializedManager.getAccountCount() === 0) {
+              stopHeartbeat();
               throw new Error(
                 "No Anthropic accounts configured. Run `opencode auth login` to add an account.",
               );
             }
+
+            ensureHeartbeat(initializedManager.getActiveAccount()?.accessToken);
 
             if (!poolManager || !cascadeStateManager) {
               poolManager = new PoolManager();

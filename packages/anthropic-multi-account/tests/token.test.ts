@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from "bun:test";
 import { ANTHROPIC_OAUTH_ADAPTER, TOKEN_EXPIRY_BUFFER_MS } from "../src/constants";
-import * as piAiAdapter from "../src/pi-ai-adapter";
+import * as anthropicOAuth from "../src/anthropic-oauth";
 import type { CredentialRefreshPatch } from "../src/types";
 import { clearRefreshMutex, isTokenExpired, refreshToken } from "../src/token";
 import { createMockClient } from "../tests/helpers";
@@ -16,14 +16,14 @@ function createDeferred<T>() {
 }
 
 describe("token", () => {
-  let refreshWithPiAiSpy: ReturnType<typeof vi.spyOn<typeof piAiAdapter, "refreshWithPiAi">>;
+  let refreshWithOAuthSpy: ReturnType<typeof vi.spyOn<typeof anthropicOAuth, "refreshWithOAuth">>;
 
   beforeEach(() => {
-    refreshWithPiAiSpy = vi.spyOn(piAiAdapter, "refreshWithPiAi");
+    refreshWithOAuthSpy = vi.spyOn(anthropicOAuth, "refreshWithOAuth");
   });
 
   afterEach(() => {
-    refreshWithPiAiSpy.mockRestore();
+    refreshWithOAuthSpy.mockRestore();
     clearRefreshMutex();
   });
 
@@ -66,7 +66,7 @@ describe("token", () => {
   });
 
   describe("refreshToken success", () => {
-    test("calls refreshWithPiAi and returns patch", async () => {
+    test("calls refreshWithOAuth and returns patch", async () => {
       const client = createMockClient();
       const patch: CredentialRefreshPatch = {
         accessToken: "new-access",
@@ -75,12 +75,12 @@ describe("token", () => {
         uuid: "user-uuid",
         email: "user@example.com",
       };
-      refreshWithPiAiSpy.mockResolvedValue(patch);
+      refreshWithOAuthSpy.mockResolvedValue(patch);
 
       const result = await refreshToken("old-refresh", "account-1", client);
 
-      expect(refreshWithPiAiSpy).toHaveBeenCalledTimes(1);
-      expect(refreshWithPiAiSpy).toHaveBeenCalledWith("old-refresh");
+      expect(refreshWithOAuthSpy).toHaveBeenCalledTimes(1);
+      expect(refreshWithOAuthSpy).toHaveBeenCalledWith("old-refresh");
       expect(result.ok).toBe(true);
       if (!result.ok) {
         throw new Error("Expected successful refresh result");
@@ -91,7 +91,7 @@ describe("token", () => {
 
     test("handles minimal patch response", async () => {
       const client = createMockClient();
-      refreshWithPiAiSpy.mockResolvedValue({
+      refreshWithOAuthSpy.mockResolvedValue({
         accessToken: "new-access",
         expiresAt: Date.now() + 3_600_000,
       });
@@ -115,8 +115,8 @@ describe("token", () => {
 
       for (const status of permanentStatuses) {
         const client = createMockClient();
-        refreshWithPiAiSpy.mockReset();
-        refreshWithPiAiSpy.mockRejectedValue(new Error(`Token refresh failed: ${status}`));
+        refreshWithOAuthSpy.mockReset();
+        refreshWithOAuthSpy.mockRejectedValue(new Error(`Token refresh failed: ${status}`));
 
         const result = await refreshToken("old-refresh", `account-${status}`, client);
 
@@ -133,8 +133,8 @@ describe("token", () => {
 
       for (const status of transientStatuses) {
         const client = createMockClient();
-        refreshWithPiAiSpy.mockReset();
-        refreshWithPiAiSpy.mockRejectedValue(new Error(`Token refresh failed: ${status}`));
+        refreshWithOAuthSpy.mockReset();
+        refreshWithOAuthSpy.mockRejectedValue(new Error(`Token refresh failed: ${status}`));
 
         const result = await refreshToken("old-refresh", `account-${status}`, client);
 
@@ -146,9 +146,9 @@ describe("token", () => {
       }
     });
 
-    test("returns transient failure when refreshWithPiAi throws network-like error", async () => {
+    test("returns transient failure when refreshWithOAuth throws network-like error", async () => {
       const client = createMockClient();
-      refreshWithPiAiSpy.mockRejectedValue(new Error("network error"));
+      refreshWithOAuthSpy.mockRejectedValue(new Error("network error"));
 
       const result = await refreshToken("old-refresh", "account-network-error", client);
 
@@ -158,17 +158,17 @@ describe("token", () => {
       expect(client.logs[0]?.message).toContain("network error");
     });
 
-    test("returns permanent failure for wrapped pi-ai auth-invalid errors without numeric status", async () => {
+    test("returns permanent failure for wrapped anthropic-oauth auth-invalid errors without numeric status", async () => {
       const permanentMessages = [
-        "[pi-ai] refreshWithPiAi failed: body={\"error\":\"invalid_grant\",\"error_description\":\"Refresh token revoked\"}",
+        "[anthropic-oauth] refreshWithOAuth failed: body={\"error\":\"invalid_grant\",\"error_description\":\"Refresh token revoked\"}",
         "refresh failed: invalid_scope requested scope is invalid",
         "Token refresh failed: unauthorized_client: refresh token is no longer valid",
       ];
 
       for (const [index, message] of permanentMessages.entries()) {
         const client = createMockClient();
-        refreshWithPiAiSpy.mockReset();
-        refreshWithPiAiSpy.mockRejectedValue(new Error(message));
+        refreshWithOAuthSpy.mockReset();
+        refreshWithOAuthSpy.mockRejectedValue(new Error(message));
 
         const result = await refreshToken("old-refresh", `account-auth-invalid-${index}`, client);
 
@@ -185,12 +185,12 @@ describe("token", () => {
     test("deduplicates concurrent refreshes for same accountId", async () => {
       const client = createMockClient();
       const deferred = createDeferred<CredentialRefreshPatch>();
-      refreshWithPiAiSpy.mockImplementation(() => deferred.promise);
+      refreshWithOAuthSpy.mockImplementation(() => deferred.promise);
 
       const firstCall = refreshToken("old-refresh", "same-account", client);
       const secondCall = refreshToken("old-refresh", "same-account", client);
 
-      expect(refreshWithPiAiSpy).toHaveBeenCalledTimes(1);
+      expect(refreshWithOAuthSpy).toHaveBeenCalledTimes(1);
       deferred.resolve({
         accessToken: "new-access",
         expiresAt: Date.now() + 3_600_000,
@@ -204,7 +204,7 @@ describe("token", () => {
 
     test("makes a new refresh call after prior refresh completes", async () => {
       const client = createMockClient();
-      refreshWithPiAiSpy.mockResolvedValue({
+      refreshWithOAuthSpy.mockResolvedValue({
         accessToken: "new-access",
         expiresAt: Date.now() + 3_600_000,
       });
@@ -213,11 +213,11 @@ describe("token", () => {
       const secondCall = refreshToken("old-refresh", "same-account", client);
       await Promise.all([firstCall, secondCall]);
 
-      expect(refreshWithPiAiSpy).toHaveBeenCalledTimes(1);
+      expect(refreshWithOAuthSpy).toHaveBeenCalledTimes(1);
 
       await refreshToken("old-refresh", "same-account", client);
 
-      expect(refreshWithPiAiSpy).toHaveBeenCalledTimes(2);
+      expect(refreshWithOAuthSpy).toHaveBeenCalledTimes(2);
     });
 
     test("does not deduplicate concurrent refreshes for different accountIds", async () => {
@@ -225,7 +225,7 @@ describe("token", () => {
       const deferredA = createDeferred<CredentialRefreshPatch>();
       const deferredB = createDeferred<CredentialRefreshPatch>();
       let callIndex = 0;
-      refreshWithPiAiSpy.mockImplementation(() => {
+      refreshWithOAuthSpy.mockImplementation(() => {
         callIndex += 1;
         return callIndex === 1 ? deferredA.promise : deferredB.promise;
       });
@@ -233,7 +233,7 @@ describe("token", () => {
       const callA = refreshToken("old-refresh-a", "account-a", client);
       const callB = refreshToken("old-refresh-b", "account-b", client);
 
-      expect(refreshWithPiAiSpy).toHaveBeenCalledTimes(2);
+      expect(refreshWithOAuthSpy).toHaveBeenCalledTimes(2);
 
       deferredA.resolve({ accessToken: "token-a", expiresAt: Date.now() + 3_600_000 });
       deferredB.resolve({ accessToken: "token-b", expiresAt: Date.now() + 3_600_000 });
@@ -259,7 +259,7 @@ describe("token", () => {
         createDeferred<CredentialRefreshPatch>(),
       ];
       let callIndex = 0;
-      refreshWithPiAiSpy.mockImplementation(() => {
+      refreshWithOAuthSpy.mockImplementation(() => {
         const deferred = deferreds[callIndex];
         callIndex += 1;
         if (!deferred) {
@@ -273,14 +273,14 @@ describe("token", () => {
       const dedupA = refreshToken("refresh-a", "account-a", client);
       const dedupB = refreshToken("refresh-b", "account-b", client);
 
-      expect(refreshWithPiAiSpy).toHaveBeenCalledTimes(2);
+      expect(refreshWithOAuthSpy).toHaveBeenCalledTimes(2);
 
       clearRefreshMutex("account-a");
 
       const secondA = refreshToken("refresh-a", "account-a", client);
       const stillDedupB = refreshToken("refresh-b", "account-b", client);
 
-      expect(refreshWithPiAiSpy).toHaveBeenCalledTimes(3);
+      expect(refreshWithOAuthSpy).toHaveBeenCalledTimes(3);
 
       deferreds[0]?.resolve({ accessToken: "token-a-1", expiresAt: Date.now() + 3_600_000 });
       deferreds[1]?.resolve({ accessToken: "token-b-1", expiresAt: Date.now() + 3_600_000 });
@@ -322,7 +322,7 @@ describe("token", () => {
         createDeferred<CredentialRefreshPatch>(),
       ];
       let callIndex = 0;
-      refreshWithPiAiSpy.mockImplementation(() => {
+      refreshWithOAuthSpy.mockImplementation(() => {
         const deferred = deferreds[callIndex];
         callIndex += 1;
         if (!deferred) {
@@ -334,14 +334,14 @@ describe("token", () => {
       const firstA = refreshToken("refresh-a", "account-a", client);
       const firstB = refreshToken("refresh-b", "account-b", client);
 
-      expect(refreshWithPiAiSpy).toHaveBeenCalledTimes(2);
+      expect(refreshWithOAuthSpy).toHaveBeenCalledTimes(2);
 
       clearRefreshMutex();
 
       const secondA = refreshToken("refresh-a", "account-a", client);
       const secondB = refreshToken("refresh-b", "account-b", client);
 
-      expect(refreshWithPiAiSpy).toHaveBeenCalledTimes(4);
+      expect(refreshWithOAuthSpy).toHaveBeenCalledTimes(4);
 
       deferreds[0]?.resolve({ accessToken: "token-a-1", expiresAt: Date.now() + 3_600_000 });
       deferreds[1]?.resolve({ accessToken: "token-b-1", expiresAt: Date.now() + 3_600_000 });

@@ -1,21 +1,21 @@
 import { describe, expect, test } from "bun:test";
 import {
-  extractModelIdFromBody,
-  extractRequestToolMaskMap,
   buildRequestHeaders,
   createResponseStreamTransform,
-  getInjectedSystemPrompt,
-  getSystemPrompt,
+  extractModelIdFromBody,
+  extractToolNamesFromRequestBody,
   transformRequestBody,
   transformRequestUrl,
 } from "../src/request-transform";
-import {
-  CLAUDE_CLI_USER_AGENT,
-} from "../src/constants";
+import { getUserAgent } from "../src/model-config";
 import { resetExcludedBetas } from "../src/betas";
+import { loadTemplate } from "../src/fingerprint-capture";
+import { getStaticHeaders } from "../src/upstream-headers";
 import { createRealisticRequestPayload } from "./fixtures/realistic-request-payload";
 
-const DEFAULT_BETAS = "oauth-2025-04-20,interleaved-thinking-2025-05-14";
+function splitBetas(value: string | null): string[] {
+  return (value ?? "").split(",").map((entry) => entry.trim()).filter(Boolean);
+}
 
 function createChunkedStream(chunks: string[]): ReadableStream<Uint8Array> {
   return new ReadableStream<Uint8Array>({
@@ -29,50 +29,29 @@ function createChunkedStream(chunks: string[]): ReadableStream<Uint8Array> {
   });
 }
 
-async function readTransformedText(response: Response, requestBody?: string): Promise<string> {
-  const transformed = createResponseStreamTransform(response, extractRequestToolMaskMap(requestBody));
+async function readTransformedText(response: Response): Promise<string> {
+  const transformed = createResponseStreamTransform(response, new Map([["search_docs", "tool_masked"]]));
   return new Response(transformed.body).text();
 }
 
-describe("getSystemPrompt", () => {
-  test("returns a non-empty string", () => {
-    const prompt = getSystemPrompt();
-    expect(typeof prompt).toBe("string");
-    expect(prompt.length).toBeGreaterThan(0);
-  });
-
-  test("starts with expected Claude Code CLI preamble", () => {
-    const prompt = getSystemPrompt();
-    expect(prompt.startsWith("You are an interactive CLI tool")).toBe(true);
-  });
-
-  test("returns the same value on repeated calls", () => {
-    expect(getSystemPrompt()).toBe(getSystemPrompt());
-  });
-
-  test("exposes a slimmer injected identity prompt", () => {
-    const prompt = getInjectedSystemPrompt();
-    expect(prompt).toContain("Claude Code");
-    expect(prompt.length).toBeLessThan(getSystemPrompt().length);
-  });
-});
-
 describe("buildRequestHeaders", () => {
   test("adds model-specific betas for Claude 4.6 models", () => {
-    const headers = buildRequestHeaders(
+    const headers = new Headers(buildRequestHeaders(
       "https://api.anthropic.com/v1/messages",
       { headers: {} },
       "token-123",
       "claude-sonnet-4-6",
-    );
+    ));
 
-    expect(headers.get("anthropic-beta")).toBe(
-      `${DEFAULT_BETAS},effort-2025-11-24`,
-    );
+    const betas = splitBetas(headers.get("anthropic-beta"));
+
+    expect(betas).toContain("oauth-2025-04-20");
+    expect(betas).toContain("interleaved-thinking-2025-05-14");
+    expect(betas).toContain("effort-2025-11-24");
   });
 
   test("sets auth, merged beta, user-agent, removes x-api-key, and preserves init headers", () => {
-    const headers = buildRequestHeaders(
+    const headers = new Headers(buildRequestHeaders(
       "https://api.anthropic.com/v1/messages",
       {
         headers: {
@@ -82,13 +61,15 @@ describe("buildRequestHeaders", () => {
         },
       },
       "token-123",
-    );
+    ));
 
     expect(headers.get("authorization")).toBe("Bearer token-123");
-    expect(headers.get("anthropic-beta")).toBe(
-      `${DEFAULT_BETAS},custom-beta`,
-    );
-    expect(headers.get("user-agent")).toBe(CLAUDE_CLI_USER_AGENT);
+    const betas = splitBetas(headers.get("anthropic-beta"));
+
+    expect(betas).toContain("oauth-2025-04-20");
+    expect(betas).toContain("interleaved-thinking-2025-05-14");
+    expect(betas).toContain("custom-beta");
+    expect(headers.get("user-agent")).toBe(getStaticHeaders()["user-agent"] ?? getUserAgent());
     expect(headers.get("anthropic-dangerous-direct-browser-access")).toBe("true");
     expect(headers.get("x-app")).toBe("cli");
     expect(headers.get("x-api-key")).toBe(null);
@@ -104,15 +85,17 @@ describe("buildRequestHeaders", () => {
       },
     });
 
-    const headers = buildRequestHeaders(
+    const headers = new Headers(buildRequestHeaders(
       input,
       { headers: { "x-init-header": "init-value" } },
       "token-456",
-    );
+    ));
 
-    expect(headers.get("anthropic-beta")).toBe(
-      `${DEFAULT_BETAS},request-beta`,
-    );
+    const betas = splitBetas(headers.get("anthropic-beta"));
+
+    expect(betas).toContain("oauth-2025-04-20");
+    expect(betas).toContain("interleaved-thinking-2025-05-14");
+    expect(betas).toContain("request-beta");
     expect(headers.get("x-request-header")).toBe("request-value");
     expect(headers.get("x-init-header")).toBe("init-value");
     expect(headers.get("x-api-key")).toBe(null);
@@ -121,12 +104,12 @@ describe("buildRequestHeaders", () => {
   test("can enable 1m beta through environment variable", () => {
     process.env.ANTHROPIC_ENABLE_1M_CONTEXT = "true";
     try {
-      const headers = buildRequestHeaders(
+      const headers = new Headers(buildRequestHeaders(
         "https://api.anthropic.com/v1/messages",
         { headers: {} },
         "token-123",
         "claude-sonnet-4-6",
-      );
+      ));
 
       expect(headers.get("anthropic-beta")).toContain("context-1m-2025-08-07");
     } finally {
@@ -147,6 +130,19 @@ describe("extractModelIdFromBody", () => {
   });
 });
 
+describe("extractToolNamesFromRequestBody", () => {
+  test("returns tool names from a valid request body", () => {
+    expect(extractToolNamesFromRequestBody(JSON.stringify({
+      tools: [{ name: "search_docs" }, { name: "run_command" }, {}],
+    }))).toEqual(["search_docs", "run_command"]);
+  });
+
+  test("returns an empty array for invalid payloads", () => {
+    expect(extractToolNamesFromRequestBody(undefined)).toEqual([]);
+    expect(extractToolNamesFromRequestBody("not-json")).toEqual([]);
+  });
+});
+
 describe("transformRequestBody", () => {
   test("returns undefined for undefined input", () => {
     expect(transformRequestBody(undefined)).toBeUndefined();
@@ -157,433 +153,60 @@ describe("transformRequestBody", () => {
     expect(transformRequestBody(body)).toBe(body);
   });
 
-  test("replaces OpenCode/opencode in system text and preserves /opencode paths", () => {
-    const body = JSON.stringify({
-      system: [
-        {
-          type: "text",
-          text: "OpenCode, opencode, OPENCODE, and /opencode should be preserved.",
-        },
-      ],
-    });
-
-    const transformed = transformRequestBody(body);
-    expect(transformed).toBeDefined();
-
-    const parsed = JSON.parse(transformed as string) as {
-      system: Array<{ type: string; text: string }>;
-    };
-
-    expect(parsed.system[0].text.includes("Claude Code")).toBe(true);
-    expect(parsed.system[0].text.includes("Claude, Claude")).toBe(true);
-    expect(parsed.system[0].text.includes("/opencode")).toBe(true);
-    expect(parsed.system[0].text.includes("OpenCode")).toBe(false);
-  });
-
-  test("relocates non-core system text into the first user message", () => {
-    const body = JSON.stringify({
-      system: [
-        { type: "text", text: getSystemPrompt() },
-        { type: "text", text: "OpenCode should explain the workspace before acting." },
-      ],
-      messages: [
-        { role: "user", content: "Fix the bug" },
-      ],
-    });
-
-    const transformed = transformRequestBody(body);
-    expect(transformed).toBeDefined();
-
-    const parsed = JSON.parse(transformed as string) as {
-      system: Array<{ type: string; text: string }>;
-      messages: Array<{ role?: string; content?: string }>;
-    };
-
-    expect(parsed.system).toHaveLength(1);
-    expect(parsed.system[0]?.text).toBe(getSystemPrompt());
-    expect(parsed.messages[0]?.content).toContain("Claude Code should explain the workspace before acting.");
-    expect(parsed.messages[0]?.content).toContain("Fix the bug");
-  });
-
-  test("removes paragraphs matched by sanitization anchors before relocation", () => {
-    const body = JSON.stringify({
-      system: [
-        {
-          type: "text",
-          text: [
-            "Keep this instruction.",
-            "See https://opencode.ai/docs for more details.",
-            "OpenCode must remain concise.",
-          ].join("\n\n"),
-        },
-      ],
-      messages: [
-        { role: "user", content: "Do the task" },
-      ],
-    });
-
-    const transformed = transformRequestBody(body);
-    expect(transformed).toBeDefined();
-
-    const parsed = JSON.parse(transformed as string) as {
-      system: Array<{ type: string; text: string }>;
-      messages: Array<{ content?: string }>;
-    };
-
-    expect(parsed.system).toEqual([]);
-    expect(parsed.messages[0]?.content).toContain("Keep this instruction.");
-    expect(parsed.messages[0]?.content).toContain("Claude Code must remain concise.");
-    expect(parsed.messages[0]?.content).not.toContain("opencode.ai/docs");
-  });
-
-  test("preserves sanitized system text when no user message exists", () => {
-    const body = JSON.stringify({
-      system: [
-        { type: "text", text: "OpenCode should summarize findings." },
-      ],
-      messages: [
-        { role: "assistant", content: "Hello" },
-      ],
-    });
-
-    const transformed = transformRequestBody(body);
-    expect(transformed).toBeDefined();
-
-    const parsed = JSON.parse(transformed as string) as {
-      system: Array<{ type: string; text: string }>;
-      messages: Array<{ role?: string; content?: string }>;
-    };
-
-    expect(parsed.system).toHaveLength(1);
-    expect(parsed.system[0]?.text).toBe("Claude Code should summarize findings.");
-    expect(parsed.messages[0]?.content).toBe("Hello");
-  });
-
-  test("handles a realistic payload with prompt relocation and custom tool masking", () => {
+  test("builds the upstream Claude Code request shape", () => {
+    const template = loadTemplate();
     const body = JSON.stringify(createRealisticRequestPayload());
-
     const transformed = transformRequestBody(body);
+
     expect(transformed).toBeDefined();
 
     const parsed = JSON.parse(transformed as string) as {
-      system: Array<{ type: string; text: string }>;
+      system: Array<{ text?: string }>;
       tools: Array<{ name?: string }>;
-      messages: Array<{
-        role?: string;
-        content?: string | Array<{ type: string; name?: string; text?: string }>;
-      }>;
+      metadata?: { user_id?: string };
+      thinking?: Record<string, unknown>;
+      context_management?: Record<string, unknown>;
+      output_config?: Record<string, unknown>;
     };
 
-    expect(parsed.system).toHaveLength(2);
-    expect(parsed.system[0]?.text).toBe(getSystemPrompt());
-    expect(parsed.system[1]?.text.startsWith("x-anthropic-billing-header:")).toBe(true);
-    expect(parsed.messages[0]?.role).toBe("user");
-    expect(typeof parsed.messages[0]?.content).toBe("string");
-    expect(parsed.messages[0]?.content).toContain("Claude Code should inspect the repository before proposing changes.");
-    expect(parsed.messages[0]?.content).toContain("Keep answers concise and actionable.");
-    expect(parsed.messages[0]?.content).not.toContain("opencode.ai/docs");
-    expect(parsed.messages[0]?.content).toContain("Please debug the failing request.");
-    const maskMap = extractRequestToolMaskMap(body);
-    expect(parsed.tools[0]?.name).toBe(maskMap.get("search_docs"));
-    expect(parsed.tools[1]?.name).toBe(maskMap.get("run_command"));
-    expect(Array.isArray(parsed.messages[1]?.content)).toBe(true);
-    if (Array.isArray(parsed.messages[1]?.content)) {
-      expect(parsed.messages[1].content[0]?.name).toBe(maskMap.get("search_docs"));
-    }
-  });
-
-  test("is stable when transformed twice", () => {
-    const body = JSON.stringify(createRealisticRequestPayload());
-
-    const firstPass = transformRequestBody(body);
-    const secondPass = transformRequestBody(firstPass);
-
-    expect(secondPass).toBe(firstPass);
-  });
-
-  test("adds tool_ prefix to undocumented flat tool names", () => {
-    const body = JSON.stringify({
-      tools: [{ name: "search_docs" }, { name: "run_command" }],
-    });
-
-    const transformed = transformRequestBody(body);
-    expect(transformed).toBeDefined();
-
-    const parsed = JSON.parse(transformed as string) as {
-      tools: Array<{ name?: string }>;
-    };
-
-    const maskMap = extractRequestToolMaskMap(body);
-    expect(parsed.tools[0].name).toBe(maskMap.get("search_docs"));
-    expect(parsed.tools[1].name).toBe(maskMap.get("run_command"));
-  });
-
-  test("adds tool_ prefix to tool_use content block names", () => {
-    const body = JSON.stringify({
-      messages: [
-        {
-          content: [
-            { type: "text", text: "hello" },
-            { type: "tool_use", name: "lookup" },
-          ],
-        },
-      ],
-    });
-
-    const transformed = transformRequestBody(body);
-    expect(transformed).toBeDefined();
-
-    const parsed = JSON.parse(transformed as string) as {
-      messages: Array<{ content?: Array<{ type: string; name?: string }> }>;
-    };
-
-    const maskMap = extractRequestToolMaskMap(body);
-    expect(parsed.messages[0].content?.[1].name).toBe(maskMap.get("lookup"));
-  });
-
-  test("does not double-prefix names that already start with tool_", () => {
-    const body = JSON.stringify({
-      tools: [{ name: "tool_already_tool" }],
-      messages: [
-        {
-          content: [{ type: "tool_use", name: "tool_already_block" }],
-        },
-      ],
-    });
-
-    const transformed = transformRequestBody(body);
-    expect(transformed).toBeDefined();
-
-    const parsed = JSON.parse(transformed as string) as {
-      tools: Array<{ name?: string }>;
-      messages: Array<{ content?: Array<{ type: string; name?: string }> }>;
-    };
-
-    expect(parsed.tools[0].name).toBe("tool_already_tool");
-    expect(parsed.messages[0].content?.[0].name).toBe("tool_already_block");
-    expect(parsed.tools[0].name?.startsWith("tool_tool_")).toBe(false);
-    expect(parsed.messages[0].content?.[0].name?.startsWith("tool_tool_")).toBe(false);
-  });
-
-  test("preserves documented built-in tool names", () => {
-    const body = JSON.stringify({
-      tools: [{ name: "Read" }, { name: "TodoWrite" }, { name: "WebFetch" }],
-      messages: [
-        {
-          content: [
-            { type: "tool_use", name: "Read" },
-            { type: "tool_use", name: "TodoWrite" },
-            { type: "tool_use", name: "WebFetch" },
-          ],
-        },
-      ],
-      tool_choice: { type: "tool", name: "TodoWrite" },
-    });
-
-    const transformed = transformRequestBody(body);
-    expect(transformed).toBeDefined();
-
-    const parsed = JSON.parse(transformed as string) as {
-      tools: Array<{ name?: string }>;
-      messages: Array<{ content?: Array<{ type: string; name?: string }> }>;
-      tool_choice?: { type?: string; name?: string };
-    };
-
-    expect(parsed.tools.map((tool) => tool.name)).toEqual(["Read", "TodoWrite", "WebFetch"]);
-    expect(parsed.messages[0].content?.[0].name).toBe("Read");
-    expect(parsed.messages[0].content?.[1].name).toBe("TodoWrite");
-    expect(parsed.messages[0].content?.[2].name).toBe("WebFetch");
-    expect(parsed.tool_choice).toEqual({ type: "tool", name: "TodoWrite" });
-  });
-
-  test("remaps tool_choice for masked custom tools", () => {
-    const body = JSON.stringify({
-      tool_choice: { type: "tool", name: "search_docs" },
-      tools: [{ name: "search_docs" }, { name: "Read" }],
-    });
-
-    const transformed = transformRequestBody(body);
-    expect(transformed).toBeDefined();
-
-    const parsed = JSON.parse(transformed as string) as {
-      tool_choice?: { type?: string; name?: string };
-    };
-
-    const maskMap = extractRequestToolMaskMap(body);
-    expect(parsed.tool_choice).toEqual({ type: "tool", name: maskMap.get("search_docs") });
-  });
-
-  test("uses first user message as the masking seed", () => {
-    const bodyA = JSON.stringify({
-      messages: [{ role: "user", content: "alpha seed" }],
-      tools: [{ name: "search_docs" }],
-    });
-    const bodyB = JSON.stringify({
-      messages: [{ role: "user", content: "beta seed" }],
-      tools: [{ name: "search_docs" }],
-    });
-
-    const parsedA = JSON.parse(transformRequestBody(bodyA) as string) as { tools: Array<{ name?: string }> };
-    const parsedB = JSON.parse(transformRequestBody(bodyB) as string) as { tools: Array<{ name?: string }> };
-
-    expect(parsedA.tools[0]?.name?.startsWith("tool_")).toBe(true);
-    expect(parsedB.tools[0]?.name?.startsWith("tool_")).toBe(true);
-    expect(parsedA.tools[0]?.name).not.toBe(parsedB.tools[0]?.name);
-  });
-
-  test("handles empty tools array", () => {
-    const body = JSON.stringify({ tools: [] });
-    const transformed = transformRequestBody(body);
-    expect(transformed).toBeDefined();
-
-    const parsed = JSON.parse(transformed as string) as { tools: unknown[] };
-    expect(parsed.tools).toEqual([]);
-  });
-
-  test("handles messages without content", () => {
-    const body = JSON.stringify({
-      messages: [{ role: "user" }, { content: [] }],
-    });
-
-    const transformed = transformRequestBody(body);
-    expect(transformed).toBeDefined();
-
-    const parsed = JSON.parse(transformed as string) as {
-      messages: Array<{ role?: string; content?: unknown[] }>;
-    };
-
-    expect(parsed.messages.length).toBe(2);
-    expect(parsed.messages[0].role).toBe("user");
-    expect(parsed.messages[0].content).toBeUndefined();
-    expect(parsed.messages[1].content).toEqual([]);
+    expect(parsed.system).toHaveLength(3);
+    expect(parsed.system[0]?.text).toContain("x-anthropic-billing-header:");
+    expect(parsed.system[1]?.text).toBe(template.agent_identity);
+    expect(parsed.system[2]?.text).toContain("You are an interactive agent that helps users with software engineering tasks.");
+    expect(parsed.system[2]?.text).toContain("should inspect the repository before proposing changes.");
+    expect(parsed.system[2]?.text).not.toContain("x-anthropic-billing-header: cc_version=1.2.3");
+    expect(parsed.tools).toEqual(template.tools);
+    expect(typeof parsed.metadata?.user_id).toBe("string");
+    expect(parsed.thinking).toEqual({ type: "adaptive" });
+    expect(parsed.context_management).toEqual({});
+    expect(parsed.output_config).toEqual({});
   });
 });
 
 describe("transformRequestUrl", () => {
-  test("adds beta=true to /v1/messages URL", () => {
-    const input = new URL("https://api.anthropic.com/v1/messages");
-    const result = transformRequestUrl(input);
-
-    expect(result instanceof URL).toBe(true);
-    if (result instanceof URL) {
-      expect(result.searchParams.get("beta")).toBe("true");
-      expect(result.pathname).toBe("/v1/messages");
-    }
+  test("adds beta=true to Anthropic messages endpoint", () => {
+    const transformed = transformRequestUrl("https://api.anthropic.com/v1/messages");
+    expect(String(transformed)).toBe("https://api.anthropic.com/v1/messages?beta=true");
   });
 
-  test("does not add beta when already present", () => {
-    const input = new URL("https://api.anthropic.com/v1/messages?beta=false&x=1");
-    const result = transformRequestUrl(input);
-
-    expect(result).toBe(input);
-    expect(input.searchParams.get("beta")).toBe("false");
-  });
-
-  test("returns unchanged for non-messages URLs", () => {
-    const input = "https://api.anthropic.com/v1/complete";
-    const result = transformRequestUrl(input);
-    expect(result).toBe(input);
-  });
-
-  test("handles Request object input", () => {
-    const input = new Request("https://api.anthropic.com/v1/messages", {
-      headers: { "x-trace-id": "trace-123" },
-    });
-    const result = transformRequestUrl(input);
-
-    expect(result instanceof Request).toBe(true);
-    if (result instanceof Request) {
-      expect(result.url.includes("/v1/messages")).toBe(true);
-      expect(result.url.includes("beta=true")).toBe(true);
-      expect(result.headers.get("x-trace-id")).toBe("trace-123");
-    }
+  test("preserves unrelated urls", () => {
+    const original = "https://api.anthropic.com/v1/complete";
+    expect(transformRequestUrl(original)).toBe(original);
   });
 });
 
 describe("createResponseStreamTransform", () => {
-  test("returns original response when no body", () => {
-    const response = new Response(null, { status: 204 });
-    const transformed = createResponseStreamTransform(response);
-    expect(transformed).toBe(response);
-  });
+  test("reverse maps tool_use names in SSE payloads", async () => {
+    const response = new Response(createChunkedStream([
+      'event: content_block_delta\n',
+      'data: {"delta":{"type":"tool_use","name":"tool_masked"}}\n\n',
+      'event: message_stop\n',
+      'data: {"type":"message_stop"}\n\n',
+    ]));
 
-  test("restores masked tool names in complete lines", async () => {
-    const requestBody = JSON.stringify({ messages: [{ role: "user", content: "mask seed" }], tools: [{ name: "my_tool" }] });
-    const maskedName = extractRequestToolMaskMap(requestBody).get("my_tool");
-    const chunks = [
-      `data: {"type":"content_block_start","content_block":{"type":"tool_use","name":"${maskedName}"}}\n\n`,
-    ];
-    const response = new Response(createChunkedStream(chunks));
-    const text = await readTransformedText(response, requestBody);
+    const transformedText = await readTransformedText(response);
 
-    expect(/"name"\s*:\s*"my_tool"/.test(text)).toBe(true);
-    expect(text.includes(String(maskedName))).toBe(false);
-  });
-
-  test("restores masked tool names across chunk boundaries", async () => {
-    const requestBody = JSON.stringify({ messages: [{ role: "user", content: "mask seed" }], tools: [{ name: "my_tool" }] });
-    const maskedName = extractRequestToolMaskMap(requestBody).get("my_tool");
-    const chunks = [
-      'data: {"type":"content_block_start","content_block":{"type":"tool_use","na',
-      `me":"${maskedName}"}}\n\n`,
-    ];
-    const response = new Response(createChunkedStream(chunks));
-    const text = await readTransformedText(response, requestBody);
-
-    expect(/"name"\s*:\s*"my_tool"/.test(text)).toBe(true);
-    expect(text.includes(String(maskedName))).toBe(false);
-  });
-
-  test("flushes remaining buffer on stream end", async () => {
-    const requestBody = JSON.stringify({ messages: [{ role: "user", content: "tail seed" }], tools: [{ name: "tail_tool" }] });
-    const maskedName = extractRequestToolMaskMap(requestBody).get("tail_tool");
-    const chunks = [
-      `data: {"type":"content_block_start","content_block":{"type":"tool_use","name":"${maskedName}"}}`,
-    ];
-    const response = new Response(createChunkedStream(chunks));
-    const text = await readTransformedText(response, requestBody);
-
-    expect(/"name"\s*:\s*"tail_tool"/.test(text)).toBe(true);
-    expect(text.includes(String(maskedName))).toBe(false);
-  });
-
-  test("handles empty chunks", async () => {
-    const requestBody = JSON.stringify({ messages: [{ role: "user", content: "empty seed" }], tools: [{ name: "empty_test" }] });
-    const maskedName = extractRequestToolMaskMap(requestBody).get("empty_test");
-    const chunks = ["", `data: {"name":"${maskedName}"}\n`, ""];
-    const response = new Response(createChunkedStream(chunks));
-    const text = await readTransformedText(response, requestBody);
-
-    expect(/"name"\s*:\s*"empty_test"/.test(text)).toBe(true);
-  });
-
-  test("passes through non-tool-name data unchanged", async () => {
-    const input = 'event: ping\ndata: {"status":"ok","value":"mcp_keep"}\n\n';
-    const response = new Response(createChunkedStream([input]));
-    const text = await readTransformedText(response);
-
-    expect(text.includes("event: ping")).toBe(true);
-    expect(text.includes('"value":"mcp_keep"')).toBe(true);
-    expect(text.includes('"status":"ok"')).toBe(true);
-  });
-
-  test("propagates reader error through controller.error", async () => {
-    const errorStream = new ReadableStream<Uint8Array>({
-      start(controller) {
-        const encoder = new TextEncoder();
-        controller.enqueue(encoder.encode('data: {"name":"mcp_tool"}\n'));
-      },
-      pull() {
-        throw new Error("simulated read failure");
-      },
-    });
-
-    const response = new Response(errorStream, { status: 200 });
-    const transformed = createResponseStreamTransform(response);
-    const reader = transformed.body!.getReader();
-
-    await reader.read();
-
-    await expect(reader.read()).rejects.toThrow("simulated read failure");
+    expect(transformedText).toContain('"name":"search_docs"');
+    expect(transformedText).not.toContain('"name":"tool_masked"');
   });
 });

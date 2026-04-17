@@ -40,7 +40,6 @@
   },
   "dependencies": {
     "opencode-multi-account-core": "^0.2.15",
-    "@mariozechner/pi-ai": "^0.61.0",
     "valibot": "^1.2.0"
   },
   "devDependencies": {

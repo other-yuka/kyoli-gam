@@ -1,3 +1,4 @@
+import { loadCCDerivedRequestProfile } from "./cc-derived-profile";
 import { ANTHROPIC_OAUTH_ADAPTER } from "./constants";
 
 export interface ModelOverride {
@@ -6,7 +7,6 @@ export interface ModelOverride {
 }
 
 export interface ModelConfig {
-  ccVersion: string;
   baseBetas: string[];
   longContextBetas: string[];
   modelOverrides: Record<string, ModelOverride>;
@@ -20,7 +20,6 @@ function splitBetaFlags(value: string): string[] {
 }
 
 export const config: ModelConfig = {
-  ccVersion: ANTHROPIC_OAUTH_ADAPTER.cliVersion,
   baseBetas: splitBetaFlags(ANTHROPIC_OAUTH_ADAPTER.requestBetaHeader),
   longContextBetas: ["context-1m-2025-08-07", "interleaved-thinking-2025-05-14"],
   modelOverrides: {
@@ -31,19 +30,11 @@ export const config: ModelConfig = {
 };
 
 export function getCliVersion(): string {
-  return process.env.ANTHROPIC_CLI_VERSION ?? config.ccVersion;
+  return loadCCDerivedRequestProfile().cliVersion;
 }
 
 export function getUserAgent(): string {
-  if (process.env.ANTHROPIC_USER_AGENT) {
-    return process.env.ANTHROPIC_USER_AGENT;
-  }
-
-  if (process.env.ANTHROPIC_CLI_VERSION) {
-    return `claude-cli/${getCliVersion()} (external, cli)`;
-  }
-
-  return ANTHROPIC_OAUTH_ADAPTER.cliUserAgent;
+  return loadCCDerivedRequestProfile().userAgent;
 }
 
 export function getRequiredBetas(): string[] {

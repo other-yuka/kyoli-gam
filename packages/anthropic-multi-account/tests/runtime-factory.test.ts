@@ -1,11 +1,20 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from "bun:test";
-import * as piAiAdapter from "../src/pi-ai-adapter";
+import * as anthropicOAuth from "../src/anthropic-oauth";
 import { AccountRuntimeFactory } from "../src/runtime-factory";
 import { AccountStore } from "../src/account-store";
 import { TOKEN_EXPIRY_BUFFER_MS } from "../src/constants";
 import { resetExcludedBetas } from "../src/betas";
+import { loadTemplate } from "../src/fingerprint-capture";
 import { clearRefreshMutex } from "../src/token";
 import { createMockClient, setupTestEnv } from "./helpers";
+import {
+  resetRateGovernorForTest,
+  setRateGovernorTestOverridesForTest,
+} from "../src/error-utils";
+
+function toHeaders(headers: HeadersInit | undefined): Headers {
+  return new Headers(headers);
+}
 
 describe("runtime-factory", () => {
   let originalFetch: typeof globalThis.fetch;
@@ -43,6 +52,7 @@ describe("runtime-factory", () => {
     globalThis.fetch = originalFetch;
     clearRefreshMutex();
     resetExcludedBetas();
+    resetRateGovernorForTest();
     await cleanup();
   });
 
@@ -50,6 +60,7 @@ describe("runtime-factory", () => {
     const uuid = await seedAccount();
     const factory = new AccountRuntimeFactory(store, client);
     const runtime = await factory.getRuntime(uuid);
+    const template = loadTemplate();
 
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response("ok"));
     globalThis.fetch = fetchMock as unknown as typeof fetch;
@@ -66,18 +77,19 @@ describe("runtime-factory", () => {
 
     const [input, init] = fetchMock.mock.calls[0] ?? [];
     const transformedUrl = input instanceof URL ? input.toString() : String(input);
-    const headers = init?.headers as Headers;
+    const headers = toHeaders(init?.headers);
     const body = JSON.parse(String(init?.body)) as {
+      system: Array<{ text?: string }>;
       tools: Array<{ name?: string }>;
-      messages: Array<{ content: Array<{ name?: string }> }>;
     };
 
     expect(transformedUrl).toContain("/v1/messages?beta=true");
     expect(headers.get("authorization")).toBe("Bearer access-1");
     expect(headers.get("anthropic-beta")).toBeTruthy();
     expect(headers.get("anthropic-beta")).toContain("effort-2025-11-24");
-    expect(body.tools[0]?.name?.startsWith("tool_")).toBe(true);
-    expect(body.messages[0]?.content[0]?.name).toBe(body.tools[0]?.name);
+    expect(body.system).toHaveLength(3);
+    expect(body.system[0]?.text).toContain("x-anthropic-billing-header:");
+    expect(body.tools).toEqual(template.tools);
   });
 
   test("retries without long-context beta when provider rejects it", async () => {
@@ -100,8 +112,8 @@ describe("runtime-factory", () => {
 
       expect(fetchMock).toHaveBeenCalledTimes(2);
 
-      const firstHeaders = fetchMock.mock.calls[0]?.[1]?.headers as Headers;
-      const secondHeaders = fetchMock.mock.calls[1]?.[1]?.headers as Headers;
+      const firstHeaders = toHeaders(fetchMock.mock.calls[0]?.[1]?.headers);
+      const secondHeaders = toHeaders(fetchMock.mock.calls[1]?.[1]?.headers);
       expect(firstHeaders.get("anthropic-beta")).toContain("context-1m-2025-08-07");
       expect(secondHeaders.get("anthropic-beta")).not.toContain("context-1m-2025-08-07");
     } finally {
@@ -109,13 +121,114 @@ describe("runtime-factory", () => {
     }
   });
 
-  test("refreshes expired token through pi-ai adapter", async () => {
+  test("retry exclusion removes rejected beta from template fallback and incoming header too", async () => {
+    process.env.ANTHROPIC_ENABLE_1M_CONTEXT = "true";
+    try {
+      const uuid = await seedAccount();
+      const factory = new AccountRuntimeFactory(store, client);
+      const runtime = await factory.getRuntime(uuid);
+
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: "long context beta is not yet available" } }), { status: 400 }))
+        .mockResolvedValueOnce(new Response("ok"));
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      await runtime.fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "anthropic-beta": "context-1m-2025-08-07,custom-beta-2026-01-01",
+        },
+        body: JSON.stringify({ model: "claude-sonnet-4-6", messages: [] }),
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+
+      const firstHeaders = toHeaders(fetchMock.mock.calls[0]?.[1]?.headers);
+      const secondHeaders = toHeaders(fetchMock.mock.calls[1]?.[1]?.headers);
+
+      expect(firstHeaders.get("anthropic-beta")).toContain("context-1m-2025-08-07");
+      expect(firstHeaders.get("anthropic-beta")).toContain("custom-beta-2026-01-01");
+      expect(secondHeaders.get("anthropic-beta")).not.toContain("context-1m-2025-08-07");
+      expect(secondHeaders.get("anthropic-beta")).toContain("custom-beta-2026-01-01");
+    } finally {
+      delete process.env.ANTHROPIC_ENABLE_1M_CONTEXT;
+    }
+  });
+
+  test("enriches generic 429 responses with unified rate-limit headers", async () => {
+    const uuid = await seedAccount();
+    const factory = new AccountRuntimeFactory(store, client);
+    const runtime = await factory.getRuntime(uuid);
+
+    globalThis.fetch = vi.fn(async () => new Response(
+      JSON.stringify({ error: { message: "Error" } }),
+      {
+        status: 429,
+        headers: {
+          "anthropic-ratelimit-unified-representative-claim": "workspace",
+          "anthropic-ratelimit-unified-status": "rejected",
+          "anthropic-ratelimit-unified-5h-utilization": "0.9",
+        },
+      },
+    )) as unknown as typeof fetch;
+
+    const response = await runtime.fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({ model: "claude-sonnet-4-6", messages: [] }),
+    });
+    const parsed = await response.json();
+
+    expect(response.status).toBe(429);
+    expect(parsed).toMatchObject({
+      error: {
+        message: expect.stringContaining("Rate limited (rejected). Limiting window: workspace"),
+      },
+    });
+  });
+
+  test("applies rate governor before each upstream request", async () => {
+    const uuid = await seedAccount();
+    const factory = new AccountRuntimeFactory(store, client);
+    const runtime = await factory.getRuntime(uuid);
+    const sleepCalls: number[] = [];
+    let currentTime = 1_000;
+
+    setRateGovernorTestOverridesForTest({
+      now: () => currentTime,
+      minIntervalMs: 500,
+      sleep: (ms) => {
+        sleepCalls.push(ms);
+        currentTime += ms;
+        return Promise.resolve();
+      },
+    });
+
+    globalThis.fetch = vi.fn(async () => {
+      currentTime += 100;
+      return new Response("ok");
+    }) as unknown as typeof fetch;
+
+    await runtime.fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({ model: "claude-sonnet-4-6", messages: [] }),
+    });
+
+    await runtime.fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({ model: "claude-sonnet-4-6", messages: [] }),
+    });
+
+    expect(sleepCalls).toEqual([400]);
+  });
+
+  test("refreshes expired token through anthropic-oauth", async () => {
     const uuid = await seedAccount({
       accessToken: "expired-access",
       expiresAt: Date.now() - 1_000,
     });
 
-    const refreshSpy = vi.spyOn(piAiAdapter, "refreshWithPiAi").mockResolvedValue({
+    const refreshSpy = vi.spyOn(anthropicOAuth, "refreshWithOAuth").mockResolvedValue({
       accessToken: "new-access",
       refreshToken: "new-refresh",
       expiresAt: Date.now() + 3_600_000,
@@ -149,13 +262,13 @@ describe("runtime-factory", () => {
     });
 
     const refreshSpy = vi
-      .spyOn(piAiAdapter, "refreshWithPiAi")
+      .spyOn(anthropicOAuth, "refreshWithOAuth")
       .mockRejectedValue(new Error("Token refresh failed: 401"));
 
     const factory = new AccountRuntimeFactory(store, client);
     const runtime = await factory.getRuntime(uuid);
 
-    await expect(
+    expect(
       runtime.fetch("https://api.anthropic.com/v1/messages", { method: "POST", body: "{}" }),
     ).rejects.toThrow("Token refresh failed: 401");
 
@@ -172,14 +285,14 @@ describe("runtime-factory", () => {
     });
 
     const refreshSpy = vi
-      .spyOn(piAiAdapter, "refreshWithPiAi")
+      .spyOn(anthropicOAuth, "refreshWithOAuth")
       .mockRejectedValue(new Error("Token refresh failed: 429"));
     const authSetSpy = vi.spyOn(client.auth, "set").mockResolvedValue();
 
     const factory = new AccountRuntimeFactory(store, client);
     const runtime = await factory.getRuntime(uuid);
 
-    await expect(
+    expect(
       runtime.fetch("https://api.anthropic.com/v1/messages", { method: "POST", body: "{}" }),
     ).rejects.toThrow("Token refresh failed");
 
