@@ -1,0 +1,15 @@
+{
+  "request": {
+    "baseApiUrl": "https://api.anthropic.com",
+    "anthropicVersion": "2023-06-01",
+    "xApp": "cli",
+    "betaHeader": "claude-code-20250219,oauth-2025-04-20,context-1m-2025-08-07,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advisor-tool-2026-03-01,effort-2025-11-24"
+  },
+  "oauth": {
+    "clientId": "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+    "authorizeUrl": "https://claude.com/cai/oauth/authorize",
+    "tokenUrl": "https://platform.claude.com/v1/oauth/token",
+    "scopes": "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload",
+    "baseApiUrl": "https://api.anthropic.com"
+  }
+}

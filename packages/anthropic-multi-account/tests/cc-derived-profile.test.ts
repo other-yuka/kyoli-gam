@@ -50,4 +50,14 @@ describe("cc-derived-profile", () => {
       await cleanup();
     }
   });
+
+  test("request profile falls back to JSON-derived defaults when template lacks optional header defaults", () => {
+    process.env.ANTHROPIC_CLI_VERSION = "1.2.3";
+
+    const profile = loadCCDerivedRequestProfile();
+
+    expect(profile.baseApiUrl).toBe("https://api.anthropic.com");
+    expect(profile.xApp).toBe("cli");
+    expect(profile.betaHeader).toContain("advisor-tool-2026-03-01");
+  });
 });
