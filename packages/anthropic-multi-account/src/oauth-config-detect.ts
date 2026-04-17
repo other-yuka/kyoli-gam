@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir, platform } from "node:os";
 import { dirname, join } from "node:path";
+import derivedDefaultsJson from "./fixtures/defaults/cc-derived-defaults.json";
 import { getConfigDir } from "./utils";
 
 export interface DetectedOAuthConfig {
@@ -34,21 +35,29 @@ const CONFIG_SCAN_LOOKBACK_CHARS = 512;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CACHE_FILE_NAME = "anthropic-oauth-config-cache.json";
+const derivedDefaults = derivedDefaultsJson as {
+  oauth?: {
+    clientId?: string;
+    authorizeUrl?: string;
+    tokenUrl?: string;
+    scopes?: string;
+    baseApiUrl?: string;
+  };
+};
 
 export const FALLBACK: DetectedOAuthConfig = {
-  clientId: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
-  authorizeUrl: "https://claude.com/cai/oauth/authorize",
-  tokenUrl: "https://platform.claude.com/v1/oauth/token",
-  scopes: "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload",
-  baseApiUrl: "https://api.anthropic.com",
+  clientId: derivedDefaults.oauth?.clientId || "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+  authorizeUrl: derivedDefaults.oauth?.authorizeUrl || "https://claude.com/cai/oauth/authorize",
+  tokenUrl: derivedDefaults.oauth?.tokenUrl || "https://platform.claude.com/v1/oauth/token",
+  scopes: derivedDefaults.oauth?.scopes || "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload",
+  baseApiUrl: derivedDefaults.oauth?.baseApiUrl || "https://api.anthropic.com",
   source: "fallback",
 };
 
-function extractScopes(block: string): string | null {
-  const scopesMatch = /SCOPES\s*:\s*"([^"]+)"/i.exec(block)
-    || /scope[s]?\s*:\s*"([^"]+)"/i.exec(block);
-
-  return scopesMatch?.[1] || null;
+function pickNearestScopes(block: string, centerIndex: number): string | null {
+  return pickNearestValue(block, centerIndex, /SCOPES\s*:\s*"([^"]+)"/gi)
+    || pickNearestValue(block, centerIndex, /scope[s]?\s*:\s*"([^"]+)"/gi)
+    || null;
 }
 
 function isLikelyLocalUrl(value: string | undefined): boolean {
@@ -70,28 +79,33 @@ function isLikelyLocalUrl(value: string | undefined): boolean {
 function extractCandidateBlocks(binaryText: string): string[] {
   const blocks: string[] = [];
   const seenRanges = new Set<string>();
-  const patterns = [
-    /BASE_API_URL\s*:\s*"/g,
-    /CLIENT_ID\s*:\s*"/g,
-    /TOKEN_URL\s*:\s*"/g,
-  ];
+  const clientIdMatches = [...binaryText.matchAll(/CLIENT_ID\s*:\s*"([0-9a-f-]{36})"/gi)];
 
-  for (const pattern of patterns) {
-    pattern.lastIndex = 0;
-
-    let match = pattern.exec(binaryText);
-    while (match !== null) {
-      const start = Math.max(0, match.index - CONFIG_SCAN_LOOKBACK_CHARS);
-      const end = Math.min(binaryText.length, match.index + CONFIG_SCAN_WINDOW_CHARS);
-      const key = `${start}:${end}`;
-      if (seenRanges.has(key)) {
-        continue;
-      }
-
-      seenRanges.add(key);
-      blocks.push(binaryText.slice(start, end));
-      match = pattern.exec(binaryText);
+  for (let index = 0; index < clientIdMatches.length; index += 1) {
+    const currentMatch = clientIdMatches[index];
+    if (!currentMatch) {
+      continue;
     }
+
+    const currentIndex = currentMatch.index ?? 0;
+    const previousClientIdIndex = clientIdMatches[index - 1]?.index;
+    const nextClientIdIndex = clientIdMatches[index + 1]?.index;
+    const leftBoundary = previousClientIdIndex === undefined
+      ? Math.max(0, currentIndex - CONFIG_SCAN_LOOKBACK_CHARS)
+      : Math.floor((previousClientIdIndex + currentIndex) / 2);
+    const rightBoundary = nextClientIdIndex === undefined
+      ? Math.min(binaryText.length, currentIndex + CONFIG_SCAN_WINDOW_CHARS)
+      : Math.floor((currentIndex + nextClientIdIndex) / 2);
+    const start = Math.max(0, leftBoundary);
+    const end = Math.min(binaryText.length, Math.max(currentIndex + 1, rightBoundary));
+    const key = `${start}:${end}`;
+
+    if (seenRanges.has(key)) {
+      continue;
+    }
+
+    seenRanges.add(key);
+    blocks.push(binaryText.slice(start, end));
   }
 
   if (blocks.length === 0 && binaryText.length > 0) {
@@ -104,6 +118,23 @@ function extractCandidateBlocks(binaryText: string): string[] {
 interface ScoredOAuthCandidate {
   payload: DetectedOAuthConfigPayload;
   score: number;
+}
+
+function pickNearestValue(block: string, centerIndex: number, pattern: RegExp): string | undefined {
+  let nearestValue: string | undefined;
+  let nearestDistance = Number.POSITIVE_INFINITY;
+
+  for (const match of block.matchAll(pattern)) {
+    const matchIndex = match.index ?? 0;
+    const distance = Math.abs(matchIndex - centerIndex);
+
+    if (distance < nearestDistance) {
+      nearestDistance = distance;
+      nearestValue = match[1];
+    }
+  }
+
+  return nearestValue;
 }
 
 function scoreCandidate(candidate: DetectedOAuthConfigPayload, extractedScopes: string | null): number {
@@ -126,17 +157,18 @@ function extractCandidateFromBlock(block: string): ScoredOAuthCandidate | null {
     return null;
   }
 
-  const authorizeUrlMatch = /CLAUDE_AI_AUTHORIZE_URL\s*:\s*"([^"]+)"/.exec(block);
-  const baseApiUrlMatch = /BASE_API_URL\s*:\s*"([^"]+)"/.exec(block);
-  const tokenUrlMatch = /TOKEN_URL\s*:\s*"(https:\/\/[^\"]*\/oauth\/token[^\"]*)"/.exec(block);
-  const extractedScopes = extractScopes(block);
+  const clientIdIndex = clientIdMatch.index ?? 0;
+  const authorizeUrl = pickNearestValue(block, clientIdIndex, /CLAUDE_AI_AUTHORIZE_URL\s*:\s*"([^"]+)"/gi);
+  const baseApiUrl = pickNearestValue(block, clientIdIndex, /BASE_API_URL\s*:\s*"([^"]+)"/gi);
+  const tokenUrl = pickNearestValue(block, clientIdIndex, /TOKEN_URL\s*:\s*"(https:\/\/[^\"]*\/oauth\/token[^\"]*)"/gi);
+  const extractedScopes = pickNearestScopes(block, clientIdIndex);
 
   const payload: DetectedOAuthConfigPayload = {
     clientId: clientIdMatch[1],
-    authorizeUrl: authorizeUrlMatch?.[1] || FALLBACK.authorizeUrl,
-    tokenUrl: tokenUrlMatch?.[1] || FALLBACK.tokenUrl,
+    authorizeUrl: authorizeUrl || FALLBACK.authorizeUrl,
+    tokenUrl: tokenUrl || FALLBACK.tokenUrl,
     scopes: extractedScopes || FALLBACK.scopes,
-    baseApiUrl: baseApiUrlMatch?.[1] || FALLBACK.baseApiUrl,
+    baseApiUrl: baseApiUrl || FALLBACK.baseApiUrl,
   };
 
   if (!isDetectedOAuthConfigPayload(payload)) {

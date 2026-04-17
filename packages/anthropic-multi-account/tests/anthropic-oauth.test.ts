@@ -156,6 +156,7 @@ describe("anthropic-oauth", () => {
       const config = await detectOAuthConfig();
       expect(config).toEqual(FALLBACK);
       expect(config.source).toBe("fallback");
+      expect(config.baseApiUrl).toBe("https://api.anthropic.com");
     });
 
     test("prefers non-local config block over local development-style candidates", () => {
@@ -175,6 +176,31 @@ describe("anthropic-oauth", () => {
       expect(scanBinaryForOAuthConfig(buf)).toMatchObject({
         baseApiUrl: "https://api.anthropic.com",
         scopes: "scope:a scope:b",
+      });
+    });
+
+    test("keeps scopes aligned with the selected production client block when multiple blocks are mixed", () => {
+      const localBlock = 'BASE_API_URL:"http://localhost:3000" TOKEN_URL:"http://localhost:3000/oauth/token" CLIENT_ID:"22222222-2222-4222-8222-222222222222" SCOPES:"scope:local"';
+      const prodBlock = 'TOKEN_URL:"https://platform.claude.com/v1/oauth/token" CLIENT_ID:"11111111-1111-4111-8111-111111111111" SCOPES:"scope:prod user:sessions:claude_code" BASE_API_URL:"https://api.anthropic.com"';
+      const buf = Buffer.from(`${localBlock} ${prodBlock}`);
+
+      expect(scanBinaryForOAuthConfig(buf)).toMatchObject({
+        clientId: "11111111-1111-4111-8111-111111111111",
+        baseApiUrl: "https://api.anthropic.com",
+        scopes: "scope:prod user:sessions:claude_code",
+      });
+    });
+
+    test("does not form a hybrid candidate from adjacent local and production blocks", () => {
+      const localBlock = 'BASE_API_URL:"http://localhost:3000" CLIENT_ID:"22222222-2222-4222-8222-222222222222"';
+      const prodBlock = 'TOKEN_URL:"https://platform.claude.com/v1/oauth/token" CLIENT_ID:"11111111-1111-4111-8111-111111111111" BASE_API_URL:"https://api.anthropic.com" SCOPES:"scope:prod user:sessions:claude_code"';
+      const buf = Buffer.from(`${localBlock} ${prodBlock}`);
+
+      expect(scanBinaryForOAuthConfig(buf)).toMatchObject({
+        clientId: "11111111-1111-4111-8111-111111111111",
+        tokenUrl: "https://platform.claude.com/v1/oauth/token",
+        baseApiUrl: "https://api.anthropic.com",
+        scopes: "scope:prod user:sessions:claude_code",
       });
     });
 
