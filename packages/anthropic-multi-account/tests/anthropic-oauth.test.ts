@@ -780,7 +780,9 @@ describe("anthropic-oauth", () => {
       expect(authorizeUrl.searchParams.get("code_challenge_method")).toBe("S256");
       expect(authorizeUrl.searchParams.get("state")).toBeString();
       expect(authorizeUrl.searchParams.get("redirect_uri")).toMatch(/^http:\/\/localhost:\d+\/callback$/);
-      expect(openedUrl).toBe(`open ${JSON.stringify(authInfo.url)}`);
+      expect(openedUrl).toBe(
+        anthropicOAuthTestExports.getOpenBrowserCommand(authInfo.url, process.platform),
+      );
       expect(progressMessages).toEqual([
         "Waiting for browser authorization...",
         "Exchanging authorization code...",

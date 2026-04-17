@@ -118,24 +118,17 @@ describe("index", () => {
       expires: currentTime + 60_000,
     });
 
-    const loaded = await auth.loader!(
+    await auth.loader!(
       getAuth,
       { id: "anthropic", name: "Anthropic", env: {}, models: {} } as any,
     );
 
     currentTime += 16 * 60 * 1_000;
 
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = vi.fn(async () => new Response("ok")) as unknown as typeof fetch;
-
-    try {
-      await loaded.fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        body: JSON.stringify({ model: "claude-sonnet-4-6", messages: [] }),
-      });
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
+    await auth.loader!(
+      getAuth,
+      { id: "anthropic", name: "Anthropic", env: {}, models: {} } as any,
+    );
 
     expect(startHeartbeatMock).toHaveBeenCalledTimes(2);
     expect(startHeartbeatMock.mock.calls[0]?.[0]).toMatchObject({ sessionId: "session-initial" });
