@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from "bun:test";
-import * as piAiAdapter from "../src/pi-ai-adapter";
+import * as anthropicOAuth from "../src/anthropic-oauth";
 import * as ansiModule from "../src/ui/ansi";
 import * as authMenuModule from "../src/ui/auth-menu";
 import * as childProcess from "node:child_process";
@@ -9,24 +9,21 @@ import { createMockClient } from "./helpers";
 describe("auth-handler", () => {
   let ttySpy: ReturnType<typeof vi.spyOn<typeof ansiModule, "isTTY">>;
   let consoleLogSpy: ReturnType<typeof vi.spyOn<typeof console, "log">>;
-  let execSpy: ReturnType<typeof vi.spyOn<typeof childProcess, "exec">>;
 
   beforeEach(() => {
     ttySpy = vi.spyOn(ansiModule, "isTTY").mockReturnValue(false);
     consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-    execSpy = vi.spyOn(childProcess, "exec").mockImplementation((() => {}) as unknown as typeof childProcess.exec);
+    vi.spyOn(childProcess, "exec").mockImplementation((() => {}) as unknown as typeof childProcess.exec);
   });
 
   afterEach(() => {
-    ttySpy.mockRestore();
-    consoleLogSpy.mockRestore();
-    execSpy.mockRestore();
+    vi.restoreAllMocks();
   });
 
   test("starts pi-ai flow and returns completed callback result without exposing auth url", async () => {
     const AUTH_URL = "https://pi.ai/oauth/authorize?code=test123";
     let loginSettled = false;
-    const loginSpy = vi.spyOn(piAiAdapter, "loginWithPiAi").mockImplementation(async (callbacks) => {
+    const loginSpy = vi.spyOn(anthropicOAuth, "loginWithOAuth").mockImplementation(async (callbacks) => {
       callbacks.onAuth({
         url: AUTH_URL,
         instructions: "Open the link in your browser to continue.",
@@ -63,7 +60,6 @@ describe("auth-handler", () => {
     expect(callbackResultAgain).toEqual(callbackResult);
     expect(loginSpy).toHaveBeenCalledTimes(1);
 
-    loginSpy.mockRestore();
   });
 
   test("syncs manager by adding account on callback success", async () => {
@@ -75,7 +71,7 @@ describe("auth-handler", () => {
       }),
     };
 
-    const loginSpy = vi.spyOn(piAiAdapter, "loginWithPiAi").mockImplementation(async (callbacks) => {
+    vi.spyOn(anthropicOAuth, "loginWithOAuth").mockImplementation(async (callbacks) => {
       callbacks.onAuth({ url: "https://pi.ai/oauth/authorize?code=mgr", instructions: "Authorize to continue." });
       return {
         refreshToken: "refresh-added",
@@ -93,11 +89,10 @@ describe("auth-handler", () => {
     expect(manager.addAccount).toHaveBeenCalledTimes(1);
     expect(accounts).toHaveLength(1);
 
-    loginSpy.mockRestore();
   });
 
   test("returns failed flow when pi-ai flow cannot start", async () => {
-    const loginSpy = vi.spyOn(piAiAdapter, "loginWithPiAi").mockRejectedValue(new Error("oauth init failed"));
+    vi.spyOn(anthropicOAuth, "loginWithOAuth").mockRejectedValue(new Error("oauth init failed"));
 
     const flow = await handleAuthorize(null, undefined, createMockClient());
 
@@ -106,7 +101,6 @@ describe("auth-handler", () => {
     const callbackResult = await flow.callback();
     expect(callbackResult).toEqual({ type: "failed" });
 
-    loginSpy.mockRestore();
   });
 
   test("check quotas persists permanent refresh failures and removes invalid account", async () => {
@@ -137,7 +131,7 @@ describe("auth-handler", () => {
       refresh: vi.fn(async () => {}),
     };
 
-    const showAuthMenuSpy = vi.spyOn(authMenuModule, "showAuthMenu")
+    vi.spyOn(authMenuModule, "showAuthMenu")
       .mockResolvedValueOnce({ type: "check-quotas" })
       .mockResolvedValueOnce({ type: "cancel" });
     const printQuotaErrorSpy = vi.spyOn(authMenuModule, "printQuotaError").mockImplementation(() => {});
@@ -149,8 +143,6 @@ describe("auth-handler", () => {
     expect(printQuotaErrorSpy).toHaveBeenCalledWith(account, "Refresh failed permanently; account removed");
     expect(flow.instructions).toBe("Authentication cancelled");
 
-    printQuotaErrorSpy.mockRestore();
-    showAuthMenuSpy.mockRestore();
   });
 
   test("check quotas prints updated auth-disabled reason after transient refresh failure", async () => {
@@ -179,7 +171,7 @@ describe("auth-handler", () => {
       refresh: vi.fn(async () => {}),
     };
 
-    const showAuthMenuSpy = vi.spyOn(authMenuModule, "showAuthMenu")
+    vi.spyOn(authMenuModule, "showAuthMenu")
       .mockResolvedValueOnce({ type: "check-quotas" })
       .mockResolvedValueOnce({ type: "cancel" });
     const printQuotaErrorSpy = vi.spyOn(authMenuModule, "printQuotaError").mockImplementation(() => {});
@@ -189,7 +181,5 @@ describe("auth-handler", () => {
     expect(manager.markAuthFailure).toHaveBeenCalledWith("disabled-uuid", { ok: false, permanent: false });
     expect(printQuotaErrorSpy).toHaveBeenCalledWith(updatedAccount, "3 consecutive auth failures (refresh failed)");
 
-    printQuotaErrorSpy.mockRestore();
-    showAuthMenuSpy.mockRestore();
   });
 });

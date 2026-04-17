@@ -2,7 +2,7 @@ import {
   ANTHROPIC_OAUTH_ADAPTER,
   TOKEN_EXPIRY_BUFFER_MS,
 } from "./constants";
-import { refreshWithPiAi } from "./pi-ai-adapter";
+import { refreshWithOAuth } from "./anthropic-oauth";
 import type {
   ManagedAccount,
   PluginClient,
@@ -36,7 +36,7 @@ export async function refreshToken(
 
   const refreshPromise = (async (): Promise<TokenRefreshResult> => {
     try {
-      const patch = await refreshWithPiAi(currentRefreshToken);
+      const patch = await refreshWithOAuth(currentRefreshToken);
       return { ok: true, patch };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

@@ -1,5 +1,4 @@
 import { AccountManager } from "./account-manager";
-import { CLAUDE_CLI_USER_AGENT } from "./constants";
 import { fetchProfile, fetchUsage } from "./usage";
 import { isTokenExpired } from "./token";
 import { getConfig, updateConfigField } from "./config";
@@ -7,9 +6,8 @@ import { isTTY } from "./ui/ansi";
 import { showAuthMenu, showManageAccounts, showStrategySelect, printQuotaReport, printQuotaError } from "./ui/auth-menu";
 import { createMinimalClient, getAccountLabel } from "./utils";
 import { AccountStore } from "./account-store";
-import { loginWithPiAi } from "./pi-ai-adapter";
+import { loginWithOAuth } from "./anthropic-oauth";
 import { randomUUID } from "node:crypto";
-import { createInterface } from "node:readline";
 import { exec } from "node:child_process";
 import type { ManagedAccount, OAuthCredentials, PluginClient, StoredAccount } from "./types";
 
@@ -23,14 +21,6 @@ export interface OAuthFlowResult {
   method: "auto";
   callback(code?: string): Promise<OAuthCallbackResponse>;
   _email?: string;
-}
-
-interface OAuthPromptLike {
-  text?: string;
-  message?: string;
-  label?: string;
-  title?: string;
-  placeholder?: string;
 }
 
 function makeFailedFlowResult(message: string): OAuthFlowResult {
@@ -59,45 +49,14 @@ function asOAuthCallbackResponse(account: Partial<StoredAccount>): OAuthCallback
   };
 }
 
-function promptLine(message: string): Promise<string> {
-  if (!isTTY()) return Promise.resolve("");
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise((resolve) => {
-    rl.question(message, (answer) => {
-      rl.close();
-      resolve(answer.trim());
-    });
-  });
-}
-
-function normalizePromptMessage(prompt: OAuthPromptLike): string {
-  return (
-    prompt.message
-    ?? prompt.text
-    ?? prompt.label
-    ?? prompt.title
-    ?? prompt.placeholder
-    ?? "Continue authentication: "
-  );
-}
-
-async function startPiAiFlow(): Promise<OAuthFlowResult> {
+async function startOAuthFlow(): Promise<OAuthFlowResult> {
   try {
-    const completedAccount = await loginWithPiAi({
+    const completedAccount = await loginWithOAuth({
       onAuth: (info) => {
-        if (info.url) {
-          openBrowser(info.url);
-        }
-
         const instruction = info.instructions ?? "Complete authorization in your browser.";
         const urlLine = info.url ? `\nAuth URL (manual fallback): ${info.url}` : "";
         console.log(`\n${instruction}${urlLine}\n`);
       },
-      onPrompt: async (prompt) => {
-        const text = normalizePromptMessage(prompt as OAuthPromptLike);
-        return promptLine(text.endsWith(":") || text.endsWith("?") ? `${text} ` : `${text}: `);
-      },
-      userAgent: CLAUDE_CLI_USER_AGENT,
     });
 
     const completedResult = asOAuthCallbackResponse(completedAccount);
@@ -126,7 +85,7 @@ function wrapCallbackWithAccountReplace(
     callback: async function (code?: string) {
       const callbackResult = await originalCallback(code);
 
-      if (callbackResult.type === "success" && callbackResult.refresh) {
+      if (callbackResult.type === "success") {
         if (targetAccount.uuid) {
           await manager.replaceAccountCredentials(targetAccount.uuid, toOAuthCredentials(callbackResult));
         }
@@ -149,7 +108,7 @@ function wrapCallbackWithManagerSync(
     callback: async function (code?: string) {
       const callbackResult = await originalCallback(code);
 
-      if (callbackResult.type === "success" && callbackResult.refresh) {
+      if (callbackResult.type === "success") {
         const auth = toOAuthCredentials(callbackResult);
 
         if (manager) {
@@ -209,12 +168,12 @@ export async function handleAuthorize(
   client?: PluginClient,
 ): Promise<OAuthFlowResult> {
   if (!inputs || !isTTY()) {
-    return wrapCallbackWithManagerSync(await startPiAiFlow(), manager);
+    return wrapCallbackWithManagerSync(await startOAuthFlow(), manager);
   }
 
   const effectiveManager = manager ?? await loadManagerFromDisk(client);
   if (!effectiveManager || effectiveManager.getAccounts().length === 0) {
-    return wrapCallbackWithManagerSync(await startPiAiFlow(), manager);
+    return wrapCallbackWithManagerSync(await startOAuthFlow(), manager);
   }
 
   return runAccountManagementMenu(effectiveManager, client);
@@ -238,7 +197,7 @@ async function runAccountManagementMenu(
 
     switch (menuAction.type) {
       case "add":
-        return wrapCallbackWithManagerSync(await startPiAiFlow(), manager);
+        return wrapCallbackWithManagerSync(await startOAuthFlow(), manager);
 
       case "check-quotas":
         await handleCheckQuotas(manager, client);
@@ -249,7 +208,7 @@ async function runAccountManagementMenu(
         if (result.action === "back" || result.action === "cancel") continue;
         const manageResult = await handleManageAction(manager, result.action, result.account, client);
         if (manageResult.triggerOAuth) {
-          return wrapCallbackWithAccountReplace(await startPiAiFlow(), manager, manageResult.account);
+          return wrapCallbackWithAccountReplace(await startOAuthFlow(), manager, manageResult.account);
         }
         continue;
       }
@@ -261,7 +220,7 @@ async function runAccountManagementMenu(
       case "delete-all":
         await manager.clearAllAccounts();
         console.log("\nAll accounts deleted.\n");
-        return wrapCallbackWithManagerSync(await startPiAiFlow(), manager);
+        return wrapCallbackWithManagerSync(await startOAuthFlow(), manager);
 
       case "cancel":
         return makeFailedFlowResult("Authentication cancelled");
