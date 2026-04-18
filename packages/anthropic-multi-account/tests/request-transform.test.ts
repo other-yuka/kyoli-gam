@@ -184,9 +184,9 @@ describe("transformRequestBody", () => {
       expect(parsed.tools[1]?.name).toMatch(/^tool_[a-f0-9]+$/);
       expect(parsed.tools[0]?.name).not.toBe(parsed.tools[1]?.name);
       expect(typeof parsed.metadata?.user_id).toBe("string");
-      expect(parsed.thinking).toEqual({ type: "adaptive" });
-      expect(parsed.context_management).toEqual({});
-      expect(parsed.output_config).toEqual({});
+      expect("thinking" in parsed).toBe(false);
+      expect("context_management" in parsed).toBe(false);
+      expect("output_config" in parsed).toBe(false);
     } finally {
       await cleanup();
     }
