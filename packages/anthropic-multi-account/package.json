@@ -16,6 +16,8 @@
     "build": "tsup",
     "typecheck": "tsc --noEmit",
     "test": "for f in tests/*.test.ts; do bun test \"$f\" || exit 1; done",
+    "check:fingerprint-drift": "bun run build && node scripts/check-fingerprint-drift.mjs",
+    "bake:fingerprint": "bun run build && ALLOW_FINGERPRINT_OVERWRITE=1 node scripts/capture-and-bake.mjs",
     "prepack": "bun run build",
     "dev": "bun run build --watch"
   },
