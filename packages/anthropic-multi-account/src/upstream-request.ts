@@ -182,6 +182,10 @@ function hasMeaningfulContent(content: unknown): boolean {
       return false;
     }
 
+     if (block.type === "tool_use") {
+      return true;
+    }
+
     if (typeof block.text === "string" && block.text.trim().length > 0) {
       return true;
     }
@@ -283,6 +287,41 @@ function extractFirstUserMessage(messages: Message[] | undefined): string {
 function hasCompleteToolSchemas(tools: Array<{ [key: string]: unknown }>): boolean {
   return tools.length > 0
     && tools.every((tool) => typeof tool === "object" && tool !== null && "input_schema" in tool);
+}
+
+function enrichIncomingToolsWithTemplateSchemas(
+  incomingTools: Array<{ [key: string]: unknown }>,
+  templateTools: Array<{ [key: string]: unknown }>,
+): Array<{ [key: string]: unknown }> {
+  if (!hasCompleteToolSchemas(templateTools) || incomingTools.length !== templateTools.length) {
+    return incomingTools;
+  }
+
+  return incomingTools.map((tool, index) => {
+    if ("input_schema" in tool) {
+      return tool;
+    }
+
+    const templateTool = templateTools[index];
+    return templateTool && "input_schema" in templateTool
+      ? { ...tool, input_schema: templateTool.input_schema }
+      : tool;
+  });
+}
+
+function buildOutboundTools(
+  incomingTools: Array<{ [key: string]: unknown }>,
+  templateTools: Array<{ [key: string]: unknown }>,
+): Array<{ [key: string]: unknown }> {
+  if (incomingTools.length > 0) {
+    return enrichIncomingToolsWithTemplateSchemas(incomingTools, templateTools);
+  }
+
+  if (!hasCompleteToolSchemas(templateTools)) {
+    return incomingTools;
+  }
+
+  return templateTools.map((tool) => ({ ...tool }));
 }
 
 function getCcVersion(template: TemplateData): string {
@@ -449,6 +488,7 @@ export function buildUpstreamRequest(
     for (const block of message.content) {
       sanitizeMessageBlock(block);
     }
+
   }
 
   trimTrailingEmptyTurns(messages);
@@ -467,9 +507,7 @@ export function buildUpstreamRequest(
   body.messages = messages;
 
   const incomingTools = Array.isArray(body.tools) ? body.tools as Array<{ [key: string]: unknown }> : [];
-  body.tools = hasCompleteToolSchemas(template.tools)
-    ? template.tools.map((tool) => ({ ...tool }))
-    : incomingTools;
+  body.tools = buildOutboundTools(incomingTools, template.tools);
   body.system = [
     {
       type: "text",

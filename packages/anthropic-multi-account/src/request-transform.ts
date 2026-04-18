@@ -8,6 +8,11 @@ import {
   buildUpstreamRequest,
 } from "./upstream-request";
 import {
+  applyOutboundToolFlow,
+  buildRequestScopedToolLookup,
+  type ReverseLookup,
+} from "./tool-flow";
+import {
   filterBillableBetas,
   getBetaHeader,
   getPerRequestHeaders,
@@ -20,10 +25,10 @@ type ToolEntry = { name?: string; [key: string]: unknown };
 type RequestPayload = {
   model?: string;
   tools?: ToolEntry[];
+  messages?: Array<Record<string, unknown>>;
+  tool_choice?: Record<string, unknown>;
   [key: string]: unknown;
 };
-
-type ReverseLookup = Map<string, string>;
 
 function isRecord(value: unknown): value is JsonRecord {
   return typeof value === "object" && value !== null;
@@ -98,6 +103,48 @@ function invertLookup(forwardLookup: ReadonlyMap<string, string>): ReverseLookup
   return reverseLookup;
 }
 
+export function extractRequestToolMaskMap(body: string | undefined): ReverseLookup {
+  if (!body) {
+    return new Map();
+  }
+
+  try {
+    const parsed = JSON.parse(body) as RequestPayload;
+    return isRecord(parsed) ? buildRequestScopedToolLookup(parsed, loadTemplate().tool_names) : new Map();
+  } catch {
+    return new Map();
+  }
+}
+
+export function applyRequestToolMasking(
+  parsed: RequestPayload,
+  claudeToolNames: readonly string[],
+): { body: string; reverseLookup: ReverseLookup } {
+  return applyOutboundToolFlow(parsed, claudeToolNames);
+}
+
+export function transformRequestBodyWithLookup(
+  body: string | undefined,
+  identity = loadClaudeIdentity(),
+): { body: string | undefined; reverseLookup: ReverseLookup } {
+  if (!body) {
+    return { body, reverseLookup: new Map() };
+  }
+
+  try {
+    const parsed = JSON.parse(body) as RequestPayload;
+    if (!isRecord(parsed)) {
+      return { body, reverseLookup: new Map() };
+    }
+
+    const template = loadTemplate();
+    const upstreamRequest = buildUpstreamRequest(parsed, identity, template);
+    return applyRequestToolMasking(upstreamRequest as RequestPayload, template.tool_names);
+  } catch {
+    return { body, reverseLookup: new Map() };
+  }
+}
+
 export function buildRequestHeaders(
   input: RequestInfo | URL,
   init: RequestInit | undefined,
@@ -127,20 +174,7 @@ export function buildRequestHeaders(
 }
 
 export function transformRequestBody(body: string | undefined): string | undefined {
-  if (!body) {
-    return body;
-  }
-
-  try {
-    const parsed = JSON.parse(body) as RequestPayload;
-    if (!isRecord(parsed)) {
-      return body;
-    }
-
-    return JSON.stringify(buildUpstreamRequest(parsed, loadClaudeIdentity(), loadTemplate()));
-  } catch {
-    return body;
-  }
+  return transformRequestBodyWithLookup(body).body;
 }
 
 export function extractModelIdFromBody(body: BodyInit | null | undefined): string {

@@ -179,7 +179,10 @@ describe("transformRequestBody", () => {
       const stableSystemPromptLead = template.system_prompt.split("\n\n", 1)[0] ?? template.system_prompt;
       expect(parsed.system[2]?.text).toContain(stableSystemPromptLead);
       expect(parsed.system[2]?.text).not.toContain("x-anthropic-billing-header: cc_version=1.2.3");
-      expect(parsed.tools).toEqual(template.tools);
+      expect(parsed.tools).toHaveLength(2);
+      expect(parsed.tools[0]?.name).toMatch(/^tool_[a-f0-9]+$/);
+      expect(parsed.tools[1]?.name).toMatch(/^tool_[a-f0-9]+$/);
+      expect(parsed.tools[0]?.name).not.toBe(parsed.tools[1]?.name);
       expect(typeof parsed.metadata?.user_id).toBe("string");
       expect(parsed.thinking).toEqual({ type: "adaptive" });
       expect(parsed.context_management).toEqual({});
@@ -212,6 +215,35 @@ describe("transformRequestBody", () => {
         expect(typeof tool.input_schema).toBe("object");
         expect(tool.input_schema).not.toBeNull();
       }
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("masks non-Claude-Code tools consistently, including current OpenCode built-ins", async () => {
+    const { cleanup } = await setupTestEnv();
+
+    try {
+      const body = JSON.stringify({
+        tools: [
+          { name: "question", input_schema: { type: "object", properties: { questions: { type: "array" } } } },
+          { name: "search_docs", input_schema: { type: "object" } },
+        ],
+        messages: [
+          { role: "user", content: "hello" },
+          { role: "assistant", content: [{ type: "tool_use", name: "search_docs" }] },
+        ],
+      });
+
+      const transformed = transformRequestBody(body);
+      const parsed = JSON.parse(transformed as string) as {
+        tools: Array<{ name?: string }>;
+        messages: Array<{ content?: Array<{ name?: string }> }>;
+      };
+      expect(parsed.tools[0]?.name).toMatch(/^tool_[a-f0-9]+$/);
+      expect(parsed.tools[1]?.name).toMatch(/^tool_[a-f0-9]+$/);
+      expect(parsed.tools[0]?.name).not.toBe(parsed.tools[1]?.name);
+      expect(parsed.messages[1]?.content?.[0]?.name).toBe(parsed.tools[1]?.name);
     } finally {
       await cleanup();
     }

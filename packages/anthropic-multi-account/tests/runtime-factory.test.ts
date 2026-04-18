@@ -4,7 +4,6 @@ import { AccountRuntimeFactory } from "../src/runtime-factory";
 import { AccountStore } from "../src/account-store";
 import { TOKEN_EXPIRY_BUFFER_MS } from "../src/constants";
 import { resetExcludedBetas } from "../src/betas";
-import { loadTemplate } from "../src/fingerprint-capture";
 import { clearRefreshMutex } from "../src/token";
 import { createMockClient, setupTestEnv } from "./helpers";
 
@@ -56,7 +55,6 @@ describe("runtime-factory", () => {
     const uuid = await seedAccount();
     const factory = new AccountRuntimeFactory(store, client);
     const runtime = await factory.getRuntime(uuid);
-    const template = loadTemplate();
 
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response("ok"));
     globalThis.fetch = fetchMock as unknown as typeof fetch;
@@ -85,7 +83,47 @@ describe("runtime-factory", () => {
     expect(headers.get("anthropic-beta")).toContain("effort-2025-11-24");
     expect(body.system).toHaveLength(3);
     expect(body.system[0]?.text).toContain("x-anthropic-billing-header:");
-    expect(body.tools).toEqual(template.tools);
+    expect(body.tools).toHaveLength(1);
+    expect(body.tools[0]?.name).toMatch(/^tool_[a-f0-9]+$/);
+  });
+
+  test("reverse maps masked tool names in non-stream JSON responses", async () => {
+    const uuid = await seedAccount();
+    const factory = new AccountRuntimeFactory(store, client);
+    const runtime = await factory.getRuntime(uuid);
+
+    globalThis.fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const outbound = JSON.parse(String(init?.body)) as { tools: Array<{ name?: string }> };
+      const maskedName = outbound.tools[0]?.name ?? "tool_fallback";
+
+      return new Response(JSON.stringify({
+        content: [
+          {
+            type: "tool_use",
+            id: "toolu_1",
+            name: maskedName,
+            input: { q: "docs" },
+          },
+        ],
+      }), {
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+
+    const response = await runtime.fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        tools: [{ name: "search_docs", input_schema: { type: "object" } }],
+        messages: [
+          { role: "user", content: "hello" },
+          { role: "assistant", content: [{ type: "tool_use", name: "search_docs", input: { q: "docs" } }] },
+        ],
+      }),
+    });
+
+    const parsed = await response.json() as { content: Array<{ name?: string }> };
+    expect(parsed.content[0]?.name).toBe("search_docs");
   });
 
   test("retries without long-context beta when provider rejects it", async () => {
