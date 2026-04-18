@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { ClaudeIdentity } from "./claude-identity";
 import type { TemplateData } from "./fingerprint-capture";
+import { getRuntimeModelCapability } from "./model-capabilities";
+import { detectCliVersion } from "./cli-version";
 
 const BILLING_SEED = "59cf53e54c78";
-const DEFAULT_CC_VERSION = "2.1.100";
 const SESSION_IDLE_ROTATE_MS = 15 * 60 * 1000;
 const MAX_TOOL_RESULT_TEXT_LENGTH = 30 * 1024;
 const TRUNCATION_SUFFIX = "[...truncated]";
@@ -151,11 +152,18 @@ function sanitizeMessageBlock(block: ContentBlock): void {
     return;
   }
 
-  for (const item of block.content) {
-    if (isRecord(item) && typeof item.text === "string") {
-      item.text = truncateToolResultText(sanitizeAndScrubText(item.text));
-    }
-  }
+  block.content = block.content
+    .map((item) => {
+      if (isRecord(item) && typeof item.text === "string") {
+        return {
+          ...item,
+          text: truncateToolResultText(sanitizeAndScrubText(item.text)),
+        };
+      }
+
+      return item;
+    })
+    .filter((item) => !isRecord(item) || typeof item.text !== "string" || item.text.trim().length > 0);
 }
 
 function stripAssistantThinkingBlocks(messages: Message[]): void {
@@ -207,6 +215,98 @@ function trimTrailingEmptyTurns(messages: Message[]): void {
 
     messages.pop();
   }
+}
+
+function compactMessageContent(messages: Message[]): void {
+  for (const message of messages) {
+    if (!Array.isArray(message.content)) {
+      continue;
+    }
+
+    message.content = message.content.filter((block) => {
+      if (!isRecord(block)) {
+        return false;
+      }
+
+      if (block.type === "text") {
+        return typeof block.text !== "string" || block.text.trim().length > 0;
+      }
+
+      if (block.type === "tool_result" && Array.isArray(block.content)) {
+        return block.content.length > 0;
+      }
+
+      return true;
+    });
+  }
+}
+
+function stripUnsupportedSamplingFields(body: Record<string, unknown>): void {
+  delete body.temperature;
+  delete body.top_p;
+  delete body.top_k;
+}
+
+function stripThinkingControlFields(body: Record<string, unknown>): void {
+  delete body.thinking;
+  delete body.context_management;
+  delete body.output_config;
+}
+
+const ADAPTIVE_THINKING_MODEL_MATCHERS = [
+  (modelId: string) => modelId.includes("claude-sonnet-4-6") || modelId.includes("claude-sonnet-4.6"),
+  (modelId: string) => modelId.includes("claude-opus-4-6") || modelId.includes("claude-opus-4.6"),
+  (modelId: string) => /claude-opus-4[-._]([7-9]|\d{2,})/.test(modelId),
+];
+const LARGE_OUTPUT_MODEL_MATCHERS = [
+  (modelId: string) => modelId.includes("claude-opus-4-6") || modelId.includes("claude-opus-4.6"),
+  (modelId: string) => /claude-opus-4[-._]([7-9]|\d{2,})/.test(modelId),
+];
+const DEFAULT_MAX_OUTPUT_TOKENS = 64_000;
+const LARGE_MODEL_MAX_OUTPUT_TOKENS = 128_000;
+
+function normalizeModelId(modelId: string): string {
+  return modelId.trim().toLowerCase();
+}
+
+function supportsAdaptiveThinking(modelId: string): boolean {
+  const runtimeCapability = getRuntimeModelCapability(modelId);
+  if (typeof runtimeCapability?.supportsThinking === "boolean") {
+    return runtimeCapability.supportsThinking;
+  }
+
+  const normalized = normalizeModelId(modelId);
+  if (normalized.includes("haiku")) {
+    return false;
+  }
+
+  return ADAPTIVE_THINKING_MODEL_MATCHERS.some((matches) => matches(normalized));
+}
+
+function getModelMaxOutputTokens(modelId: string): number {
+  const runtimeCapability = getRuntimeModelCapability(modelId);
+  if (typeof runtimeCapability?.maxOutputTokens === "number") {
+    return runtimeCapability.maxOutputTokens;
+  }
+
+  const normalized = normalizeModelId(modelId);
+  return LARGE_OUTPUT_MODEL_MATCHERS.some((matches) => matches(normalized))
+    ? LARGE_MODEL_MAX_OUTPUT_TOKENS
+    : DEFAULT_MAX_OUTPUT_TOKENS;
+}
+
+export function resolveMaxTokens(modelId: string, requestedMaxTokens: unknown): number {
+  const modelCap = getModelMaxOutputTokens(modelId);
+  if (typeof requestedMaxTokens !== "number" || !Number.isFinite(requestedMaxTokens)) {
+    return modelCap;
+  }
+
+  const normalized = Math.floor(requestedMaxTokens);
+  if (normalized <= 0) {
+    return modelCap;
+  }
+
+  return Math.min(normalized, modelCap);
 }
 
 function normalizeSystemTexts(system: unknown): string[] {
@@ -325,7 +425,7 @@ function buildOutboundTools(
 }
 
 function getCcVersion(template: TemplateData): string {
-  return template.cc_version ?? DEFAULT_CC_VERSION;
+  return template.cc_version ?? detectCliVersion();
 }
 
 function buildBillingHeader(firstUserMessage: string, template: TemplateData): string {
@@ -491,6 +591,7 @@ export function buildUpstreamRequest(
 
   }
 
+  compactMessageContent(messages);
   trimTrailingEmptyTurns(messages);
 
   const firstUserMessage = extractFirstUserMessage(messages);
@@ -505,6 +606,8 @@ export function buildUpstreamRequest(
   const activeSessionId = options?.sessionId ?? getActiveSessionId();
 
   body.messages = messages;
+  stripUnsupportedSamplingFields(body);
+  stripThinkingControlFields(body);
 
   const incomingTools = Array.isArray(body.tools) ? body.tools as Array<{ [key: string]: unknown }> : [];
   body.tools = buildOutboundTools(incomingTools, template.tools);
@@ -532,10 +635,13 @@ export function buildUpstreamRequest(
       session_id: activeSessionId,
     }),
   };
-  body.thinking = { type: "adaptive" };
-  body.context_management = DEFAULT_CONTEXT_MANAGEMENT;
-  body.output_config = DEFAULT_OUTPUT_CONFIG;
-  body.max_tokens = 64_000;
+  const modelId = typeof body.model === "string" ? body.model : "";
+  if (supportsAdaptiveThinking(modelId)) {
+    body.thinking = { type: "adaptive" };
+    body.context_management = DEFAULT_CONTEXT_MANAGEMENT;
+    body.output_config = DEFAULT_OUTPUT_CONFIG;
+  }
+  body.max_tokens = resolveMaxTokens(modelId, body.max_tokens);
 
   return orderBodyForOutbound(body, template.body_field_order);
 }

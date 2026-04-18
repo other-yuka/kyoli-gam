@@ -10,15 +10,21 @@ import {
   computeBuildTag,
   createStreamingReverseMapper,
   orderBodyForOutbound,
+  resolveMaxTokens,
   resetUpstreamRequestForTest,
   reverseMapResponse,
   sanitizeMessages,
   scrubFrameworkIdentifiers,
   setUpstreamRequestTestOverridesForTest,
 } from "../src/upstream-request";
+import {
+  ingestProviderModelsCapabilities,
+  resetRuntimeModelCapabilitiesForTest,
+} from "../src/model-capabilities";
 
 afterEach(() => {
   resetUpstreamRequestForTest();
+  resetRuntimeModelCapabilitiesForTest();
 });
 
 function createTemplate(overrides?: Partial<TemplateData>): TemplateData {
@@ -169,14 +175,122 @@ describe("upstream-request", () => {
       session_id: "session-fixed",
     });
     expect(result.max_tokens).toBe(64_000);
-    expect(result.thinking).toEqual({ type: "adaptive" });
-    expect(result.context_management).toEqual({});
-    expect(result.output_config).toEqual({});
+    expect("thinking" in result).toBe(false);
+    expect("context_management" in result).toBe(false);
+    expect("output_config" in result).toBe(false);
     expect(result.tools).toEqual([{ name: "OriginalTool", description: "legacy" }]);
     expect(messages).toHaveLength(3);
     expect(messages[1]?.content).toEqual([{ type: "text", text: "Working on it" }]);
     expect(truncated.length).toBeLessThanOrEqual(MAX_TOOL_RESULT_TEXT_LENGTH + TRUNCATION_SUFFIX.length);
     expect(truncated.endsWith(TRUNCATION_SUFFIX)).toBe(true);
+  });
+
+  test("buildUpstreamRequest removes empty text blocks after sanitization", () => {
+    const result = buildUpstreamRequest({
+      model: "claude-sonnet-4-6",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hello" }] },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "   " },
+            { type: "tool_use", name: "AskUserQuestion", input: { question: "x" } },
+          ],
+        },
+      ],
+    }, createIdentity(), createTemplate());
+
+    const messages = result.messages as Array<{ role: string; content: Array<{ type?: string; text?: string; name?: string; input?: unknown }> | string }>;
+    const assistantMessage = messages[1] as { content: Array<{ type?: string; text?: string; name?: string; input?: unknown }> };
+
+    expect(assistantMessage.content).toEqual([
+      { type: "tool_use", name: "AskUserQuestion", input: { question: "x" } },
+    ]);
+  });
+
+  test("buildUpstreamRequest strips unsupported sampling fields when adaptive thinking is forced", () => {
+    const result = buildUpstreamRequest({
+      model: "claude-sonnet-4-6",
+      temperature: 0.2,
+      top_p: 0.7,
+      top_k: 50,
+      messages: [{ role: "user", content: "hello" }],
+    }, createIdentity(), createTemplate());
+
+    expect("temperature" in result).toBe(false);
+    expect("top_p" in result).toBe(false);
+    expect("top_k" in result).toBe(false);
+    expect(result.thinking).toEqual({ type: "adaptive" });
+  });
+
+  test("buildUpstreamRequest drops incoming thinking controls and does not force adaptive on Haiku", () => {
+    const result = buildUpstreamRequest({
+      model: "claude-haiku-4-5",
+      temperature: 0.2,
+      thinking: { type: "enabled", budget_tokens: 4096, display: "summarized" },
+      context_management: { stale: true },
+      output_config: { effort: "high" },
+      messages: [{ role: "user", content: "hello" }],
+    }, createIdentity(), createTemplate());
+
+    expect("temperature" in result).toBe(false);
+    expect("thinking" in result).toBe(false);
+    expect("context_management" in result).toBe(false);
+    expect("output_config" in result).toBe(false);
+  });
+
+  test("buildUpstreamRequest replaces incoming thinking controls on adaptive-capable models", () => {
+    const result = buildUpstreamRequest({
+      model: "claude-opus-4-7",
+      thinking: { type: "enabled", budget_tokens: 4096, display: "summarized" },
+      context_management: { stale: true },
+      output_config: { effort: "high" },
+      messages: [{ role: "user", content: "hello" }],
+    }, createIdentity(), createTemplate());
+
+    expect(result.thinking).toEqual({ type: "adaptive" });
+    expect(result.context_management).toEqual({});
+    expect(result.output_config).toEqual({});
+  });
+
+  test("resolveMaxTokens clamps to model-specific caps", () => {
+    expect(resolveMaxTokens("claude-sonnet-4-6", undefined)).toBe(64_000);
+    expect(resolveMaxTokens("claude-haiku-4-5", 80_000)).toBe(64_000);
+    expect(resolveMaxTokens("claude-opus-4-6", undefined)).toBe(128_000);
+    expect(resolveMaxTokens("claude-opus-4-7", 200_000)).toBe(128_000);
+    expect(resolveMaxTokens("claude-opus-4-7", 32_000)).toBe(32_000);
+  });
+
+  test("resolveMaxTokens prefers runtime provider metadata when available", () => {
+    ingestProviderModelsCapabilities({
+      "anthropic/claude-sonnet-4-6": {
+        id: "anthropic/claude-sonnet-4-6",
+        limit: { output: 12_345 },
+        reasoning: false,
+      },
+    });
+
+    expect(resolveMaxTokens("claude-sonnet-4-6", undefined)).toBe(12_345);
+    expect(resolveMaxTokens("claude-sonnet-4-6", 20_000)).toBe(12_345);
+    expect(resolveMaxTokens("claude-sonnet-4-6", 10_000)).toBe(10_000);
+  });
+
+  test("buildUpstreamRequest prefers runtime thinking capability metadata when available", () => {
+    ingestProviderModelsCapabilities({
+      "anthropic/claude-sonnet-4-6": {
+        id: "anthropic/claude-sonnet-4-6",
+        limit: { output: 12_345 },
+        reasoning: false,
+      },
+    });
+
+    const result = buildUpstreamRequest({
+      model: "claude-sonnet-4-6",
+      messages: [{ role: "user", content: "hello" }],
+    }, createIdentity(), createTemplate());
+
+    expect("thinking" in result).toBe(false);
+    expect(result.max_tokens).toBe(12_345);
   });
 
   test("buildUpstreamRequest filters already-injected upstream system entries before rebuilding blocks", () => {

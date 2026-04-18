@@ -4,6 +4,7 @@ import {
   setClaudeIdentityForTest,
 } from "../src/claude-identity";
 import { loadTemplate } from "../src/fingerprint-capture";
+import { getRuntimeModelCapability, resetRuntimeModelCapabilitiesForTest } from "../src/model-capabilities";
 import {
   resetHeartbeatForTest,
   setHeartbeatTestOverridesForTest,
@@ -18,12 +19,18 @@ import { createMockClient, setupTestEnv } from "./helpers";
 
 const startHeartbeatMock = vi.fn();
 
-const { ClaudeMultiAuthPlugin } = await import("../src/index");
+const {
+  ClaudeMultiAuthPlugin,
+  resetProviderModelsObserverForTest,
+  setProviderModelsObserverForTest,
+} = await import("../src/index");
 
 afterEach(() => {
   startHeartbeatMock.mockClear();
   resetClaudeIdentityForTest();
   resetHeartbeatForTest();
+  resetProviderModelsObserverForTest();
+  resetRuntimeModelCapabilitiesForTest();
   resetUpstreamRequestForTest();
 });
 
@@ -69,6 +76,53 @@ describe("index", () => {
 
     expect(loaded.apiKey).toBe("");
     expect(loaded.baseURL).toBe("https://api.anthropic.com/v1");
+  });
+
+  test("auth loader receives provider.models metadata when available", async () => {
+    const seen: Record<string, unknown>[] = [];
+    setProviderModelsObserverForTest((models) => {
+      seen.push(models);
+    });
+
+    const plugin = await ClaudeMultiAuthPlugin({ client: createMockClient() } as any);
+    const auth = plugin.auth!;
+    await auth.loader!(
+      async () => ({ type: "oauth", access: "access", refresh: "refresh", expires: Date.now() + 60_000 }),
+      {
+        id: "anthropic",
+        name: "Anthropic",
+        env: {},
+        models: {
+          "anthropic/claude-sonnet-4-6": {
+            id: "anthropic/claude-sonnet-4-6",
+            limit: { context: 200_000, output: 64_000 },
+            reasoning: true,
+            temperature: true,
+            toolCall: true,
+          },
+        },
+      } as any,
+    );
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({
+      "anthropic/claude-sonnet-4-6": {
+        id: "anthropic/claude-sonnet-4-6",
+        limit: { context: 200_000, output: 64_000 },
+        reasoning: true,
+        temperature: true,
+        toolCall: true,
+        cost: {
+          input: 0,
+          output: 0,
+          cache: { read: 0, write: 0 },
+        },
+      },
+    });
+    expect(getRuntimeModelCapability("claude-sonnet-4-6")).toEqual({
+      maxOutputTokens: 64_000,
+      supportsThinking: true,
+    });
   });
 
   test("auth loader starts heartbeat immediately after oauth manager initialization", async () => {
