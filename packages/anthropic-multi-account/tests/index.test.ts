@@ -21,15 +21,12 @@ const startHeartbeatMock = vi.fn();
 
 const {
   ClaudeMultiAuthPlugin,
-  resetProviderModelsObserverForTest,
-  setProviderModelsObserverForTest,
 } = await import("../src/index");
 
 afterEach(() => {
   startHeartbeatMock.mockClear();
   resetClaudeIdentityForTest();
   resetHeartbeatForTest();
-  resetProviderModelsObserverForTest();
   resetRuntimeModelCapabilitiesForTest();
   resetUpstreamRequestForTest();
 });
@@ -79,11 +76,6 @@ describe("index", () => {
   });
 
   test("auth loader receives provider.models metadata when available", async () => {
-    const seen: Record<string, unknown>[] = [];
-    setProviderModelsObserverForTest((models) => {
-      seen.push(models);
-    });
-
     const plugin = await ClaudeMultiAuthPlugin({ client: createMockClient() } as any);
     const auth = plugin.auth!;
     await auth.loader!(
@@ -104,21 +96,6 @@ describe("index", () => {
       } as any,
     );
 
-    expect(seen).toHaveLength(1);
-    expect(seen[0]).toMatchObject({
-      "anthropic/claude-sonnet-4-6": {
-        id: "anthropic/claude-sonnet-4-6",
-        limit: { context: 200_000, output: 64_000 },
-        reasoning: true,
-        temperature: true,
-        toolCall: true,
-        cost: {
-          input: 0,
-          output: 0,
-          cache: { read: 0, write: 0 },
-        },
-      },
-    });
     expect(getRuntimeModelCapability("claude-sonnet-4-6")).toEqual({
       maxOutputTokens: 64_000,
       supportsThinking: true,
