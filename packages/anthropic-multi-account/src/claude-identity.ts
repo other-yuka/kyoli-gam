@@ -20,6 +20,8 @@ const EMPTY_IDENTITY: ClaudeIdentity = {
   accountUuid: "",
 };
 
+let testOverrideIdentity: ClaudeIdentity | null = null;
+
 function getCandidatePaths(): string[] {
   const home = homedir();
   const paths = [
@@ -62,6 +64,10 @@ function parseIdentityFile(path: string): ClaudeIdentity | null {
 }
 
 export function loadClaudeIdentity(): ClaudeIdentity {
+  if (testOverrideIdentity) {
+    return testOverrideIdentity;
+  }
+
   try {
     for (const path of getCandidatePaths()) {
       const identity = parseIdentityFile(path);
@@ -73,4 +79,12 @@ export function loadClaudeIdentity(): ClaudeIdentity {
   }
 
   return EMPTY_IDENTITY;
+}
+
+export function setClaudeIdentityForTest(identity: ClaudeIdentity | null): void {
+  testOverrideIdentity = identity;
+}
+
+export function resetClaudeIdentityForTest(): void {
+  testOverrideIdentity = null;
 }

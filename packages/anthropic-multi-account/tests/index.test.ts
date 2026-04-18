@@ -1,4 +1,8 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
+import {
+  resetClaudeIdentityForTest,
+  setClaudeIdentityForTest,
+} from "../src/claude-identity";
 import { loadTemplate } from "../src/fingerprint-capture";
 import {
   resetHeartbeatForTest,
@@ -18,6 +22,7 @@ const { ClaudeMultiAuthPlugin } = await import("../src/index");
 
 afterEach(() => {
   startHeartbeatMock.mockClear();
+  resetClaudeIdentityForTest();
   resetHeartbeatForTest();
   resetUpstreamRequestForTest();
 });
@@ -67,7 +72,9 @@ describe("index", () => {
   });
 
   test("auth loader starts heartbeat immediately after oauth manager initialization", async () => {
+    const { cleanup } = await setupTestEnv();
     let currentTime = 1_000;
+    setClaudeIdentityForTest({ deviceId: "device-test", accountUuid: "account-test" });
     setUpstreamRequestTestOverridesForTest({
       now: () => currentTime,
       createSessionId: () => "session-test",
@@ -76,25 +83,32 @@ describe("index", () => {
       onStart: startHeartbeatMock,
     });
 
-    const plugin = await ClaudeMultiAuthPlugin({ client: createMockClient() } as any);
-    const auth = plugin.auth!;
+    try {
+      const plugin = await ClaudeMultiAuthPlugin({ client: createMockClient() } as any);
+      const auth = plugin.auth!;
 
-    await auth.loader!(
-      async () => ({ type: "oauth", access: "access-now", refresh: "refresh", expires: Date.now() + 60_000 }),
-      { id: "anthropic", name: "Anthropic", env: {}, models: {} } as any,
-    );
+      await auth.loader!(
+        async () => ({ type: "oauth", access: "access-now", refresh: "refresh", expires: Date.now() + 60_000 }),
+        { id: "anthropic", name: "Anthropic", env: {}, models: {} } as any,
+      );
 
-    expect(startHeartbeatMock).toHaveBeenCalledTimes(1);
-    expect(startHeartbeatMock).toHaveBeenCalledWith({
-      sessionId: "session-test",
-      deviceId: expect.stringMatching(/.+/),
-      accessToken: expect.stringMatching(/.+/),
-    });
+      expect(startHeartbeatMock).toHaveBeenCalledTimes(1);
+      expect(startHeartbeatMock).toHaveBeenCalledWith({
+        sessionId: "session-test",
+        deviceId: expect.stringMatching(/.+/),
+        accessToken: expect.stringMatching(/.+/),
+      });
+    } finally {
+      await cleanup();
+    }
   });
 
   test("auth loader restarts heartbeat when upstream session id rotates after idle", async () => {
+    const { cleanup } = await setupTestEnv();
     let currentTime = 1_000;
     const sessionIds = ["session-initial", "session-rotated"];
+
+    setClaudeIdentityForTest({ deviceId: "device-test", accountUuid: "account-test" });
 
     setUpstreamRequestTestOverridesForTest({
       now: () => currentTime,
@@ -104,35 +118,39 @@ describe("index", () => {
       onStart: startHeartbeatMock,
     });
 
-    const plugin = await ClaudeMultiAuthPlugin({ client: createMockClient() } as any);
-    const auth = plugin.auth!;
-    const getAuth = async (): Promise<{
-      type: "oauth";
-      access: string;
-      refresh: string;
-      expires: number;
-    }> => ({
-      type: "oauth",
-      access: "access-now",
-      refresh: "refresh",
-      expires: currentTime + 60_000,
-    });
+    try {
+      const plugin = await ClaudeMultiAuthPlugin({ client: createMockClient() } as any);
+      const auth = plugin.auth!;
+      const getAuth = async (): Promise<{
+        type: "oauth";
+        access: string;
+        refresh: string;
+        expires: number;
+      }> => ({
+        type: "oauth",
+        access: "access-now",
+        refresh: "refresh",
+        expires: currentTime + 60_000,
+      });
 
-    await auth.loader!(
-      getAuth,
-      { id: "anthropic", name: "Anthropic", env: {}, models: {} } as any,
-    );
+      await auth.loader!(
+        getAuth,
+        { id: "anthropic", name: "Anthropic", env: {}, models: {} } as any,
+      );
 
-    currentTime += 16 * 60 * 1_000;
+      currentTime += 16 * 60 * 1_000;
 
-    await auth.loader!(
-      getAuth,
-      { id: "anthropic", name: "Anthropic", env: {}, models: {} } as any,
-    );
+      await auth.loader!(
+        getAuth,
+        { id: "anthropic", name: "Anthropic", env: {}, models: {} } as any,
+      );
 
-    expect(startHeartbeatMock).toHaveBeenCalledTimes(2);
-    expect(startHeartbeatMock.mock.calls[0]?.[0]).toMatchObject({ sessionId: "session-initial" });
-    expect(startHeartbeatMock.mock.calls[1]?.[0]).toMatchObject({ sessionId: "session-rotated" });
+      expect(startHeartbeatMock).toHaveBeenCalledTimes(2);
+      expect(startHeartbeatMock.mock.calls[0]?.[0]).toMatchObject({ sessionId: "session-initial" });
+      expect(startHeartbeatMock.mock.calls[1]?.[0]).toMatchObject({ sessionId: "session-rotated" });
+    } finally {
+      await cleanup();
+    }
   });
 
   test("plugin init bootstraps auth from stored account", async () => {

@@ -265,7 +265,6 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
 
     await ensureExecutionInfrastructure();
     await startRefreshQueueIfNeeded();
-    ensureHeartbeat(manager.getActiveAccount()?.accessToken);
   }
 
   await initializeManagerFromStore().catch(() => {});
@@ -379,6 +378,7 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
         const credentials = auth as OAuthCredentials;
         await migrateFromAuthJson("anthropic", store);
         await initializeManagerFromAuth(credentials);
+        ensureHeartbeat(credentials.access);
 
         const initializedManager = manager;
         if (!initializedManager) {
