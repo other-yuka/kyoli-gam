@@ -280,6 +280,11 @@ function extractFirstUserMessage(messages: Message[] | undefined): string {
   return "";
 }
 
+function hasCompleteToolSchemas(tools: Array<{ [key: string]: unknown }>): boolean {
+  return tools.length > 0
+    && tools.every((tool) => typeof tool === "object" && tool !== null && "input_schema" in tool);
+}
+
 function getCcVersion(template: TemplateData): string {
   return template.cc_version ?? DEFAULT_CC_VERSION;
 }
@@ -460,7 +465,11 @@ export function buildUpstreamRequest(
   const activeSessionId = options?.sessionId ?? getActiveSessionId();
 
   body.messages = messages;
-  body.tools = template.tools.map((tool) => ({ ...tool }));
+
+  const incomingTools = Array.isArray(body.tools) ? body.tools as Array<{ [key: string]: unknown }> : [];
+  body.tools = hasCompleteToolSchemas(template.tools)
+    ? template.tools.map((tool) => ({ ...tool }))
+    : incomingTools;
   body.system = [
     {
       type: "text",
@@ -490,7 +499,31 @@ export function buildUpstreamRequest(
   body.output_config = DEFAULT_OUTPUT_CONFIG;
   body.max_tokens = 64_000;
 
-  return body;
+  return orderBodyForOutbound(body, template.body_field_order);
+}
+
+export function orderBodyForOutbound(
+  body: Record<string, unknown>,
+  overrideOrder?: string[],
+): Record<string, unknown> {
+  if (!Array.isArray(overrideOrder) || overrideOrder.length === 0) return body;
+
+  const ordered: Record<string, unknown> = {};
+  const seen = new Set<string>();
+
+  for (const name of overrideOrder) {
+    if (seen.has(name)) continue;
+    if (Object.prototype.hasOwnProperty.call(body, name)) {
+      ordered[name] = body[name];
+      seen.add(name);
+    }
+  }
+
+  for (const k of Object.keys(body)) {
+    if (!seen.has(k)) ordered[k] = body[k];
+  }
+
+  return ordered;
 }
 
 export function reverseMapResponse<T>(response: T, reverseLookup?: ReverseLookup): T {

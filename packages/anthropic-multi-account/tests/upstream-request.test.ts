@@ -9,6 +9,7 @@ import {
   buildUpstreamRequest,
   computeBuildTag,
   createStreamingReverseMapper,
+  orderBodyForOutbound,
   resetUpstreamRequestForTest,
   reverseMapResponse,
   sanitizeMessages,
@@ -28,8 +29,8 @@ function createTemplate(overrides?: Partial<TemplateData>): TemplateData {
     agent_identity: "You are Claude Code, an interactive CLI tool.",
     system_prompt: "Inspect the repository before making assumptions.",
     tools: [
-      { name: "Bash", description: "Run shell commands" },
-      { name: "Read", description: "Read files" },
+      { name: "Bash", description: "Run shell commands", input_schema: { type: "object" } },
+      { name: "Read", description: "Read files", input_schema: { type: "object" } },
     ],
     tool_names: ["Bash", "Read"],
     cc_version: "2.1.80",
@@ -233,5 +234,120 @@ describe("upstream-request", () => {
 
     expect(text).toContain("event: content_block_start");
     expect(text).toContain('"name":"Bash"');
+  });
+
+  test("orderBodyForOutbound reorders body fields per the provided order", () => {
+    const body = { stream: true, model: "opus", messages: [] as unknown[] };
+    const result = orderBodyForOutbound(body, ["model", "messages", "stream"]);
+
+    expect(Object.keys(result)).toEqual(["model", "messages", "stream"]);
+    expect(result.model).toBe("opus");
+    expect(result.stream).toBe(true);
+    expect(result.messages).toEqual([]);
+  });
+
+  test("orderBodyForOutbound appends unknown keys at the tail in original insertion order", () => {
+    const body = { extra: 1, model: "opus" };
+    const result = orderBodyForOutbound(body, ["model"]);
+
+    expect(Object.keys(result)).toEqual(["model", "extra"]);
+  });
+
+  test("orderBodyForOutbound returns reference-equal body when no order is available", () => {
+    const body = { a: 1, b: 2 };
+
+    expect(orderBodyForOutbound(body)).toBe(body);
+    expect(orderBodyForOutbound(body, [])).toBe(body);
+    expect(orderBodyForOutbound(body, undefined)).toBe(body);
+  });
+
+  test("orderBodyForOutbound ignores duplicate ordered keys after first application", () => {
+    const body = { stream: true, model: "opus", messages: [] as unknown[] };
+    const result = orderBodyForOutbound(body, ["model", "model", "messages", "stream"]);
+
+    expect(Object.keys(result)).toEqual(["model", "messages", "stream"]);
+  });
+
+  test("buildUpstreamRequest preserves incoming tools when template tools lack input_schema", () => {
+    setUpstreamRequestTestOverridesForTest({
+      now: () => 1_000,
+      createSessionId: () => "session-schema-guard",
+    });
+
+    const incomingTools = [
+      { name: "tool_abc", description: "Tool A", input_schema: { type: "object", properties: { x: { type: "string" } } } },
+      { name: "tool_def", description: "Tool B", input_schema: { type: "object" } },
+    ];
+
+    const templateWithoutSchemas = createTemplate({
+      tools: [{ name: "Bash" }, { name: "Read" }],
+    });
+
+    const result = buildUpstreamRequest(
+      { model: "claude-sonnet-4-5", messages: [{ role: "user", content: "hi" }], tools: incomingTools },
+      createIdentity(),
+      templateWithoutSchemas,
+    );
+
+    const resultTools = result.tools as Array<{ name: string; input_schema?: unknown }>;
+    expect(resultTools).toHaveLength(2);
+    expect(resultTools[0]?.name).toBe("tool_abc");
+    expect(resultTools[0]?.input_schema).toEqual({ type: "object", properties: { x: { type: "string" } } });
+    expect(resultTools[1]?.name).toBe("tool_def");
+    expect(resultTools[1]?.input_schema).toEqual({ type: "object" });
+  });
+
+  test("buildUpstreamRequest uses template tools when they have complete input_schema", () => {
+    setUpstreamRequestTestOverridesForTest({
+      now: () => 1_000,
+      createSessionId: () => "session-schema-complete",
+    });
+
+    const templateWithSchemas = createTemplate({
+      tools: [
+        { name: "Bash", input_schema: { type: "object" } },
+        { name: "Read", input_schema: { type: "object" } },
+      ],
+    });
+
+    const result = buildUpstreamRequest(
+      { model: "claude-sonnet-4-5", messages: [{ role: "user", content: "hi" }], tools: [{ name: "old_tool" }] },
+      createIdentity(),
+      templateWithSchemas,
+    );
+
+    const resultTools = result.tools as Array<{ name: string; input_schema?: unknown }>;
+    expect(resultTools).toHaveLength(2);
+    expect(resultTools[0]?.name).toBe("Bash");
+    expect(resultTools[0]?.input_schema).toEqual({ type: "object" });
+    expect(resultTools[1]?.name).toBe("Read");
+    expect(resultTools[1]?.input_schema).toEqual({ type: "object" });
+  });
+
+  test("buildUpstreamRequest applies body_field_order from template at return boundary", () => {
+    setUpstreamRequestTestOverridesForTest({
+      now: () => 1_000,
+      createSessionId: () => "session-order-test",
+    });
+
+    const template = createTemplate({
+      body_field_order: [
+        "model", "system", "messages", "tools", "metadata",
+        "thinking", "context_management", "output_config", "max_tokens", "stream",
+      ],
+    });
+
+    const inputBody = {
+      model: "claude-sonnet-4-5",
+      stream: true,
+      system: "test system",
+      messages: [{ role: "user", content: "hello" }],
+    };
+
+    const result = buildUpstreamRequest(inputBody, createIdentity(), template);
+    const keys = Object.keys(result);
+
+    expect(keys[0]).toBe("model");
+    expect(keys[keys.length - 1]).toBe("stream");
   });
 });

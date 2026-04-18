@@ -12,6 +12,7 @@ import { resetExcludedBetas } from "../src/betas";
 import { loadTemplate } from "../src/fingerprint-capture";
 import { getStaticHeaders } from "../src/upstream-headers";
 import { createRealisticRequestPayload } from "./fixtures/realistic-request-payload";
+import { setupTestEnv } from "./helpers";
 
 function splitBetas(value: string | null): string[] {
   return (value ?? "").split(",").map((entry) => entry.trim()).filter(Boolean);
@@ -153,33 +154,67 @@ describe("transformRequestBody", () => {
     expect(transformRequestBody(body)).toBe(body);
   });
 
-  test("builds the upstream Claude Code request shape", () => {
-    const template = loadTemplate();
-    const body = JSON.stringify(createRealisticRequestPayload());
-    const transformed = transformRequestBody(body);
+  test("builds the upstream Claude Code request shape", async () => {
+    const { cleanup } = await setupTestEnv();
 
-    expect(transformed).toBeDefined();
+    try {
+      const template = loadTemplate();
+      const body = JSON.stringify(createRealisticRequestPayload());
+      const transformed = transformRequestBody(body);
 
-    const parsed = JSON.parse(transformed as string) as {
-      system: Array<{ text?: string }>;
-      tools: Array<{ name?: string }>;
-      metadata?: { user_id?: string };
-      thinking?: Record<string, unknown>;
-      context_management?: Record<string, unknown>;
-      output_config?: Record<string, unknown>;
-    };
+      expect(transformed).toBeDefined();
 
-    expect(parsed.system).toHaveLength(3);
-    expect(parsed.system[0]?.text).toContain("x-anthropic-billing-header:");
-    expect(parsed.system[1]?.text).toBe(template.agent_identity);
-    expect(parsed.system[2]?.text).toContain("You are an interactive agent that helps users with software engineering tasks.");
-    expect(parsed.system[2]?.text).toContain("should inspect the repository before proposing changes.");
-    expect(parsed.system[2]?.text).not.toContain("x-anthropic-billing-header: cc_version=1.2.3");
-    expect(parsed.tools).toEqual(template.tools);
-    expect(typeof parsed.metadata?.user_id).toBe("string");
-    expect(parsed.thinking).toEqual({ type: "adaptive" });
-    expect(parsed.context_management).toEqual({});
-    expect(parsed.output_config).toEqual({});
+      const parsed = JSON.parse(transformed as string) as {
+        system: Array<{ text?: string }>;
+        tools: Array<{ name?: string }>;
+        metadata?: { user_id?: string };
+        thinking?: Record<string, unknown>;
+        context_management?: Record<string, unknown>;
+        output_config?: Record<string, unknown>;
+      };
+
+      expect(parsed.system).toHaveLength(3);
+      expect(parsed.system[0]?.text).toContain("x-anthropic-billing-header:");
+      expect(parsed.system[1]?.text).toBe(template.agent_identity);
+      const stableSystemPromptLead = template.system_prompt.split("\n\n", 1)[0] ?? template.system_prompt;
+      expect(parsed.system[2]?.text).toContain(stableSystemPromptLead);
+      expect(parsed.system[2]?.text).not.toContain("x-anthropic-billing-header: cc_version=1.2.3");
+      expect(parsed.tools).toEqual(template.tools);
+      expect(typeof parsed.metadata?.user_id).toBe("string");
+      expect(parsed.thinking).toEqual({ type: "adaptive" });
+      expect(parsed.context_management).toEqual({});
+      expect(parsed.output_config).toEqual({});
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("transformed body tools retain input_schema required by Anthropic API", async () => {
+    const { cleanup } = await setupTestEnv();
+
+    try {
+      const body = JSON.stringify({
+        system: "test prompt",
+        tools: [
+          { name: "my_tool", description: "A tool", input_schema: { type: "object", properties: { q: { type: "string" } } } },
+        ],
+        messages: [{ role: "user", content: "hello" }],
+      });
+
+      const transformed = transformRequestBody(body);
+      expect(transformed).toBeDefined();
+
+      const parsed = JSON.parse(transformed as string) as { tools: Array<{ name?: string; input_schema?: unknown }> };
+
+      expect(parsed.tools.length).toBeGreaterThan(0);
+      for (const tool of parsed.tools) {
+        expect(tool).toHaveProperty("input_schema");
+        expect(typeof tool.input_schema).toBe("object");
+        expect(tool.input_schema).not.toBeNull();
+      }
+    } finally {
+      await cleanup();
+    }
   });
 });
 
