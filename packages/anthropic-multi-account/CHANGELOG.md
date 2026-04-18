@@ -1,5 +1,14 @@
 # opencode-anthropic-multi-account
 
+## 0.2.16
+
+### Patch Changes
+
+- [`21547a8`](https://github.com/other-yuka/kyoli-gam/commit/21547a8b367fbcb6b2885a2705e5dc062988884b) Thanks [@other-yuka](https://github.com/other-yuka)! - Stabilize Anthropic multi-account request fingerprinting, pacing, and CI coverage.
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.16
+
 ## 0.2.15
 
 ### Patch Changes
