@@ -1,6 +1,4 @@
 import { writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import {
   captureLiveTemplateAsync,
   prepareBundledTemplate,
@@ -9,38 +7,21 @@ import {
   findUserPathHits,
   scrubTemplate,
 } from "../dist/scrub-template.js";
+import {
+  bundledTemplatePath,
+  loadBundledFingerprint,
+} from "./_bundled-fingerprint.mjs";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const packageRoot = dirname(__dirname);
-const bundledTemplatePath = join(packageRoot, "src", "fingerprint-data.json");
 const captureTimeoutMs = Number(process.env.FINGERPRINT_CAPTURE_TIMEOUT_MS ?? "10000");
-const EXPECTED_TOOL_NAMES = [
-  "Bash",
-  "Read",
-  "Write",
-  "Edit",
-  "Glob",
-  "Grep",
-  "WebFetch",
-  "TodoWrite",
-  "TaskCreate",
-  "TaskGet",
-  "TaskList",
-  "TaskOutput",
-  "TaskStop",
-  "LSP",
-  "Monitor",
-  "NotebookEdit",
-  "Skill",
-];
 
-function assertClaudeCodeFingerprint(template) {
+function assertClaudeCodeFingerprint(template, pinnedTemplate) {
   const toolNames = template.tools.map((tool) => tool.name);
-  const matchesExpectedTools = toolNames.length === EXPECTED_TOOL_NAMES.length
-    && EXPECTED_TOOL_NAMES.every((name, index) => toolNames[index] === name);
+  const expectedToolNames = Array.isArray(pinnedTemplate.tool_names) ? pinnedTemplate.tool_names : [];
+  const matchesExpectedTools = toolNames.length === expectedToolNames.length
+    && expectedToolNames.every((name, index) => toolNames[index] === name);
+  const matchesExpectedIdentity = template.agent_identity === pinnedTemplate.agent_identity;
 
-  if (!template.agent_identity.includes("Claude Code") || !matchesExpectedTools) {
+  if (!matchesExpectedIdentity || !matchesExpectedTools) {
     throw new Error(
       "captured fingerprint does not match bundled Claude Code identity; refusing to overwrite fallback template",
     );
@@ -59,9 +40,10 @@ async function main() {
     throw new Error("live fingerprint capture failed; verify Claude Code is installed and authenticated");
   }
 
+  const pinnedBundled = await loadBundledFingerprint();
   const scrubbed = scrubTemplate(live, { dropMcpTools: true });
   const bundled = prepareBundledTemplate(scrubbed);
-  assertClaudeCodeFingerprint(bundled);
+  assertClaudeCodeFingerprint(bundled, pinnedBundled);
   const residualHits = findUserPathHits(JSON.stringify(bundled));
   if (residualHits.length > 0) {
     throw new Error(`scrubbed fingerprint still contains user paths: ${residualHits.join(", ")}`);

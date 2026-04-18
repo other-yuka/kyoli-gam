@@ -1,6 +1,3 @@
-import { readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import {
   captureLiveTemplateAsync,
   prepareBundledTemplate,
@@ -9,11 +6,8 @@ import {
   findUserPathHits,
   scrubTemplate,
 } from "../dist/scrub-template.js";
+import { loadBundledFingerprint } from "./_bundled-fingerprint.mjs";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const packageRoot = dirname(__dirname);
-const bundledTemplatePath = join(packageRoot, "src", "fingerprint-data.json");
 const captureTimeoutMs = Number(process.env.FINGERPRINT_CAPTURE_TIMEOUT_MS ?? "10000");
 
 function summarizeDiff(expected, actual) {
@@ -35,7 +29,7 @@ function summarizeDiff(expected, actual) {
 }
 
 async function main() {
-  const bundled = JSON.parse(await readFile(bundledTemplatePath, "utf8"));
+  const bundled = await loadBundledFingerprint();
   const live = await captureLiveTemplateAsync(captureTimeoutMs);
   if (!live) {
     throw new Error("live fingerprint capture failed; verify Claude Code is installed and authenticated");
