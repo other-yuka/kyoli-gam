@@ -148,6 +148,11 @@ describe("anthropic-oauth", () => {
   });
 
   describe("detectOAuthConfig", () => {
+    test("removes org:create_api_key from fallback scopes", () => {
+      expect(FALLBACK.scopes).toBe("user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload");
+      expect(FALLBACK.scopes).not.toContain("org:create_api_key");
+    });
+
     test("returns FALLBACK when binary not found", async () => {
       setOAuthConfigDetectionOverridesForTest({
         findCCBinary: () => null,
@@ -176,6 +181,15 @@ describe("anthropic-oauth", () => {
       expect(scanBinaryForOAuthConfig(buf)).toMatchObject({
         baseApiUrl: "https://api.anthropic.com",
         scopes: "scope:a scope:b",
+      });
+    });
+
+    test("falls back to safe scopes when scanned scopes contain org:create_api_key", () => {
+      const buf = Buffer.from('CLIENT_ID:"11111111-1111-4111-8111-111111111111" CLAUDE_AI_AUTHORIZE_URL:"https://claude.com/cai/oauth/authorize" TOKEN_URL:"https://platform.claude.com/v1/oauth/token" SCOPES:"org:create_api_key user:profile user:inference user:sessions:claude_code" BASE_API_URL:"https://api.anthropic.com"');
+
+      expect(scanBinaryForOAuthConfig(buf)).toMatchObject({
+        baseApiUrl: "https://api.anthropic.com",
+        scopes: FALLBACK.scopes,
       });
     });
 

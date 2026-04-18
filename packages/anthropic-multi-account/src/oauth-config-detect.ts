@@ -32,6 +32,8 @@ interface DetectorTestOverrides {
 
 const CONFIG_SCAN_WINDOW_CHARS = 4096;
 const CONFIG_SCAN_LOOKBACK_CHARS = 512;
+const REJECTED_SCOPE = ["org", "create_api_key"].join(":");
+const SAFE_FALLBACK_SCOPES = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CACHE_FILE_NAME = "anthropic-oauth-config-cache.json";
@@ -49,10 +51,18 @@ export const FALLBACK: DetectedOAuthConfig = {
   clientId: derivedDefaults.oauth?.clientId || "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
   authorizeUrl: derivedDefaults.oauth?.authorizeUrl || "https://claude.com/cai/oauth/authorize",
   tokenUrl: derivedDefaults.oauth?.tokenUrl || "https://platform.claude.com/v1/oauth/token",
-  scopes: derivedDefaults.oauth?.scopes || "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload",
+  scopes: sanitizeScopes(derivedDefaults.oauth?.scopes),
   baseApiUrl: derivedDefaults.oauth?.baseApiUrl || "https://api.anthropic.com",
   source: "fallback",
 };
+
+function sanitizeScopes(scopes: string | null | undefined): string {
+  if (!scopes || scopes.includes(REJECTED_SCOPE)) {
+    return SAFE_FALLBACK_SCOPES;
+  }
+
+  return scopes;
+}
 
 function pickNearestScopes(block: string, centerIndex: number): string | null {
   return pickNearestValue(block, centerIndex, /SCOPES\s*:\s*"([^"]+)"/gi)
@@ -167,7 +177,7 @@ function extractCandidateFromBlock(block: string): ScoredOAuthCandidate | null {
     clientId: clientIdMatch[1],
     authorizeUrl: authorizeUrl || FALLBACK.authorizeUrl,
     tokenUrl: tokenUrl || FALLBACK.tokenUrl,
-    scopes: extractedScopes || FALLBACK.scopes,
+    scopes: sanitizeScopes(extractedScopes),
     baseApiUrl: baseApiUrl || FALLBACK.baseApiUrl,
   };
 
