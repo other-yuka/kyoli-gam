@@ -1,5 +1,14 @@
 # opencode-anthropic-multi-account
 
+## 0.2.19
+
+### Patch Changes
+
+- [`cda2e49`](https://github.com/other-yuka/kyoli-gam/commit/cda2e490645c2a5997d315a4859d5ddb2d5bbb39) Thanks [@other-yuka](https://github.com/other-yuka)! - Use provider model capabilities for Anthropic request shaping and tighten request normalization.
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.19
+
 ## 0.2.18
 
 ### Patch Changes
