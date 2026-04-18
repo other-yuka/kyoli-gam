@@ -1,5 +1,14 @@
 # opencode-anthropic-multi-account
 
+## 0.2.20
+
+### Patch Changes
+
+- [`8e176f2`](https://github.com/other-yuka/kyoli-gam/commit/8e176f2d2b5c3845ab9fc04cb8178bb993f02c69) Thanks [@other-yuka](https://github.com/other-yuka)! - Remove the leaked provider model observer hook from the runtime package.
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.20
+
 ## 0.2.19
 
 ### Patch Changes
