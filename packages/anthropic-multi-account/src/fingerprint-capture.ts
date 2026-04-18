@@ -14,6 +14,7 @@ import {
 import bundledTemplateJson from "./fingerprint-data.json";
 import { detectCliVersion } from "./cli-version";
 import { findCCBinary } from "./oauth-config-detect";
+import { scrubTemplate } from "./scrub-template";
 import { getConfigDir } from "./utils";
 
 const CURRENT_SCHEMA_VERSION = 1;
@@ -46,6 +47,7 @@ type TemplateTool = {
 
 export interface TemplateData {
   _version: number;
+  _schemaVersion?: number;
   _captured: string;
   _source: TemplateSource;
   agent_identity: string;
@@ -56,6 +58,7 @@ export interface TemplateData {
   cc_version?: string;
   header_order?: string[];
   header_values?: Record<string, string>;
+  body_field_order?: string[];
 }
 
 export interface CapturedRequest {
@@ -125,6 +128,16 @@ function isTemplateData(value: unknown): value is TemplateData {
     && value.tool_names.every((toolName) => typeof toolName === "string");
 }
 
+function hasUsableToolSchemas(template: TemplateData): boolean {
+  return template.tools.length > 0
+    && template.tools.every((tool) => tool.name.startsWith("mcp__") || isRecord(tool.input_schema));
+}
+
+function isUsableTemplate(template: TemplateData): boolean {
+  return template._schemaVersion === CURRENT_SCHEMA_VERSION
+    && hasUsableToolSchemas(template);
+}
+
 function cloneTemplate(template: TemplateData, sourceOverride?: TemplateSource): TemplateData {
   return {
     ...template,
@@ -133,11 +146,30 @@ function cloneTemplate(template: TemplateData, sourceOverride?: TemplateSource):
     tool_names: [...template.tool_names],
     header_order: template.header_order ? [...template.header_order] : undefined,
     header_values: template.header_values ? { ...template.header_values } : undefined,
+    body_field_order: template.body_field_order ? [...template.body_field_order] : undefined,
+  };
+}
+
+export function prepareBundledTemplate(template: TemplateData): TemplateData {
+  const rest = cloneTemplate(template, "bundled");
+
+  return {
+    ...rest,
+    _version: CURRENT_SCHEMA_VERSION,
+    _schemaVersion: CURRENT_SCHEMA_VERSION,
+    _source: "bundled",
+    tool_names: rest.tools.map((tool) => tool.name),
   };
 }
 
 function loadBundledTemplate(): TemplateData {
-  return cloneTemplate(bundledTemplate, "bundled");
+  if (bundledTemplate._schemaVersion !== CURRENT_SCHEMA_VERSION) {
+    throw new Error(
+      `bundled fingerprint schema version ${bundledTemplate._schemaVersion} does not match CURRENT_SCHEMA_VERSION ${CURRENT_SCHEMA_VERSION}`,
+    );
+  }
+
+  return prepareBundledTemplate(bundledTemplate);
 }
 
 function quarantineCorruptCache(cachePath: string): void {
@@ -384,7 +416,12 @@ function probeInstalledCCVersion(): string | null {
 }
 
 export function loadTemplate(): TemplateData {
-  return readLiveCacheSync("cached") ?? loadBundledTemplate();
+  const cached = readLiveCacheSync("cached");
+  if (cached && isUsableTemplate(cached)) {
+    return cached;
+  }
+
+  return loadBundledTemplate();
 }
 
 export function extractTemplate(captured: CapturedRequest): TemplateData | null {
@@ -406,9 +443,11 @@ export function extractTemplate(captured: CapturedRequest): TemplateData | null 
 
   const toolNames = extractedTools.map((tool) => tool.name);
   const headerValues = extractStaticHeaderValues(captured.headers);
+  const bodyFieldOrder = Object.keys(captured.body);
 
   return {
     _version: CURRENT_SCHEMA_VERSION,
+    _schemaVersion: CURRENT_SCHEMA_VERSION,
     _captured: new Date(now()).toISOString(),
     _source: "live",
     agent_identity: agentIdentity,
@@ -419,6 +458,7 @@ export function extractTemplate(captured: CapturedRequest): TemplateData | null 
     cc_version: extractCCVersion(billingHeader, captured.headers["user-agent"]),
     header_order: extractHeaderOrder(captured.rawHeaders),
     header_values: headerValues,
+    body_field_order: bodyFieldOrder.length > 0 ? bodyFieldOrder : undefined,
   };
 }
 
@@ -490,7 +530,7 @@ export async function refreshLiveFingerprintAsync(options?: {
 }): Promise<TemplateData | null> {
   if (!options?.force) {
     const cached = readLiveCacheSync("cached");
-    if (cached && isFreshTemplate(cached)) {
+    if (cached && isUsableTemplate(cached) && isFreshTemplate(cached)) {
       return cached;
     }
   }
@@ -505,8 +545,9 @@ export async function refreshLiveFingerprintAsync(options?: {
       return null;
     }
 
-    await writeLiveCache(live);
-    return live;
+    const scrubbed = scrubTemplate(live, { dropMcpTools: false });
+    await writeLiveCache(scrubbed);
+    return scrubbed;
   } catch {
     return null;
   }
