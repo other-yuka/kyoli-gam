@@ -32,7 +32,8 @@ import { loadTemplate } from "./fingerprint-capture";
 import type { PluginClient, StoredAccount } from "./types";
 import { recordObservedToolNames } from "./tool-observation";
 import { debugLog } from "./utils";
-import { enrich429, rateGovern, sanitizeError } from "./error-utils";
+import { enrich429, sanitizeError } from "./error-utils";
+import { computePacingDelay, resolvePacingConfig } from "./pacing";
 
 type BaseFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
@@ -144,15 +145,33 @@ async function enrichRateLimitResponse(response: Response): Promise<Response> {
   });
 }
 
+export interface PacingTestOverrides {
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
 export class AccountRuntimeFactory {
   private runtimes = new Map<string, AccountRuntime>();
   private initLocks = new Map<string, Promise<AccountRuntime>>();
+  private lastRequestTime = 0;
+  private pacingGate = Promise.resolve();
+  private pacingTestOverrides: PacingTestOverrides = {};
 
   constructor(
     private readonly store: AccountStore,
     private readonly client: PluginClient,
     private readonly identity: ClaudeIdentity = loadClaudeIdentity(),
   ) {}
+
+  setPacingTestOverrides(overrides: PacingTestOverrides): void {
+    this.pacingTestOverrides = overrides;
+  }
+
+  resetPacingForTest(): void {
+    this.lastRequestTime = 0;
+    this.pacingGate = Promise.resolve();
+    this.pacingTestOverrides = {};
+  }
 
   async getRuntime(uuid: string): Promise<AccountRuntime> {
     const cached = this.runtimes.get(uuid);
@@ -271,8 +290,33 @@ export class AccountRuntimeFactory {
       ? transformBodyToUpstream(init.body, this.identity, sessionId)
       : init?.body;
 
+    const pacingCfg = resolvePacingConfig();
+    const getNow = this.pacingTestOverrides.now ?? Date.now;
+    const sleepFn = this.pacingTestOverrides.sleep
+      ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+
+    const reservePacingSlot = async (): Promise<void> => {
+      let releaseGate: (() => void) | undefined;
+      const previousGate = this.pacingGate;
+      this.pacingGate = new Promise<void>((resolve) => {
+        releaseGate = resolve;
+      });
+
+      await previousGate;
+
+      try {
+        const delay = computePacingDelay(getNow(), this.lastRequestTime, pacingCfg);
+        if (delay > 0) {
+          await sleepFn(delay);
+        }
+        this.lastRequestTime = getNow();
+      } finally {
+        releaseGate?.();
+      }
+    };
+
     const performFetch = async (requestHeaders: HeadersInit): Promise<Response> => {
-      await rateGovern();
+      await reservePacingSlot();
 
       try {
         const response = await fetch(transformedInput, {

@@ -7,10 +7,7 @@ import { resetExcludedBetas } from "../src/betas";
 import { loadTemplate } from "../src/fingerprint-capture";
 import { clearRefreshMutex } from "../src/token";
 import { createMockClient, setupTestEnv } from "./helpers";
-import {
-  resetRateGovernorForTest,
-  setRateGovernorTestOverridesForTest,
-} from "../src/error-utils";
+
 
 function toHeaders(headers: HeadersInit | undefined): Headers {
   return new Headers(headers);
@@ -52,7 +49,6 @@ describe("runtime-factory", () => {
     globalThis.fetch = originalFetch;
     clearRefreshMutex();
     resetExcludedBetas();
-    resetRateGovernorForTest();
     await cleanup();
   });
 
@@ -187,22 +183,22 @@ describe("runtime-factory", () => {
     });
   });
 
-  test("applies rate governor before each upstream request", async () => {
+  test("applies pacing delay before each upstream request", async () => {
     const uuid = await seedAccount();
     const factory = new AccountRuntimeFactory(store, client);
-    const runtime = await factory.getRuntime(uuid);
-    const sleepCalls: number[] = [];
     let currentTime = 1_000;
+    const sleepCalls: number[] = [];
 
-    setRateGovernorTestOverridesForTest({
+    factory.setPacingTestOverrides({
       now: () => currentTime,
-      minIntervalMs: 500,
       sleep: (ms) => {
         sleepCalls.push(ms);
         currentTime += ms;
         return Promise.resolve();
       },
     });
+
+    const runtime = await factory.getRuntime(uuid);
 
     globalThis.fetch = vi.fn(async () => {
       currentTime += 100;
@@ -218,6 +214,41 @@ describe("runtime-factory", () => {
       method: "POST",
       body: JSON.stringify({ model: "claude-sonnet-4-6", messages: [] }),
     });
+
+    expect(sleepCalls).toEqual([400]);
+  });
+
+  test("serializes pacing across concurrent requests", async () => {
+    const uuid = await seedAccount();
+    const factory = new AccountRuntimeFactory(store, client);
+    let currentTime = 1_000;
+    const sleepCalls: number[] = [];
+
+    factory.setPacingTestOverrides({
+      now: () => currentTime,
+      sleep: async (ms) => {
+        sleepCalls.push(ms);
+        currentTime += ms;
+      },
+    });
+
+    const runtime = await factory.getRuntime(uuid);
+
+    globalThis.fetch = vi.fn(async () => {
+      currentTime += 100;
+      return new Response("ok");
+    }) as unknown as typeof fetch;
+
+    await Promise.all([
+      runtime.fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        body: JSON.stringify({ model: "claude-sonnet-4-6", messages: [] }),
+      }),
+      runtime.fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        body: JSON.stringify({ model: "claude-sonnet-4-6", messages: [] }),
+      }),
+    ]);
 
     expect(sleepCalls).toEqual([400]);
   });
