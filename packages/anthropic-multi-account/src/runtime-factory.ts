@@ -3,6 +3,7 @@ import { ANTHROPIC_OAUTH_ADAPTER } from "./constants";
 import { isTokenExpired, refreshToken } from "./token";
 import { TokenRefreshError } from "opencode-multi-account-core";
 import {
+  applyRequestToolMasking,
   extractModelIdFromBody,
   extractToolNamesFromRequestBody,
   transformRequestUrl,
@@ -26,6 +27,7 @@ import {
   buildUpstreamRequest,
   createStreamingReverseMapper,
   getUpstreamSessionId,
+  reverseMapResponse,
 } from "./upstream-request";
 import { loadClaudeIdentity, type ClaudeIdentity } from "./claude-identity";
 import { loadTemplate } from "./fingerprint-capture";
@@ -107,23 +109,54 @@ function transformBodyToUpstream(
   body: string,
   identity: ClaudeIdentity,
   sessionId: string,
-): string {
+): { body: string; reverseLookup: Map<string, string> } {
   try {
     const parsed = JSON.parse(body) as unknown;
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      return body;
+      return { body, reverseLookup: new Map() };
     }
 
-    return JSON.stringify(
-      buildUpstreamRequest(
-        parsed as Record<string, unknown>,
-        identity,
-        loadTemplate(),
-        { sessionId },
-      ),
+    const template = loadTemplate();
+
+    const upstreamRequest = buildUpstreamRequest(
+      parsed as Record<string, unknown>,
+      identity,
+      template,
+      { sessionId },
     );
+
+    return applyRequestToolMasking(upstreamRequest as Record<string, unknown>, template.tool_names) as {
+      body: string;
+      reverseLookup: Map<string, string>;
+    };
   } catch {
-    return body;
+    return { body, reverseLookup: new Map() };
+  }
+}
+
+async function applyResponseReverseLookup(
+  response: Response,
+  reverseLookup: Map<string, string>,
+): Promise<Response> {
+  const contentType = response.headers.get("content-type") ?? "";
+  if (contentType.includes("text/event-stream")) {
+    return createStreamingReverseMapper(response, reverseLookup);
+  }
+
+  if (!contentType.includes("application/json") || reverseLookup.size === 0) {
+    return response;
+  }
+
+  try {
+    const payload = await response.clone().json();
+    const remapped = reverseMapResponse(payload, reverseLookup);
+    return new Response(JSON.stringify(remapped), {
+      status: response.status,
+      statusText: response.statusText,
+      headers: new Headers(response.headers),
+    });
+  } catch {
+    return response;
   }
 }
 
@@ -286,9 +319,9 @@ export class AccountRuntimeFactory {
       void recordObservedToolNames(extractToolNamesFromRequestBody(init.body)).catch(() => {});
     }
 
-    const transformedBody = typeof init?.body === "string"
+    const transformedRequest = typeof init?.body === "string"
       ? transformBodyToUpstream(init.body, this.identity, sessionId)
-      : init?.body;
+      : { body: init?.body, reverseLookup: new Map<string, string>() };
 
     const pacingCfg = resolvePacingConfig();
     const getNow = this.pacingTestOverrides.now ?? Date.now;
@@ -322,7 +355,7 @@ export class AccountRuntimeFactory {
         const response = await fetch(transformedInput, {
           ...init,
           headers: requestHeaders,
-          body: transformedBody,
+          body: transformedRequest.body,
         });
         return await enrichRateLimitResponse(response);
       } catch (error) {
@@ -363,7 +396,7 @@ export class AccountRuntimeFactory {
       response = await performFetch(retryHeaders);
     }
 
-    return createStreamingReverseMapper(response);
+    return applyResponseReverseLookup(response, transformedRequest.reverseLookup);
   }
 
   private async createRuntime(uuid: string): Promise<AccountRuntime> {
@@ -375,10 +408,9 @@ export class AccountRuntimeFactory {
       }
 
       let accessToken = storedAccount.accessToken;
-      let expiresAt = storedAccount.expiresAt;
 
-      if (!accessToken || !expiresAt || isTokenExpired({ accessToken, expiresAt })) {
-        ({ accessToken, expiresAt } = await this.ensureFreshToken(storedAccount, uuid));
+      if (!accessToken || !storedAccount.expiresAt || isTokenExpired({ accessToken, expiresAt: storedAccount.expiresAt })) {
+        ({ accessToken } = await this.ensureFreshToken(storedAccount, uuid));
       }
 
       if (!accessToken) {

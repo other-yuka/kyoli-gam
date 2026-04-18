@@ -97,7 +97,7 @@ describe("upstream-request", () => {
     expect(computeBuildTag("tiny", version)).toHaveLength(3);
   });
 
-  test("buildUpstreamRequest emits Claude Code style body and truncates oversized tool_result blocks", () => {
+  test("buildUpstreamRequest emits Claude Code style body and preserves incoming OpenCode tools", () => {
     setUpstreamRequestTestOverridesForTest({
       now: () => 1_000,
       createSessionId: () => "session-fixed",
@@ -172,7 +172,7 @@ describe("upstream-request", () => {
     expect(result.thinking).toEqual({ type: "adaptive" });
     expect(result.context_management).toEqual({});
     expect(result.output_config).toEqual({});
-    expect(result.tools).toEqual(template.tools);
+    expect(result.tools).toEqual([{ name: "OriginalTool", description: "legacy" }]);
     expect(messages).toHaveLength(3);
     expect(messages[1]?.content).toEqual([{ type: "text", text: "Working on it" }]);
     expect(truncated.length).toBeLessThanOrEqual(MAX_TOOL_RESULT_TEXT_LENGTH + TRUNCATION_SUFFIX.length);
@@ -204,7 +204,7 @@ describe("upstream-request", () => {
     expect(systemBlocks[2]?.text.includes(template.agent_identity)).toBe(false);
   });
 
-  test("reverseMapResponse preserves current OpenCode tool names under identity mapping", () => {
+  test("reverseMapResponse preserves tool names without a request-scoped reverse lookup", () => {
     const response = {
       content: [
         {
@@ -219,7 +219,7 @@ describe("upstream-request", () => {
     expect(reverseMapResponse(response)).toEqual(response);
   });
 
-  test("createStreamingReverseMapper rewrites SSE payloads via the same reverse mapping path", async () => {
+  test("createStreamingReverseMapper preserves names without a request-scoped reverse lookup", async () => {
     const sseBody = [
       "event: content_block_start",
       'data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"pwd"}}}',
@@ -234,6 +234,95 @@ describe("upstream-request", () => {
 
     expect(text).toContain("event: content_block_start");
     expect(text).toContain('"name":"Bash"');
+  });
+
+  test("buildUpstreamRequest preserves incoming OpenCode tools when template aliases drift", () => {
+    const template = createTemplate({
+      tools: [
+        { name: "AskUserQuestion", description: "Old Claude tool", input_schema: { type: "object" } },
+        { name: "Bash", description: "Claude shell", input_schema: { type: "object" } },
+      ],
+      tool_names: ["AskUserQuestion", "Bash"],
+    });
+
+    const result = buildUpstreamRequest({
+      model: "claude-sonnet-4-6",
+      tools: [
+        { name: "question", description: "OpenCode question tool", input_schema: { type: "object", properties: { questions: { type: "array" } } } },
+        { name: "bash", description: "OpenCode bash tool", input_schema: { type: "object", properties: { command: { type: "string" } } } },
+      ],
+      messages: [{ role: "user", content: "hello" }],
+    }, createIdentity(), template);
+
+    expect(result.tools).toEqual([
+      { name: "question", description: "OpenCode question tool", input_schema: { type: "object", properties: { questions: { type: "array" } } } },
+      { name: "bash", description: "OpenCode bash tool", input_schema: { type: "object", properties: { command: { type: "string" } } } },
+    ]);
+  });
+
+  test("buildUpstreamRequest keeps representative OpenCode tool groups when template names drift", () => {
+    const template = createTemplate({
+      tools: [
+        { name: "AskUserQuestion", input_schema: { type: "object" } },
+        { name: "Bash", input_schema: { type: "object" } },
+        { name: "Read", input_schema: { type: "object" } },
+        { name: "TaskCreate", input_schema: { type: "object" } },
+      ],
+      tool_names: ["AskUserQuestion", "Bash", "Read", "TaskCreate"],
+    });
+
+    const incomingTools = [
+      { name: "question", input_schema: { type: "object", properties: { questions: { type: "array" } } } },
+      { name: "bash", input_schema: { type: "object", properties: { command: { type: "string" } } } },
+      { name: "read", input_schema: { type: "object", properties: { filePath: { type: "string" } } } },
+      { name: "task", input_schema: { type: "object", properties: { prompt: { type: "string" } } } },
+      { name: "background_output", input_schema: { type: "object", properties: { task_id: { type: "string" } } } },
+    ];
+
+    const result = buildUpstreamRequest({
+      model: "claude-sonnet-4-6",
+      tools: incomingTools,
+      messages: [{ role: "user", content: "hello" }],
+    }, createIdentity(), template);
+
+    expect(result.tools).toEqual(incomingTools);
+  });
+
+  test("buildUpstreamRequest preserves tool_use names for the later request-scoped flow", () => {
+    const result = buildUpstreamRequest({
+      model: "claude-sonnet-4-6",
+      messages: [
+        { role: "user", content: "hello" },
+        {
+          role: "assistant",
+          content: [
+            { type: "tool_use", name: "AskUserQuestion", input: { questions: [] } },
+          ],
+        },
+      ],
+      tools: [{ name: "question", input_schema: { type: "object" } }],
+    }, createIdentity(), createTemplate());
+
+    const messages = result.messages as Array<{ role: string; content: Array<{ type?: string; name?: string }> | string }>;
+    const assistantMessage = messages.find((message) => message.role === "assistant") as { content: Array<{ type?: string; name?: string }> } | undefined;
+
+    expect(Array.isArray(assistantMessage?.content)).toBe(true);
+    expect(assistantMessage?.content[0]?.name).toBe("AskUserQuestion");
+  });
+
+  test("reverseMapResponse preserves stale AskUserQuestion without explicit reverse lookup", () => {
+    const response = {
+      content: [
+        {
+          type: "tool_use",
+          id: "toolu_1",
+          name: "AskUserQuestion",
+          input: { questions: [] },
+        },
+      ],
+    };
+
+    expect(reverseMapResponse(response)).toEqual(response);
   });
 
   test("orderBodyForOutbound reorders body fields per the provided order", () => {
@@ -297,7 +386,7 @@ describe("upstream-request", () => {
     expect(resultTools[1]?.input_schema).toEqual({ type: "object" });
   });
 
-  test("buildUpstreamRequest uses template tools when they have complete input_schema", () => {
+  test("buildUpstreamRequest uses template tools as-is when incoming tools are absent", () => {
     setUpstreamRequestTestOverridesForTest({
       now: () => 1_000,
       createSessionId: () => "session-schema-complete",
@@ -311,7 +400,10 @@ describe("upstream-request", () => {
     });
 
     const result = buildUpstreamRequest(
-      { model: "claude-sonnet-4-5", messages: [{ role: "user", content: "hi" }], tools: [{ name: "old_tool" }] },
+      {
+        model: "claude-sonnet-4-5",
+        messages: [{ role: "user", content: "hi" }],
+      },
       createIdentity(),
       templateWithSchemas,
     );
