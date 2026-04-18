@@ -45,7 +45,6 @@ const EMPTY_OAUTH_CREDENTIALS: OAuthCredentials = {
   expires: 0,
 };
 
-let providerModelsObserverForTest: ((models: Record<string, unknown>) => void) | null = null;
 
 function extractFirstUserText(input: Record<string, unknown>): string {
   try {
@@ -366,7 +365,6 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
         getAuth: () => Promise<unknown>,
         provider: Record<string, unknown>,
       ) {
-        providerModelsObserverForTest?.((provider.models ?? {}) as Record<string, unknown>);
         ingestProviderModelsCapabilities((provider.models ?? {}) as Record<string, unknown>);
         const auth = await getAuth() as Record<string, unknown>;
         if (auth.type !== "oauth") {
@@ -465,13 +463,3 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
     },
   };
 };
-
-export function setProviderModelsObserverForTest(
-  observer: ((models: Record<string, unknown>) => void) | null,
-): void {
-  providerModelsObserverForTest = observer;
-}
-
-export function resetProviderModelsObserverForTest(): void {
-  providerModelsObserverForTest = null;
-}
