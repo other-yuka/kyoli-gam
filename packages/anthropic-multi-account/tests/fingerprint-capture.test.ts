@@ -24,11 +24,15 @@ afterEach(() => {
 function createLiveTemplate(overrides?: Partial<TemplateData>): TemplateData {
   return {
     _version: 1,
+    _schemaVersion: 1,
     _captured: new Date().toISOString(),
     _source: "live",
     agent_identity: "You are Claude Code.",
     system_prompt: "Use the available tools.",
-    tools: [{ name: "Read" }, { name: "Bash" }],
+    tools: [
+      { name: "Read", input_schema: { type: "object", properties: { filePath: { type: "string" } }, required: ["filePath"] } },
+      { name: "Bash", input_schema: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } },
+    ],
     tool_names: ["Read", "Bash"],
     cc_version: "2.1.80",
     header_values: {
@@ -137,6 +141,7 @@ describe("fingerprint-capture", () => {
       "x-app": "cli",
     });
     expect(template?.cc_version).toBe("2.1.80");
+    expect(template?._schemaVersion).toBe(1);
   });
 
   test("extractTemplate returns null when the system blocks drift away from the expected three-block shape", () => {
@@ -236,7 +241,7 @@ describe("fingerprint-capture", () => {
                 "You are Claude Code.",
                 "Inspect the repo.",
               ],
-              tools: [{ name: "Read" }],
+              tools: [{ name: "Read", input_schema: { type: "object", properties: { filePath: { type: "string" } }, required: ["filePath"] } }],
             }),
           });
         },
@@ -285,6 +290,338 @@ describe("fingerprint-capture", () => {
     expect(checkCCCompat("0.9.9").status).toBe("below-min");
     expect(checkCCCompat("2.1.104").status).toBe("ok");
     expect(checkCCCompat("9.0.0").status).toBe("untested-above");
+  });
+
+  test("loadTemplate rejects cached data with missing _schemaVersion and falls back to bundled", async () => {
+    const { dir, cleanup } = await setupTestEnv();
+
+    try {
+      const cacheWithoutSchema = createLiveTemplate();
+      delete (cacheWithoutSchema as unknown as Record<string, unknown>)._schemaVersion;
+
+      await fs.writeFile(
+        join(dir, CACHE_FILE_NAME),
+        `${JSON.stringify(cacheWithoutSchema, null, 2)}\n`,
+        "utf8",
+      );
+
+      const template = loadTemplate();
+
+      expect(template._source).toBe("bundled");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("loadTemplate rejects cached data with outdated _schemaVersion and falls back to bundled", async () => {
+    const { dir, cleanup } = await setupTestEnv();
+
+    try {
+      const cacheWithOldSchema = createLiveTemplate({ _schemaVersion: 0 });
+
+      await fs.writeFile(
+        join(dir, CACHE_FILE_NAME),
+        `${JSON.stringify(cacheWithOldSchema, null, 2)}\n`,
+        "utf8",
+      );
+
+      const template = loadTemplate();
+
+      expect(template._source).toBe("bundled");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("extractTemplate captures body_field_order from top-level body keys", () => {
+    const captured: CapturedRequest = {
+      body: {
+        model: "claude-sonnet-4-5",
+        messages: [{ role: "user", content: "hello" }],
+        system: [
+          { type: "text", text: "x-anthropic-billing-header: cc_version=2.1.80.bb5; cch=00000;" },
+          { type: "text", text: "You are Claude Code, an interactive CLI tool." },
+          { type: "text", text: "Inspect the repository before making assumptions." },
+        ],
+        tools: [
+          { name: "Read", description: "Read files" },
+          { name: "Bash", description: "Run shell commands" },
+        ],
+      },
+      headers: {
+        "anthropic-beta": "oauth-2025-04-20",
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+        "user-agent": "claude-code/2.1.80",
+        "x-app": "cli",
+      },
+      rawHeaders: [
+        "Anthropic-Version", "2023-06-01",
+        "Content-Type", "application/json",
+      ],
+    };
+
+    const template = extractTemplate(captured);
+
+    expect(template).not.toBeNull();
+    expect(template?.body_field_order).toEqual(["model", "messages", "system", "tools"]);
+  });
+
+  test("extractTemplate omits body_field_order when body has no keys", () => {
+    const captured: CapturedRequest = {
+      body: {
+        system: [
+          { type: "text", text: "x-anthropic-billing-header: cc_version=2.1.80.bb5; cch=00000;" },
+          { type: "text", text: "You are Claude Code." },
+          { type: "text", text: "Inspect the repo." },
+        ],
+        tools: [{ name: "Read" }],
+      },
+      headers: {
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+        "user-agent": "claude-code/2.1.80",
+        "x-app": "cli",
+      },
+      rawHeaders: [],
+    };
+
+    const template = extractTemplate(captured);
+
+    expect(template).not.toBeNull();
+    expect(template?.body_field_order).toEqual(["system", "tools"]);
+  });
+
+  test("bundled template tools all have input_schema with properties for Anthropic API compliance", async () => {
+    const { cleanup } = await setupTestEnv();
+
+    try {
+      const template = loadTemplate();
+
+      expect(template._source).toBe("bundled");
+      expect(template.tools.length).toBeGreaterThan(0);
+
+      for (const tool of template.tools) {
+        expect(tool).toHaveProperty("input_schema");
+        const schema = tool.input_schema as Record<string, unknown>;
+        expect(typeof schema).toBe("object");
+        expect(schema).not.toBeNull();
+        expect(schema).toHaveProperty("type");
+        expect(schema).toHaveProperty("properties");
+      }
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("bundled template preserves header and body ordering metadata", async () => {
+    const { cleanup } = await setupTestEnv();
+
+    try {
+      const template = loadTemplate();
+
+      expect(template._source).toBe("bundled");
+      expect(Array.isArray(template.header_order)).toBe(true);
+      expect(template.header_order?.length).toBeGreaterThan(0);
+      expect(Array.isArray(template.body_field_order)).toBe(true);
+      expect(template.body_field_order?.length).toBeGreaterThan(0);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("bundled template preserves baked cc_version for billing and drift consumers", async () => {
+    const { cleanup } = await setupTestEnv();
+
+    try {
+      const template = loadTemplate();
+
+      expect(template._source).toBe("bundled");
+      expect(typeof template.cc_version).toBe("string");
+      expect(template.cc_version?.length).toBeGreaterThan(0);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("bundled template retains Claude Code identity and expected tool set", async () => {
+    const { cleanup } = await setupTestEnv();
+
+    try {
+      const template = loadTemplate();
+
+      expect(template._source).toBe("bundled");
+      expect(template.agent_identity).toContain("Claude Code");
+      expect(template.tool_names).toEqual([
+        "Bash",
+        "Read",
+        "Write",
+        "Edit",
+        "Glob",
+        "Grep",
+        "WebFetch",
+        "TodoWrite",
+        "TaskCreate",
+        "TaskGet",
+        "TaskList",
+        "TaskOutput",
+        "TaskStop",
+        "LSP",
+        "Monitor",
+        "NotebookEdit",
+        "Skill",
+      ]);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("loadTemplate rejects cached data with matching _schemaVersion but missing tool input_schema", async () => {
+    const { dir, cleanup } = await setupTestEnv();
+
+    try {
+      const cacheWithIncompleteTools = createLiveTemplate({
+        _schemaVersion: 1,
+        tools: [{ name: "Bash" }, { name: "Read" }],
+      });
+
+      await fs.writeFile(
+        join(dir, CACHE_FILE_NAME),
+        `${JSON.stringify(cacheWithIncompleteTools, null, 2)}\n`,
+        "utf8",
+      );
+
+      const template = loadTemplate();
+
+      expect(template._source).toBe("bundled");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("loadTemplate accepts cached MCP tools without input_schema when non-MCP tools are usable", async () => {
+    const { dir, cleanup } = await setupTestEnv();
+
+    try {
+      const cacheWithMcpTool = createLiveTemplate({
+        tools: [
+          { name: "Read", input_schema: { type: "object", properties: { filePath: { type: "string" } }, required: ["filePath"] } },
+          { name: "mcp__secret__tool", description: "Secret tool without schema" },
+        ],
+        tool_names: ["Read", "mcp__secret__tool"],
+      });
+
+      await fs.writeFile(
+        join(dir, CACHE_FILE_NAME),
+        `${JSON.stringify(cacheWithMcpTool, null, 2)}\n`,
+        "utf8",
+      );
+
+      const template = loadTemplate();
+
+      expect(template._source).toBe("cached");
+      expect(template.tools.some((tool) => tool.name === "mcp__secret__tool")).toBe(true);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("refreshLiveFingerprintAsync recaptures when cache is fresh but schema-invalid", async () => {
+    const { dir, cleanup } = await setupTestEnv();
+
+    try {
+      const invalidFreshTemplate = createLiveTemplate({
+        _captured: new Date().toISOString(),
+        _schemaVersion: 0,
+      });
+
+      await fs.writeFile(
+        join(dir, CACHE_FILE_NAME),
+        `${JSON.stringify(invalidFreshTemplate, null, 2)}\n`,
+        "utf8",
+      );
+
+      setFingerprintCaptureTestOverridesForTest({
+        findClaudeBinary: () => "/mock/claude",
+        runClaudeCapture: async ({ baseUrl }) => {
+          await fetch(`${baseUrl}/v1/messages`, {
+            method: "POST",
+            headers: {
+              "anthropic-version": "2023-06-01",
+              "content-type": "application/json",
+              "user-agent": "claude-code/2.1.95",
+              "x-app": "cli",
+            },
+            body: JSON.stringify({
+              system: [
+                "x-anthropic-billing-header: cc_version=2.1.95.abc; cch=00000;",
+                "You are Claude Code.",
+                "Freshly recaptured prompt.",
+              ],
+              tools: [{ name: "Read", input_schema: { type: "object", properties: { filePath: { type: "string" } }, required: ["filePath"] } }],
+            }),
+          });
+        },
+      });
+
+      const refreshed = await refreshLiveFingerprintAsync();
+
+      expect(refreshed?._source).toBe("live");
+      expect(refreshed?.cc_version).toBe("2.1.95");
+      expect(refreshed?.system_prompt).toContain("Freshly recaptured prompt.");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("refreshLiveFingerprintAsync scrubs host context while preserving MCP tools in cache", async () => {
+    const { dir, cleanup } = await setupTestEnv();
+
+    try {
+      const staleTemplate = createLiveTemplate({
+        _captured: new Date(Date.now() - (26 * 60 * 60 * 1000)).toISOString(),
+      });
+      await fs.writeFile(join(dir, CACHE_FILE_NAME), `${JSON.stringify(staleTemplate, null, 2)}\n`, "utf8");
+
+      setFingerprintCaptureTestOverridesForTest({
+        findClaudeBinary: () => "/mock/claude",
+        runClaudeCapture: async ({ baseUrl }) => {
+          await fetch(`${baseUrl}/v1/messages`, {
+            method: "POST",
+            headers: {
+              "anthropic-version": "2023-06-01",
+              "content-type": "application/json",
+              "user-agent": "claude-code/2.1.90",
+              "x-app": "cli",
+            },
+            body: JSON.stringify({
+              system: [
+                "x-anthropic-billing-header: cc_version=2.1.90.abc; cch=00000;",
+                "You are Claude Code.",
+                "# Environment\nOS: darwin\n# Remaining\nInspect the repo at /Users/testuser/project.",
+              ],
+              tools: [
+                { name: "Read", description: "Read files at /Users/testuser/project" },
+                { name: "mcp__secret__tool", description: "Secret tool" },
+              ],
+            }),
+          });
+        },
+      });
+
+      const refreshed = await refreshLiveFingerprintAsync({ force: true });
+
+      expect(refreshed).not.toBeNull();
+      expect(refreshed?.tools.some((t) => t.name === "mcp__secret__tool")).toBe(true);
+      expect(refreshed?.system_prompt).not.toContain("# Environment");
+      expect(refreshed?.system_prompt).toContain("# Remaining");
+
+      const cachedJson = JSON.parse(await fs.readFile(join(dir, CACHE_FILE_NAME), "utf8")) as Record<string, unknown>;
+      const cachedTools = cachedJson.tools as Array<{ name: string }>;
+      expect(cachedTools.some((t) => t.name === "mcp__secret__tool")).toBe(true);
+    } finally {
+      await cleanup();
+    }
   });
 
   test("loadTemplate quarantines schema-invalid cache payloads", async () => {
