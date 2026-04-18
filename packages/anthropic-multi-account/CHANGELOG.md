@@ -1,5 +1,14 @@
 # opencode-anthropic-multi-account
 
+## 0.2.17
+
+### Patch Changes
+
+- [`12dd9ea`](https://github.com/other-yuka/kyoli-gam/commit/12dd9ea577529a73cda1eb7711de35408b7340a3) Thanks [@other-yuka](https://github.com/other-yuka)! - Refactor fingerprint maintenance scripts to share the bundled fallback loader.
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.17
+
 ## 0.2.16
 
 ### Patch Changes
