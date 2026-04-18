@@ -1,40 +1,3 @@
-const DEFAULT_MIN_REQUEST_INTERVAL_MS = 500;
-
-type RateGovernorTestOverrides = {
-  now?: () => number;
-  sleep?: (ms: number) => Promise<void>;
-  minIntervalMs?: number;
-};
-
-let lastRequestTime = 0;
-let rateGovernorTestOverrides: RateGovernorTestOverrides = {};
-
-function parseMinRequestIntervalMs(value: string | undefined): number {
-  const parsed = Number.parseInt(value ?? "", 10);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_MIN_REQUEST_INTERVAL_MS;
-}
-
-function now(): number {
-  return rateGovernorTestOverrides.now?.() ?? Date.now();
-}
-
-function sleep(ms: number): Promise<void> {
-  if (ms <= 0) {
-    return Promise.resolve();
-  }
-
-  if (rateGovernorTestOverrides.sleep) {
-    return rateGovernorTestOverrides.sleep(ms);
-  }
-
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-export function getMinRequestIntervalMs(): number {
-  return rateGovernorTestOverrides.minIntervalMs
-    ?? parseMinRequestIntervalMs(process.env.MIN_REQUEST_INTERVAL_MS);
-}
-
 export function sanitizeError(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
 
@@ -79,7 +42,7 @@ export function enrich429(body: string, headers: Headers): string {
         const parsedReset = Number.parseInt(reset, 10);
         if (Number.isFinite(parsedReset)) {
           const resetDate = new Date(parsedReset * 1000);
-          const minutesUntilReset = Math.max(0, Math.round((resetDate.getTime() - now()) / 60000));
+          const minutesUntilReset = Math.max(0, Math.round((resetDate.getTime() - Date.now()) / 60000));
           parts.push(`resets in ${minutesUntilReset}m`);
         }
       }
@@ -91,27 +54,4 @@ export function enrich429(body: string, headers: Headers): string {
   } catch {
     return body;
   }
-}
-
-export async function rateGovern(): Promise<void> {
-  const currentTime = now();
-  const minRequestIntervalMs = getMinRequestIntervalMs();
-
-  if (lastRequestTime > 0) {
-    const elapsed = currentTime - lastRequestTime;
-    if (elapsed < minRequestIntervalMs) {
-      await sleep(minRequestIntervalMs - elapsed);
-    }
-  }
-
-  lastRequestTime = now();
-}
-
-export function resetRateGovernorForTest(): void {
-  lastRequestTime = 0;
-  rateGovernorTestOverrides = {};
-}
-
-export function setRateGovernorTestOverridesForTest(overrides: RateGovernorTestOverrides): void {
-  rateGovernorTestOverrides = overrides;
 }
