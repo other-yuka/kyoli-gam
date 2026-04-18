@@ -1,5 +1,14 @@
 # opencode-anthropic-multi-account
 
+## 0.2.18
+
+### Patch Changes
+
+- [`39e5c2d`](https://github.com/other-yuka/kyoli-gam/commit/39e5c2dd41e081abc583b2c2768bb9ae8623c63c) Thanks [@other-yuka](https://github.com/other-yuka)! - Rebuild the Anthropic tool mapping flow to restore request-scoped custom tool masking and response reverse mapping.
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.18
+
 ## 0.2.17
 
 ### Patch Changes
