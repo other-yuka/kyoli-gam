@@ -9,7 +9,6 @@ import type {
   TokenRefreshResult,
 } from "./types";
 
-const PERMANENT_FAILURE_HTTP_STATUSES = new Set([400, 401, 403]);
 const PERMANENT_FAILURE_MESSAGE_PATTERNS = [
   /\binvalid_grant\b/i,
   /\binvalid_scope\b/i,
@@ -40,12 +39,9 @@ export async function refreshToken(
       return { ok: true, patch };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const statusMatch = message.match(/\b(400|401|403)\b/);
-      const hasPermanentStatus = statusMatch !== null
-        && PERMANENT_FAILURE_HTTP_STATUSES.has(Number(statusMatch[1]));
       const hasPermanentMessage = PERMANENT_FAILURE_MESSAGE_PATTERNS
         .some((pattern) => pattern.test(message));
-      const isPermanent = hasPermanentStatus || hasPermanentMessage;
+      const isPermanent = hasPermanentMessage;
 
       await client.app
         .log({
