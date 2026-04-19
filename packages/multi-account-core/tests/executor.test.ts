@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, test, vi } from "bun:test";
+import { createHash } from "node:crypto";
 import { createExecutorForProvider } from "../src/executor";
 import type { ManagedAccount, PluginClient } from "../src/types";
 
@@ -156,13 +157,15 @@ describe("core/executor", () => {
     expect(manager.markSuccess).toHaveBeenCalledWith("acct-1");
   });
 
-  test("passes session header through as sticky key", async () => {
+  test("derives sticky key from first user message before session header", async () => {
     const account = createAccount();
     const manager = createSingleAccountManager(account);
     const runtimeFactory = createQueuedRuntimeFactory({
       "acct-1": [jsonResponse(200, { ok: true })],
     });
     const { executeWithAccountRotation } = createExecutor("Codex");
+    const firstUserText = "hello from sticky prompt";
+    const expectedStickyKey = createHash("sha256").update(firstUserText).digest("hex").slice(0, 16);
 
     await executeWithAccountRotation(
       manager,
@@ -173,10 +176,13 @@ describe("core/executor", () => {
         headers: {
           "x-claude-code-session-id": "session-123",
         },
+        body: JSON.stringify({
+          messages: [{ role: "user", content: firstUserText }],
+        }),
       },
     );
 
-    expect(manager.selectAccount).toHaveBeenCalledWith("session-123");
+    expect(manager.selectAccount).toHaveBeenCalledWith(expectedStickyKey);
   });
 
   test("handles 429 by calling rate-limit handler", async () => {

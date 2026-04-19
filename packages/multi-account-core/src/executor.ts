@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   isTokenRefreshError,
   type ManagedAccount,
@@ -75,7 +76,65 @@ function readStickyHeaderFromInit(headers: HeadersInit | undefined): string | un
   return undefined;
 }
 
+function extractFirstUserTextFromBody(body: BodyInit | null | undefined): string | undefined {
+  if (typeof body !== "string") {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON.parse(body) as Record<string, unknown>;
+    if (!Array.isArray(parsed.messages)) {
+      return undefined;
+    }
+
+    const firstUser = parsed.messages.find((message) => (
+      typeof message === "object"
+      && message !== null
+      && (message as Record<string, unknown>).role === "user"
+    )) as Record<string, unknown> | undefined;
+
+    if (!firstUser) {
+      return undefined;
+    }
+
+    const content = firstUser.content;
+    if (typeof content === "string") {
+      return content.trim() || undefined;
+    }
+
+    if (!Array.isArray(content)) {
+      return undefined;
+    }
+
+    const text = content
+      .filter((block) => typeof block === "object" && block !== null)
+      .filter((block) => (block as Record<string, unknown>).type === "text")
+      .map((block) => (block as Record<string, unknown>).text)
+      .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+      .join("\n\n")
+      .trim();
+
+    return text || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function buildStickyKeyFromFirstUserText(text: string | undefined): string | undefined {
+  if (!text) {
+    return undefined;
+  }
+
+  return createHash("sha256").update(text).digest("hex").slice(0, 16);
+}
+
 function extractStickyKey(input: RequestInfo | URL, init?: RequestInit): string | undefined {
+  const bodyText = init?.body ?? (input instanceof Request ? input.body : undefined);
+  const firstUserStickyKey = buildStickyKeyFromFirstUserText(extractFirstUserTextFromBody(bodyText));
+  if (firstUserStickyKey) {
+    return firstUserStickyKey;
+  }
+
   const requestHeader = input instanceof Request
     ? input.headers.get("x-claude-code-session-id") ?? undefined
     : undefined;
