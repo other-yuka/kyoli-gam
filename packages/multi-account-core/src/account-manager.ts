@@ -521,7 +521,17 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
 
     async markAuthFailure(uuid: string, result: TokenRefreshResult): Promise<void> {
       if (!result.ok && result.permanent) {
-        await this.removeAccountByUuid(uuid);
+        await this.store.mutateStorage((storage) => {
+          const account = storage.accounts.find((entry) => entry.uuid === uuid);
+          if (!account) return;
+
+          account.consecutiveAuthFailures = Math.max(
+            (account.consecutiveAuthFailures ?? 0) + 1,
+            getProviderConfig().max_consecutive_auth_failures,
+          );
+          account.isAuthDisabled = true;
+          account.authDisabledReason = "refresh failed permanently";
+        });
         return;
       }
 

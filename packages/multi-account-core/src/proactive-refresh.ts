@@ -151,11 +151,17 @@ export function createProactiveRefreshQueueForProvider(dependencies: ProactiveRe
         if (!accountUuid) return;
 
         if (permanent) {
-          const removed = await this.store.removeAccount(accountUuid);
-          if (!removed) return;
+          await this.store.mutateStorage((storage) => {
+            const target = storage.accounts.find((entry) => entry.uuid === accountUuid);
+            if (!target) return;
 
-          this.onInvalidate?.(accountUuid);
-          await this.clearOpenCodeAuthIfNoAccountsRemain();
+            target.consecutiveAuthFailures = Math.max(
+              (target.consecutiveAuthFailures ?? 0) + 1,
+              getConfig().max_consecutive_auth_failures,
+            );
+            target.isAuthDisabled = true;
+            target.authDisabledReason = "refresh failed permanently (proactive refresh)";
+          });
           return;
         }
 

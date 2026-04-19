@@ -102,7 +102,7 @@ describe("core/account-manager", () => {
     expect(authSetSpy).toHaveBeenCalledTimes(1);
   });
 
-  test("markAuthFailure removes account on permanent failure and clears provider auth when last", async () => {
+  test("markAuthFailure disables account on permanent failure instead of removing it", async () => {
     const AccountManager = createAccountManagerForProvider({
       providerAuthId: "anthropic",
       isTokenExpired: () => false,
@@ -120,11 +120,13 @@ describe("core/account-manager", () => {
     await manager.markAuthFailure(active.uuid, { ok: false, permanent: true });
     await manager.refresh();
 
-    expect(manager.getAccounts()).toHaveLength(0);
-    expect(authSetSpy).toHaveBeenCalledWith({
-      path: { id: "anthropic" },
-      body: { type: "oauth", refresh: "", access: "", expires: 0 },
+    expect(manager.getAccounts()).toHaveLength(1);
+    expect(manager.getAccounts()[0]).toMatchObject({
+      uuid: active.uuid,
+      isAuthDisabled: true,
+      authDisabledReason: "refresh failed permanently",
     });
+    expect(authSetSpy).not.toHaveBeenCalled();
   });
 
   test("markRevoked removes account and clears provider auth when last", async () => {
