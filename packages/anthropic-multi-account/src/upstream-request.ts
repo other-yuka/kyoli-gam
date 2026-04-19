@@ -190,9 +190,9 @@ function hasMeaningfulContent(content: unknown): boolean {
       return false;
     }
 
-     if (block.type === "tool_use") {
-      return true;
-    }
+     if (block.type === "tool_use" || block.type === "tool_result") {
+       return true;
+     }
 
     if (typeof block.text === "string" && block.text.trim().length > 0) {
       return true;
@@ -232,13 +232,58 @@ function compactMessageContent(messages: Message[]): void {
         return typeof block.text !== "string" || block.text.trim().length > 0;
       }
 
-      if (block.type === "tool_result" && Array.isArray(block.content)) {
-        return block.content.length > 0;
-      }
-
       return true;
     });
   }
+}
+
+function collectToolUseIds(message: Message): string[] {
+  if (!Array.isArray(message.content)) {
+    return [];
+  }
+
+  return message.content
+    .filter((block) => isRecord(block) && block.type === "tool_use" && typeof block.id === "string")
+    .map((block) => String(block.id));
+}
+
+function collectToolResultIds(message: Message): Set<string> {
+  if (!Array.isArray(message.content)) {
+    return new Set();
+  }
+
+  return new Set(
+    message.content
+      .filter((block) => isRecord(block) && block.type === "tool_result" && typeof block.tool_use_id === "string")
+      .map((block) => String(block.tool_use_id)),
+  );
+}
+
+export function getDanglingToolUseError(messages: Message[]): string | null {
+  for (let index = 0; index < messages.length; index += 1) {
+    const current = messages[index];
+    if (!current || current.role !== "assistant") {
+      continue;
+    }
+
+    const toolUseIds = collectToolUseIds(current);
+    if (toolUseIds.length === 0) {
+      continue;
+    }
+
+    const next = messages[index + 1];
+    if (!next || next.role !== "user") {
+      return `Dangling tool_use after assistant turn ${index}: ${toolUseIds.join(", ")}`;
+    }
+
+    const toolResultIds = collectToolResultIds(next);
+    const missing = toolUseIds.filter((toolUseId) => !toolResultIds.has(toolUseId));
+    if (missing.length > 0) {
+      return `Missing tool_result for assistant turn ${index}: ${missing.join(", ")}`;
+    }
+  }
+
+  return null;
 }
 
 function stripUnsupportedSamplingFields(body: Record<string, unknown>): void {
