@@ -1,6 +1,7 @@
 import { config, getModelOverride, getRequiredBetas } from "./model-config";
 
 export const LONG_CONTEXT_BETAS = config.longContextBetas;
+export const OAUTH_BETA = "oauth-2025-04-20";
 
 const excludedBetas = new Map<string, Set<string>>();
 
@@ -37,6 +38,26 @@ export function resetExcludedBetas(): void {
 export function isLongContextError(responseBody: string): boolean {
   return responseBody.includes("Extra usage is required for long context requests")
     || responseBody.includes("long context beta is not yet available");
+}
+
+export function isUnexpectedBetaError(responseBody: string): boolean {
+  return responseBody.includes("Unexpected value") && responseBody.includes("anthropic-beta");
+}
+
+export function extractRejectedBetas(responseBody: string): string[] {
+  const match = /Unexpected value\(s\):\s*([^\n]+?)\s*for the anthropic-beta header/i.exec(responseBody);
+  if (!match?.[1]) {
+    return [];
+  }
+
+  return match[1]
+    .split(",")
+    .map((value) => value.trim().replace(/^['"]|['"]$/g, ""))
+    .filter(Boolean);
+}
+
+export function ensureOauthBeta(betas: string[]): string[] {
+  return betas.includes(OAUTH_BETA) ? betas : [OAUTH_BETA, ...betas];
 }
 
 export function getNextBetaToExclude(modelId: string): string | null {

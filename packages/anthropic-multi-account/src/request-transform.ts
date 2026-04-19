@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { getModelBetas } from "./betas";
+import { ensureOauthBeta, getModelBetas } from "./betas";
 import { loadClaudeIdentity } from "./claude-identity";
 import { ANTHROPIC_OAUTH_ADAPTER } from "./constants";
 import { loadTemplate } from "./fingerprint-capture";
@@ -89,6 +89,14 @@ function dedupeHeaderValues(values: string[]): string[] {
   return [...new Set(values.filter(Boolean))];
 }
 
+function excludeBetas(values: string[], excluded?: Set<string>): string[] {
+  if (!excluded || excluded.size === 0) {
+    return values;
+  }
+
+  return values.filter((value) => !excluded.has(value));
+}
+
 function resolveSessionId(headers: Record<string, string>): string {
   return headers["x-claude-code-session-id"] ?? randomUUID();
 }
@@ -154,11 +162,11 @@ export function buildRequestHeaders(
 ): HeadersInit {
   const incomingHeaders = getMergedIncomingHeaders(input, init);
   const sessionId = resolveSessionId(incomingHeaders);
-  const mergedBetas = dedupeHeaderValues([
-    ...splitHeaderValues(getBetaHeader()),
+  const mergedBetas = dedupeHeaderValues(ensureOauthBeta([
+    ...excludeBetas(splitHeaderValues(getBetaHeader()), excludedBetas),
     ...getModelBetas(modelId, excludedBetas),
-    ...splitHeaderValues(incomingHeaders["anthropic-beta"]),
-  ]).join(",");
+    ...excludeBetas(splitHeaderValues(incomingHeaders["anthropic-beta"]), excludedBetas),
+  ])).join(",");
 
   const outboundHeaders: Record<string, string> = {
     ...incomingHeaders,

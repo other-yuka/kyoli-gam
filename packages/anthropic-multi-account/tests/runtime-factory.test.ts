@@ -126,6 +126,90 @@ describe("runtime-factory", () => {
     expect(parsed.content[0]?.name).toBe("search_docs");
   });
 
+  test("runtime.fetch preserves empty tool_result after upstream request sanitization", async () => {
+    const uuid = await seedAccount();
+    const factory = new AccountRuntimeFactory(store, client);
+    const runtime = await factory.getRuntime(uuid);
+
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response("ok"));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await runtime.fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        messages: [
+          { role: "user", content: [{ type: "text", text: "hello" }] },
+          {
+            role: "assistant",
+            content: [
+              { type: "tool_use", id: "toolu_1", name: "AskUserQuestion", input: { question: "x" } },
+            ],
+          },
+          {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "toolu_1",
+                content: "<system-reminder>hidden</system-reminder>",
+              },
+            ],
+          },
+        ],
+      }),
+    });
+
+    const [, init] = fetchMock.mock.calls[0] ?? [];
+    const body = JSON.parse(String(init?.body)) as {
+      messages: Array<{ role: string; content: Array<Record<string, unknown>> | string }>;
+    };
+
+    expect(body.messages).toHaveLength(3);
+    expect(body.messages[1]?.role).toBe("assistant");
+    expect(body.messages[1]?.content).toEqual([
+      { type: "tool_use", id: "toolu_1", name: "AskUserQuestion", input: { question: "x" } },
+    ]);
+    expect(body.messages[2]?.role).toBe("user");
+    expect(body.messages[2]?.content).toEqual([
+      { type: "tool_result", tool_use_id: "toolu_1", content: "" },
+    ]);
+  });
+
+  test("runtime.fetch returns local 400 without upstream call for dangling tool_use", async () => {
+    const uuid = await seedAccount();
+    const factory = new AccountRuntimeFactory(store, client);
+    const runtime = await factory.getRuntime(uuid);
+
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response("ok"));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const response = await runtime.fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        messages: [
+          { role: "user", content: [{ type: "text", text: "hello" }] },
+          {
+            role: "assistant",
+            content: [
+              { type: "tool_use", id: "toolu_1", name: "AskUserQuestion", input: { question: "x" } },
+            ],
+          },
+        ],
+      }),
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(response.status).toBe(400);
+    expect(response.json()).resolves.toMatchObject({
+      error: {
+        type: "invalid_request_error",
+        message: expect.stringContaining("Dangling tool_use"),
+      },
+    });
+  });
+
   test("retries without long-context beta when provider rejects it", async () => {
     process.env.ANTHROPIC_ENABLE_1M_CONTEXT = "true";
     try {
@@ -188,6 +272,36 @@ describe("runtime-factory", () => {
     } finally {
       delete process.env.ANTHROPIC_ENABLE_1M_CONTEXT;
     }
+  });
+
+  test("retries after generic unexpected-beta rejection by excluding rejected beta", async () => {
+    const uuid = await seedAccount();
+    const factory = new AccountRuntimeFactory(store, client);
+    const runtime = await factory.getRuntime(uuid);
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: { message: "Unexpected value(s): custom-beta-2026-01-01 for the anthropic-beta header" },
+      }), { status: 400 }))
+      .mockResolvedValueOnce(new Response("ok"));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await runtime.fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "anthropic-beta": "custom-beta-2026-01-01",
+      },
+      body: JSON.stringify({ model: "claude-sonnet-4-6", messages: [] }),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    const firstHeaders = toHeaders(fetchMock.mock.calls[0]?.[1]?.headers);
+    const secondHeaders = toHeaders(fetchMock.mock.calls[1]?.[1]?.headers);
+    expect(firstHeaders.get("anthropic-beta")).toContain("custom-beta-2026-01-01");
+    expect(secondHeaders.get("anthropic-beta")).not.toContain("custom-beta-2026-01-01");
+    expect(secondHeaders.get("anthropic-beta")).toContain("oauth-2025-04-20");
   });
 
   test("enriches generic 429 responses with unified rate-limit headers", async () => {

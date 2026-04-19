@@ -208,6 +208,43 @@ describe("upstream-request", () => {
     ]);
   });
 
+  test("buildUpstreamRequest preserves trailing tool_result even when sanitization empties its content", () => {
+    const result = buildUpstreamRequest({
+      model: "claude-sonnet-4-6",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hello" }] },
+        {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "toolu_1", name: "AskUserQuestion", input: { question: "x" } },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "toolu_1",
+              content: "<system-reminder>hidden</system-reminder>",
+            },
+          ],
+        },
+      ],
+    }, createIdentity(), createTemplate());
+
+    const messages = result.messages as Array<{ role: string; content: Array<Record<string, unknown>> | string }>;
+
+    expect(messages).toHaveLength(3);
+    expect(messages[1]?.role).toBe("assistant");
+    expect(messages[1]?.content).toEqual([
+      { type: "tool_use", id: "toolu_1", name: "AskUserQuestion", input: { question: "x" } },
+    ]);
+    expect(messages[2]?.role).toBe("user");
+    expect(messages[2]?.content).toEqual([
+      { type: "tool_result", tool_use_id: "toolu_1", content: "" },
+    ]);
+  });
+
   test("buildUpstreamRequest strips unsupported sampling fields when adaptive thinking is forced", () => {
     const result = buildUpstreamRequest({
       model: "claude-sonnet-4-6",

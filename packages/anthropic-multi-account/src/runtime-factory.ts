@@ -10,8 +10,11 @@ import {
 } from "./request-transform";
 import {
   addExcludedBeta,
+  ensureOauthBeta,
+  extractRejectedBetas,
   getExcludedBetas,
   getModelBetas,
+  isUnexpectedBetaError,
   getNextBetaToExclude,
   isLongContextError,
   LONG_CONTEXT_BETAS,
@@ -26,6 +29,7 @@ import {
 import {
   buildUpstreamRequest,
   createStreamingReverseMapper,
+  getDanglingToolUseError,
   getUpstreamSessionId,
   reverseMapResponse,
 } from "./upstream-request";
@@ -109,11 +113,11 @@ function transformBodyToUpstream(
   body: string,
   identity: ClaudeIdentity,
   sessionId: string,
-): { body: string; reverseLookup: Map<string, string> } {
+): { body: string; reverseLookup: Map<string, string>; validationError: string | null } {
   try {
     const parsed = JSON.parse(body) as unknown;
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      return { body, reverseLookup: new Map() };
+      return { body, reverseLookup: new Map(), validationError: null };
     }
 
     const template = loadTemplate();
@@ -125,12 +129,21 @@ function transformBodyToUpstream(
       { sessionId },
     );
 
-    return applyRequestToolMasking(upstreamRequest as Record<string, unknown>, template.tool_names) as {
+    const validationError = getDanglingToolUseError(
+      Array.isArray(upstreamRequest.messages) ? upstreamRequest.messages as Array<Record<string, unknown>> : [],
+    );
+
+    const maskedRequest = applyRequestToolMasking(upstreamRequest as Record<string, unknown>, template.tool_names) as {
       body: string;
       reverseLookup: Map<string, string>;
     };
+
+    return {
+      ...maskedRequest,
+      validationError,
+    };
   } catch {
-    return { body, reverseLookup: new Map() };
+    return { body, reverseLookup: new Map(), validationError: null };
   }
 }
 
@@ -278,11 +291,11 @@ export class AccountRuntimeFactory {
     modelId: string,
     excludedBetas: Set<string>,
   ): HeadersInit {
-    const mergedBetas = deduplicateBetas([
+    const mergedBetas = deduplicateBetas(ensureOauthBeta([
       ...excludeBetas(splitBetaValues(getBetaHeader()), excludedBetas),
       ...getModelBetas(modelId, excludedBetas),
       ...excludeBetas(splitBetaValues(incomingHeaders["anthropic-beta"]), excludedBetas),
-    ]).join(",");
+    ])).join(",");
 
     const outbound: Record<string, string> = {
       ...incomingHeaders,
@@ -321,7 +334,19 @@ export class AccountRuntimeFactory {
 
     const transformedRequest = typeof init?.body === "string"
       ? transformBodyToUpstream(init.body, this.identity, sessionId)
-      : { body: init?.body, reverseLookup: new Map<string, string>() };
+      : { body: init?.body, reverseLookup: new Map<string, string>(), validationError: null };
+
+    if (transformedRequest.validationError) {
+      return new Response(JSON.stringify({
+        error: {
+          message: transformedRequest.validationError,
+          type: "invalid_request_error",
+        },
+      }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      });
+    }
 
     const pacingCfg = resolvePacingConfig();
     const getNow = this.pacingTestOverrides.now ?? Date.now;
@@ -374,16 +399,27 @@ export class AccountRuntimeFactory {
       }
 
       const responseBody = await response.clone().text();
-      if (!isLongContextError(responseBody)) {
+      if (!isLongContextError(responseBody) && !isUnexpectedBetaError(responseBody)) {
         break;
       }
 
-      const betaToExclude = getNextBetaToExclude(modelId);
-      if (!betaToExclude) {
-        break;
-      }
+      if (isUnexpectedBetaError(responseBody)) {
+        const rejectedBetas = extractRejectedBetas(responseBody);
+        if (rejectedBetas.length === 0) {
+          break;
+        }
 
-      addExcludedBeta(modelId, betaToExclude);
+        for (const rejectedBeta of rejectedBetas) {
+          addExcludedBeta(modelId, rejectedBeta);
+        }
+      } else {
+        const betaToExclude = getNextBetaToExclude(modelId);
+        if (!betaToExclude) {
+          break;
+        }
+
+        addExcludedBeta(modelId, betaToExclude);
+      }
 
       const retryHeaders = this.buildOutboundHeaders(
         incomingHeaders,
