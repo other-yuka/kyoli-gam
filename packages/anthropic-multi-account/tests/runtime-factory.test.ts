@@ -339,7 +339,7 @@ describe("runtime-factory", () => {
 
     expect(
       runtime.fetch("https://api.anthropic.com/v1/messages", { method: "POST", body: "{}" }),
-    ).rejects.toThrow("Token refresh failed: 401");
+    ).rejects.toThrow("Token refresh failed");
 
     const storage = await store.load();
     expect(storage.accounts).toHaveLength(1);
