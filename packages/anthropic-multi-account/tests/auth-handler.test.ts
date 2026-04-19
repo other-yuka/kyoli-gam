@@ -103,7 +103,7 @@ describe("auth-handler", () => {
 
   });
 
-  test("check quotas persists permanent refresh failures and removes invalid account", async () => {
+  test("check quotas persists permanent refresh failures and disables invalid account", async () => {
     ttySpy.mockReturnValue(true);
 
     const account = {
@@ -126,7 +126,12 @@ describe("auth-handler", () => {
       setClient: vi.fn(),
       ensureValidToken: vi.fn(async () => ({ ok: false, permanent: true })),
       markAuthFailure: vi.fn(async () => {
-        accounts = [];
+        accounts = [{
+          ...account,
+          isAuthDisabled: true,
+          authDisabledReason: "refresh failed permanently",
+          consecutiveAuthFailures: 3,
+        }];
       }),
       refresh: vi.fn(async () => {}),
     };
@@ -140,7 +145,10 @@ describe("auth-handler", () => {
 
     expect(manager.ensureValidToken).toHaveBeenCalledWith("dead-uuid", expect.anything());
     expect(manager.markAuthFailure).toHaveBeenCalledWith("dead-uuid", { ok: false, permanent: true });
-    expect(printQuotaErrorSpy).toHaveBeenCalledWith(account, "Refresh failed permanently; account removed");
+    expect(printQuotaErrorSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ authDisabledReason: "refresh failed permanently" }),
+      "refresh failed permanently (refresh failed)",
+    );
     expect(flow.instructions).toBe("Authentication cancelled");
 
   });
