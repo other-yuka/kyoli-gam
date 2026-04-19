@@ -336,7 +336,7 @@ describe("fingerprint-capture", () => {
     }
   });
 
-  test("loadTemplate quarantines cached data when cached version mismatches bundled version", async () => {
+  test("loadTemplate keeps cached data even when cached version mismatches bundled version", async () => {
     const { dir, cleanup } = await setupTestEnv();
 
     try {
@@ -351,17 +351,14 @@ describe("fingerprint-capture", () => {
       );
 
       const template = loadTemplate();
-      const files = await fs.readdir(dir);
-
-      expect(template._source).toBe("bundled");
-      expect(files).not.toContain(CACHE_FILE_NAME);
-      expect(files.some((file) => file.startsWith(`${CACHE_FILE_NAME}.stale-`))).toBe(true);
+      expect(template._source).toBe("cached");
+      expect(template.cc_version).toBe("2.1.111");
     } finally {
       await cleanup();
     }
   });
 
-  test("loadTemplate quarantines cached data when cached version mismatches installed version", async () => {
+  test("loadTemplate keeps cached data even when cached version mismatches installed version", async () => {
     const { dir, cleanup } = await setupTestEnv();
 
     try {
@@ -378,11 +375,8 @@ describe("fingerprint-capture", () => {
       );
 
       const template = loadTemplate();
-      const files = await fs.readdir(dir);
-
-      expect(template._source).toBe("bundled");
-      expect(files).not.toContain(CACHE_FILE_NAME);
-      expect(files.some((file) => file.startsWith(`${CACHE_FILE_NAME}.stale-`))).toBe(true);
+      expect(template._source).toBe("cached");
+      expect(template.cc_version).toBe("2.1.113");
     } finally {
       await cleanup();
     }

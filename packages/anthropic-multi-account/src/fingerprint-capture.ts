@@ -232,18 +232,6 @@ function isFreshTemplate(template: TemplateData): boolean {
   return Number.isFinite(capturedAt) && (now() - capturedAt) < LIVE_TTL_MS;
 }
 
-function hasVersionMismatch(template: TemplateData, bundled: TemplateData, installedVersion: string | null): boolean {
-  if (template.cc_version && bundled.cc_version && template.cc_version !== bundled.cc_version) {
-    return true;
-  }
-
-  if (template.cc_version && installedVersion && template.cc_version !== installedVersion) {
-    return true;
-  }
-
-  return false;
-}
-
 async function atomicWriteJson(targetPath: string, payload: unknown): Promise<void> {
   const tmpPath = join(
     dirname(targetPath),
@@ -450,18 +438,11 @@ function probeInstalledCCVersion(): string | null {
 
 export function loadTemplate(): TemplateData {
   const cached = readLiveCacheSync("cached");
-  const bundled = loadBundledTemplate();
   if (cached && isUsableTemplate(cached)) {
-    const installedVersion = probeInstalledCCVersion();
-    if (hasVersionMismatch(cached, bundled, installedVersion)) {
-      quarantineStaleCache(getCachePath());
-      return bundled;
-    }
-
     return cached;
   }
 
-  return bundled;
+  return loadBundledTemplate();
 }
 
 export function extractTemplate(captured: CapturedRequest): TemplateData | null {
