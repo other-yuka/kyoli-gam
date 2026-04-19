@@ -328,7 +328,7 @@ describe("account-manager", () => {
       expect(savedAccount?.authDisabledReason).toBe("2 consecutive auth failures");
     });
 
-    test("permanent auth failure removes account and clears Anthropic auth when last account", async () => {
+    test("permanent auth failure disables account instead of removing it", async () => {
       const client = createMockClient();
       const setSpy = vi.spyOn(client.auth, "set");
       const manager = await createManagerFromStorage(createTestStorage(1), client);
@@ -340,11 +340,13 @@ describe("account-manager", () => {
       await manager.markAuthFailure(account.uuid, { ok: false, permanent: true });
 
       const saved = await readStorage();
-      expect(saved.accounts).toHaveLength(0);
-      expect(setSpy).toHaveBeenCalledWith({
-        path: { id: "anthropic" },
-        body: { type: "oauth", refresh: "", access: "", expires: 0 },
+      expect(saved.accounts).toHaveLength(1);
+      expect(saved.accounts[0]).toMatchObject({
+        uuid: account.uuid,
+        isAuthDisabled: true,
+        authDisabledReason: "refresh failed permanently",
       });
+      expect(setSpy).not.toHaveBeenCalled();
     });
   });
 
