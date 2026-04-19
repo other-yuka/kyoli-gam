@@ -1,5 +1,11 @@
 # opencode-multi-account-core
 
+## 0.2.23
+
+### Patch Changes
+
+- [`9abd84b`](https://github.com/other-yuka/kyoli-gam/commit/9abd84bb863e6f159d2e23a1ccb177d281799051) Thanks [@other-yuka](https://github.com/other-yuka)! - Preserve empty tool results, reject dangling tool calls before upstream fetches, and align sticky and beta request handling with the current Anthropic runtime flow.
+
 ## 0.2.22
 
 ### Patch Changes
