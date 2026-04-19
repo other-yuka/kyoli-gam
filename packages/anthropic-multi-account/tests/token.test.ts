@@ -110,20 +110,20 @@ describe("token", () => {
   });
 
   describe("refreshToken failure", () => {
-    test("returns permanent failure and logs error for 400/401/403", async () => {
-      const permanentStatuses = [400, 401, 403];
+    test("returns transient failure and logs warn for bare 400/401/403 without permanent OAuth error codes", async () => {
+      const ambiguousStatuses = [400, 401, 403];
 
-      for (const status of permanentStatuses) {
+      for (const status of ambiguousStatuses) {
         const client = createMockClient();
         refreshWithOAuthSpy.mockReset();
         refreshWithOAuthSpy.mockRejectedValue(new Error(`Token refresh failed: ${status}`));
 
         const result = await refreshToken("old-refresh", `account-${status}`, client);
 
-        expect(result).toEqual({ ok: false, permanent: true });
+        expect(result).toEqual({ ok: false, permanent: false });
         expect(client.logs.length).toBe(1);
         expect(client.logs[0]?.service).toBe(ANTHROPIC_OAUTH_ADAPTER.serviceLogName);
-        expect(client.logs[0]?.level).toBe("error");
+        expect(client.logs[0]?.level).toBe("warn");
         expect(client.logs[0]?.message.includes(`${status}`)).toBe(true);
       }
     });
