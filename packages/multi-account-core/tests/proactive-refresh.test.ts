@@ -48,6 +48,9 @@ function createStore(accounts: StoredAccount[]): AccountStore {
       fn(account);
       return { ...account };
     },
+    mutateStorage: async (fn: (storage: { version: 1; accounts: StoredAccount[] }) => void) => {
+      fn(storage);
+    },
     removeAccount: async (uuid: string) => {
       const initialLength = storage.accounts.length;
       storage.accounts = storage.accounts.filter((entry) => entry.uuid !== uuid);
@@ -114,7 +117,7 @@ describe("core/proactive-refresh", () => {
     expect(clearTimeoutSpy).toHaveBeenCalledWith(handle);
   });
 
-  test("permanent proactive refresh failure removes account and clears provider auth", async () => {
+  test("permanent proactive refresh failure disables account and keeps provider auth", async () => {
     let scheduledCallback: (() => void) | null = null;
     globalThis.setTimeout = ((handler: TimerHandler) => {
       if (typeof handler !== "function") {
@@ -169,10 +172,12 @@ describe("core/proactive-refresh", () => {
     }
 
     const persisted = await store.load();
-    expect(persisted.accounts).toHaveLength(0);
-    expect(authSetSpy).toHaveBeenCalledWith({
-      path: { id: "anthropic" },
-      body: { type: "oauth", refresh: "", access: "", expires: 0 },
+    expect(persisted.accounts).toHaveLength(1);
+    expect(persisted.accounts[0]).toMatchObject({
+      uuid: "acct-1",
+      isAuthDisabled: true,
+      authDisabledReason: "refresh failed permanently (proactive refresh)",
     });
+    expect(authSetSpy).not.toHaveBeenCalled();
   });
 });
