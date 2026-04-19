@@ -1,5 +1,14 @@
 # opencode-anthropic-multi-account
 
+## 0.2.21
+
+### Patch Changes
+
+- [`f54e9ec`](https://github.com/other-yuka/kyoli-gam/commit/f54e9ec7c373501264f4a269c834b8948114d571) Thanks [@other-yuka](https://github.com/other-yuka)! - Avoid removing accounts immediately on refresh failures and tighten refresh failure classification.
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.21
+
 ## 0.2.20
 
 ### Patch Changes
