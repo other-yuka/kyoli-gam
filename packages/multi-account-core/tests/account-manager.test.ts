@@ -11,6 +11,11 @@ const ACCOUNTS_FILE = "core-account-manager-accounts.test.json";
 
 let cleanup: (() => Promise<void>) | undefined;
 
+function getUuid(value: string | undefined): string {
+  expect(value).toBeDefined();
+  return value as string;
+}
+
 function createAuth(id: string): OAuthCredentials {
   return {
     type: "oauth",
@@ -69,6 +74,37 @@ describe("core/account-manager", () => {
     expect(refreshToken).not.toHaveBeenCalled();
   });
 
+  test("keeps sticky bindings per session key", async () => {
+    const AccountManager = createAccountManagerForProvider({
+      providerAuthId: "openai",
+      isTokenExpired: () => false,
+      refreshToken: async () => ({ ok: false, permanent: false }),
+    });
+
+    const store = new AccountStore();
+    const manager = await AccountManager.create(store, createAuth("a1"));
+    await manager.addAccount(createAuth("a2"));
+    await manager.addAccount(createAuth("a3"));
+
+    const first = await manager.selectAccount("session-a");
+    const firstUuid = getUuid(first?.uuid);
+
+    await manager.markRateLimited(firstUuid, 60_000);
+    const rebound = await manager.selectAccount("session-a");
+    const reboundUuid = getUuid(rebound?.uuid);
+
+    await manager.markRateLimited(reboundUuid, 60_000);
+    const otherSession = await manager.selectAccount("session-b");
+    const otherSessionUuid = getUuid(otherSession?.uuid);
+
+    await manager.markSuccess(reboundUuid);
+    const stickyAgain = await manager.selectAccount("session-a");
+
+    expect(reboundUuid).not.toBe(firstUuid);
+    expect(otherSessionUuid).not.toBe(reboundUuid);
+    expect(stickyAgain?.uuid).toBe(reboundUuid);
+  });
+
   test("ensureValidToken refreshes expired token and syncs active account", async () => {
     const refreshToken = vi.fn(async () => ({
       ok: true,
@@ -87,16 +123,13 @@ describe("core/account-manager", () => {
 
     const store = new AccountStore();
     const manager = await AccountManager.create(store, createAuth("expiring"));
-    const active = manager.getActiveAccount();
-    if (!active?.uuid) {
-      throw new Error("Expected active account uuid");
-    }
+    const activeUuid = getUuid(manager.getActiveAccount()?.uuid);
 
     const client = createMockClient() as PluginClient;
     const authSetSpy = vi.spyOn(client.auth, "set");
     manager.setClient(client);
 
-    const result = await manager.ensureValidToken(active.uuid, client);
+    const result = await manager.ensureValidToken(activeUuid, client);
     expect(result.ok).toBe(true);
     expect(refreshToken).toHaveBeenCalledTimes(1);
     expect(authSetSpy).toHaveBeenCalledTimes(1);
@@ -112,17 +145,14 @@ describe("core/account-manager", () => {
     const client = createMockClient() as PluginClient;
     const authSetSpy = vi.spyOn(client.auth, "set");
     const manager = await AccountManager.create(new AccountStore(), createAuth("seed"), client);
-    const active = manager.getActiveAccount();
-    if (!active?.uuid) {
-      throw new Error("Expected active account uuid");
-    }
+    const activeUuid = getUuid(manager.getActiveAccount()?.uuid);
 
-    await manager.markAuthFailure(active.uuid, { ok: false, permanent: true });
+    await manager.markAuthFailure(activeUuid, { ok: false, permanent: true });
     await manager.refresh();
 
     expect(manager.getAccounts()).toHaveLength(1);
     expect(manager.getAccounts()[0]).toMatchObject({
-      uuid: active.uuid,
+      uuid: activeUuid,
       isAuthDisabled: true,
       authDisabledReason: "refresh failed permanently",
     });
@@ -139,12 +169,9 @@ describe("core/account-manager", () => {
     const client = createMockClient() as PluginClient;
     const authSetSpy = vi.spyOn(client.auth, "set");
     const manager = await AccountManager.create(new AccountStore(), createAuth("seed"), client);
-    const active = manager.getActiveAccount();
-    if (!active?.uuid) {
-      throw new Error("Expected active account uuid");
-    }
+    const activeUuid = getUuid(manager.getActiveAccount()?.uuid);
 
-    await manager.markRevoked(active.uuid);
+    await manager.markRevoked(activeUuid);
     await manager.refresh();
 
     expect(manager.getAccounts()).toHaveLength(0);
@@ -162,13 +189,10 @@ describe("core/account-manager", () => {
     });
 
     const manager = await AccountManager.create(new AccountStore(), createAuth("seed"));
-    const active = manager.getActiveAccount();
-    if (!active?.uuid) {
-      throw new Error("Expected active account uuid");
-    }
+    const activeUuid = getUuid(manager.getActiveAccount()?.uuid);
 
-    await manager.markRateLimited(active.uuid, 60_000);
-    await manager.applyUsageCache(active.uuid, {
+    await manager.markRateLimited(activeUuid, 60_000);
+    await manager.applyUsageCache(activeUuid, {
       five_hour: { utilization: 0, resets_at: new Date(Date.now() + 3_600_000).toISOString() },
       seven_day: { utilization: 40, resets_at: new Date(Date.now() + 86_400_000).toISOString() },
       seven_day_sonnet: null,

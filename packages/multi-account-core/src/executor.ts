@@ -14,7 +14,7 @@ const SERVER_RETRY_MAX_MS = 4_000;
 export interface ExecutorAccountManager {
   getAccountCount(): number;
   refresh(): Promise<void>;
-  selectAccount(): Promise<ManagedAccount | null>;
+  selectAccount(stickyKey?: string): Promise<ManagedAccount | null>;
   markSuccess(uuid: string): Promise<void>;
   markAuthFailure(uuid: string, result: TokenRefreshResult): Promise<void>;
   markRevoked(uuid: string): Promise<void>;
@@ -48,6 +48,41 @@ function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
 }
 
+function readStickyHeaderFromInit(headers: HeadersInit | undefined): string | undefined {
+  if (!headers) {
+    return undefined;
+  }
+
+  if (headers instanceof Headers) {
+    return headers.get("x-claude-code-session-id") ?? undefined;
+  }
+
+  if (Array.isArray(headers)) {
+    for (const [key, value] of headers) {
+      if (String(key).toLowerCase() === "x-claude-code-session-id") {
+        return String(value);
+      }
+    }
+    return undefined;
+  }
+
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === "x-claude-code-session-id" && value !== undefined) {
+      return String(value);
+    }
+  }
+
+  return undefined;
+}
+
+function extractStickyKey(input: RequestInfo | URL, init?: RequestInit): string | undefined {
+  const requestHeader = input instanceof Request
+    ? input.headers.get("x-claude-code-session-id") ?? undefined
+    : undefined;
+
+  return readStickyHeaderFromInit(init?.headers) ?? requestHeader;
+}
+
 export function createExecutorForProvider(
   providerName: string,
   dependencies: ExecutorDependencies,
@@ -77,6 +112,7 @@ export function createExecutorForProvider(
   ): Promise<Response> {
     const maxRetries = Math.max(MIN_MAX_RETRIES, manager.getAccountCount() * RETRIES_PER_ACCOUNT);
     let previousAccountUuid: string | undefined;
+    const stickyKey = extractStickyKey(input, init);
 
     type StatusTransition =
       | { type: "success"; response: Response }
@@ -135,9 +171,7 @@ export function createExecutorForProvider(
             return dispatchResponseStatus(account, accountUuid, retryRuntime, retryResponse, false, true);
           } catch (error) {
             if (isAbortError(error)) throw error;
-            if (await handleRuntimeFetchFailure(manager, runtimeFactory, client, account, error)) {
-              return { type: "retryOuter" };
-            }
+            await handleRuntimeFetchFailure(manager, runtimeFactory, client, account, error);
             return { type: "retryOuter" };
           }
         }
@@ -190,7 +224,7 @@ export function createExecutorForProvider(
 
     for (let retries = 1; retries <= maxRetries; retries++) {
       await manager.refresh();
-      const account = await resolveAccount(manager, client);
+      const account = await resolveAccount(manager, client, stickyKey);
       const accountUuid = account.uuid;
       if (!accountUuid) continue;
 
@@ -262,6 +296,7 @@ export function createExecutorForProvider(
   async function resolveAccount(
     manager: ExecutorAccountManager,
     client: PluginClient,
+    stickyKey?: string,
   ): Promise<ManagedAccount> {
     let attempts = 0;
 
@@ -272,7 +307,7 @@ export function createExecutorForProvider(
         );
       }
 
-      const account = await manager.selectAccount();
+      const account = await manager.selectAccount(stickyKey);
       if (account) return account;
 
       if (!manager.hasAnyUsableAccount()) {
