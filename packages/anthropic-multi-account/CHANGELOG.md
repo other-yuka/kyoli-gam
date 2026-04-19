@@ -1,5 +1,14 @@
 # opencode-anthropic-multi-account
 
+## 0.2.22
+
+### Patch Changes
+
+- Invalidate stale fingerprint cache entries when bundled or installed Claude versions change, and tighten Anthropic fingerprint/auth maintenance flows.
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.22
+
 ## 0.2.21
 
 ### Patch Changes
