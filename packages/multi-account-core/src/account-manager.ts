@@ -16,6 +16,13 @@ import type {
 const STARTUP_REFRESH_CONCURRENCY = 3;
 const RECENT_429_COOLDOWN_MS = 30_000;
 const HYBRID_SWITCH_MARGIN = 40;
+const STICKY_BINDING_TTL_MS = 6 * 60 * 60 * 1000;
+const MAX_STICKY_BINDINGS = 2_000;
+
+interface StickyBinding {
+  accountUuid: string;
+  updatedAt: number;
+}
 
 export interface ProfileData {
   email?: string;
@@ -52,7 +59,7 @@ export interface AccountManagerInstance {
   isRateLimited(account: ManagedAccount): boolean;
   clearExpiredRateLimits(): void;
   getMinWaitTime(): number;
-  selectAccount(): Promise<ManagedAccount | null>;
+  selectAccount(stickyKey?: string): Promise<ManagedAccount | null>;
   markRateLimited(uuid: string, backoffMs?: number): Promise<void>;
   markRevoked(uuid: string): Promise<void>;
   markSuccess(uuid: string): Promise<void>;
@@ -92,6 +99,7 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
     private runtimeFactory: RuntimeFactoryLike | null = null;
     private roundRobinCursor = 0;
     private last429Map = new Map<string, number>();
+    private stickyBindings = new Map<string, StickyBinding>();
 
     constructor(private store: AccountStore) {}
 
@@ -287,9 +295,10 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       return candidates.length > 0 ? Math.min(...candidates) : null;
     }
 
-    async selectAccount(): Promise<ManagedAccount | null> {
+    async selectAccount(stickyKey?: string): Promise<ManagedAccount | null> {
       await this.refresh();
       this.clearExpiredRateLimits();
+      this.cleanupStickyBindings();
 
       const eligible = this.getEligibleAccounts();
       if (eligible.length === 0) return null;
@@ -308,7 +317,7 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
           break;
         case "sticky":
         default:
-          selected = this.selectSticky(eligible, claims);
+          selected = this.selectSticky(eligible, claims, stickyKey);
           break;
       }
 
@@ -344,28 +353,118 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       return null;
     }
 
-    private selectSticky(eligible: ManagedAccount[], claims: ClaimsMap): ManagedAccount | null {
+    private selectSticky(eligible: ManagedAccount[], claims: ClaimsMap, stickyKey?: string): ManagedAccount | null {
+      const boundAccount = this.getBoundStickyAccount(stickyKey, eligible);
+      if (boundAccount) {
+        this.activateAccount(boundAccount);
+        return boundAccount;
+      }
+
       const current = this.getActiveAccount();
       if (current?.enabled && !current.isAuthDisabled && this.isUsable(current)) {
+        this.bindStickyAccount(stickyKey, current);
         this.activateAccount(current);
         return current;
       }
 
-        const unclaimed = eligible.find(
+      const unclaimed = eligible.find(
         (account) => this.isUsable(account) && !isClaimedByOtherProvider(claims, account.uuid),
       );
       if (unclaimed) {
+        this.bindStickyAccount(stickyKey, unclaimed);
         this.activateAccount(unclaimed);
         return unclaimed;
       }
 
       const available = eligible.find((account) => this.isUsable(account));
       if (available) {
+        this.bindStickyAccount(stickyKey, available);
         this.activateAccount(available);
         return available;
       }
 
-      return this.fallbackNotRateLimited(eligible);
+      const fallback = this.fallbackNotRateLimited(eligible);
+      if (fallback) {
+        this.bindStickyAccount(stickyKey, fallback);
+      }
+      return fallback;
+    }
+
+    private getBoundStickyAccount(stickyKey: string | undefined, eligible: ManagedAccount[]): ManagedAccount | null {
+      if (!stickyKey) {
+        return null;
+      }
+
+      const binding = this.stickyBindings.get(stickyKey);
+      if (!binding) {
+        return null;
+      }
+
+      const account = eligible.find((candidate) => candidate.uuid === binding.accountUuid);
+      if (!account || !this.isUsable(account)) {
+        return null;
+      }
+
+      binding.updatedAt = Date.now();
+      this.stickyBindings.set(stickyKey, binding);
+      return account;
+    }
+
+    private bindStickyAccount(stickyKey: string | undefined, account: ManagedAccount): void {
+      if (!stickyKey || !account.uuid) {
+        return;
+      }
+
+      this.stickyBindings.set(stickyKey, {
+        accountUuid: account.uuid,
+        updatedAt: Date.now(),
+      });
+      this.cleanupStickyBindings();
+    }
+
+    private cleanupStickyBindings(): void {
+      const now = Date.now();
+      const validUuids = new Set(
+        this.cached
+          .map((account) => account.uuid)
+          .filter((uuid): uuid is string => typeof uuid === "string" && uuid.length > 0),
+      );
+
+      for (const [stickyKey, binding] of this.stickyBindings) {
+        const isExpired = now - binding.updatedAt > STICKY_BINDING_TTL_MS;
+        if (isExpired || !validUuids.has(binding.accountUuid)) {
+          this.stickyBindings.delete(stickyKey);
+        }
+      }
+
+      if (this.stickyBindings.size <= MAX_STICKY_BINDINGS) {
+        return;
+      }
+
+      const bindingsByAge = [...this.stickyBindings.entries()]
+        .sort((left, right) => left[1].updatedAt - right[1].updatedAt);
+      const overflow = this.stickyBindings.size - MAX_STICKY_BINDINGS;
+
+      for (const [stickyKey] of bindingsByAge.slice(0, overflow)) {
+        this.stickyBindings.delete(stickyKey);
+      }
+    }
+
+    private removeStickyBindingsForAccount(uuid: string): void {
+      for (const [stickyKey, binding] of this.stickyBindings) {
+        if (binding.accountUuid === uuid) {
+          this.stickyBindings.delete(stickyKey);
+        }
+      }
+    }
+
+    private replaceStickyBindingAccountUuid(previousUuid: string, nextUuid: string): void {
+      for (const binding of this.stickyBindings.values()) {
+        if (binding.accountUuid === previousUuid) {
+          binding.accountUuid = nextUuid;
+          binding.updatedAt = Date.now();
+        }
+      }
     }
 
     private selectRoundRobin(eligible: ManagedAccount[], claims: ClaimsMap): ManagedAccount | null {
@@ -514,6 +613,7 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       if (!removed) return;
 
       this.last429Map.delete(uuid);
+      this.removeStickyBindingsForAccount(uuid);
       this.runtimeFactory?.invalidate(uuid);
       await this.refresh();
       await this.clearOpenCodeAuthIfNoAccountsRemain();
@@ -610,6 +710,10 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
         this.store.setActiveUuid(result.patch.uuid).catch(() => {});
       }
 
+      if (result.patch.uuid && result.patch.uuid !== uuid) {
+        this.replaceStickyBindingAccountUuid(uuid, result.patch.uuid);
+      }
+
       if (updated && (uuid === this.activeAccountUuid || updated.uuid === this.activeAccountUuid)) {
         this.syncToOpenCode(updated);
       }
@@ -646,6 +750,7 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
 
       const removed = await this.store.removeAccount(account.uuid);
       if (removed) {
+        this.removeStickyBindingsForAccount(account.uuid);
         await this.refresh();
       }
       return removed;
@@ -655,6 +760,7 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       await this.store.clear();
       this.cached = [];
       this.activeAccountUuid = undefined;
+      this.stickyBindings.clear();
     }
 
     async addAccount(auth: OAuthCredentials, email?: string): Promise<void> {
@@ -743,6 +849,10 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
         if (this.activeAccountUuid === uuid && result.patch.uuid && result.patch.uuid !== uuid) {
           this.activeAccountUuid = result.patch.uuid;
           await this.store.setActiveUuid(result.patch.uuid);
+        }
+
+        if (result.patch.uuid && result.patch.uuid !== uuid) {
+          this.replaceStickyBindingAccountUuid(uuid, result.patch.uuid);
         }
 
         if (updated && (uuid === this.activeAccountUuid || nextUuid === this.activeAccountUuid)) {

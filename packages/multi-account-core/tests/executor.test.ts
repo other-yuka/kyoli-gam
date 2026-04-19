@@ -42,6 +42,23 @@ type MockManager = {
   getMinWaitTime: ReturnType<typeof vi.fn>;
 };
 
+function createSingleAccountManager(
+  account: ManagedAccount,
+  overrides: Partial<MockManager> = {},
+): MockManager {
+  return {
+    getAccountCount: vi.fn(() => 1),
+    refresh: vi.fn(async () => {}),
+    selectAccount: vi.fn(async () => account),
+    markSuccess: vi.fn(async () => {}),
+    markAuthFailure: vi.fn(async () => {}),
+    markRevoked: vi.fn(async () => {}),
+    hasAnyUsableAccount: vi.fn(() => true),
+    getMinWaitTime: vi.fn(() => 0),
+    ...overrides,
+  };
+}
+
 function createRotatingManager(accounts: ManagedAccount[]): MockManager {
   let selectIndex = 0;
 
@@ -100,8 +117,11 @@ function createTokenRefreshError(permanent: boolean, status?: number): Error {
   });
 }
 
-function createExecutor(handleRateLimitResponse: ReturnType<typeof vi.fn>) {
-  return createExecutorForProvider("Anthropic", {
+function createExecutor(
+  provider: "Anthropic" | "Codex",
+  handleRateLimitResponse: ReturnType<typeof vi.fn> = vi.fn(async () => {}),
+) {
+  return createExecutorForProvider(provider, {
     handleRateLimitResponse,
     formatWaitTime: (ms) => `${ms}ms`,
     sleep: async () => {},
@@ -119,31 +139,11 @@ describe("core/executor", () => {
 
   test("returns response on first success", async () => {
     const account = createAccount();
-    const manager = {
-      getAccountCount: () => 1,
-      refresh: async () => {},
-      selectAccount: async () => account,
-      markSuccess: vi.fn(async () => {}),
-      markAuthFailure: vi.fn(async () => {}),
-      markRevoked: vi.fn(async () => {}),
-      hasAnyUsableAccount: () => true,
-      getMinWaitTime: () => 0,
-    };
-
-    const runtimeFactory = {
-      getRuntime: async () => ({
-        fetch: async () => new Response(JSON.stringify({ ok: true }), { status: 200 }),
-      }),
-      invalidate: vi.fn(),
-    };
-
-    const { executeWithAccountRotation } = createExecutorForProvider("Codex", {
-      handleRateLimitResponse: async () => {},
-      formatWaitTime: (ms) => `${ms}ms`,
-      sleep: async () => {},
-      showToast: async () => {},
-      getAccountLabel: () => "Account",
+    const manager = createSingleAccountManager(account);
+    const runtimeFactory = createQueuedRuntimeFactory({
+      "acct-1": [jsonResponse(200, { ok: true })],
     });
+    const { executeWithAccountRotation } = createExecutor("Codex");
 
     const response = await executeWithAccountRotation(
       manager,
@@ -156,39 +156,38 @@ describe("core/executor", () => {
     expect(manager.markSuccess).toHaveBeenCalledWith("acct-1");
   });
 
+  test("passes session header through as sticky key", async () => {
+    const account = createAccount();
+    const manager = createSingleAccountManager(account);
+    const runtimeFactory = createQueuedRuntimeFactory({
+      "acct-1": [jsonResponse(200, { ok: true })],
+    });
+    const { executeWithAccountRotation } = createExecutor("Codex");
+
+    await executeWithAccountRotation(
+      manager,
+      runtimeFactory,
+      client,
+      "https://api.example.com",
+      {
+        headers: {
+          "x-claude-code-session-id": "session-123",
+        },
+      },
+    );
+
+    expect(manager.selectAccount).toHaveBeenCalledWith("session-123");
+  });
+
   test("handles 429 by calling rate-limit handler", async () => {
     const account = createAccount();
-    const manager = {
-      getAccountCount: () => 1,
-      refresh: async () => {},
-      selectAccount: async () => account,
-      markSuccess: vi.fn(async () => {}),
-      markAuthFailure: vi.fn(async () => {}),
-      markRevoked: vi.fn(async () => {}),
-      hasAnyUsableAccount: () => true,
-      getMinWaitTime: () => 0,
-    };
-
-    let calls = 0;
-    const runtimeFactory = {
-      getRuntime: async () => ({
-        fetch: async () => {
-          calls += 1;
-          if (calls === 1) return new Response("", { status: 429 });
-          return new Response("ok", { status: 200 });
-        },
-      }),
-      invalidate: vi.fn(),
-    };
+    const manager = createSingleAccountManager(account);
+    const runtimeFactory = createQueuedRuntimeFactory({
+      "acct-1": [new Response("", { status: 429 }), new Response("ok", { status: 200 })],
+    });
 
     const handleRateLimitResponse = vi.fn(async () => {});
-    const { executeWithAccountRotation } = createExecutorForProvider("Anthropic", {
-      handleRateLimitResponse,
-      formatWaitTime: (ms) => `${ms}ms`,
-      sleep: async () => {},
-      showToast: async () => {},
-      getAccountLabel: () => "Account",
-    });
+    const { executeWithAccountRotation } = createExecutor("Anthropic", handleRateLimitResponse);
 
     const response = await executeWithAccountRotation(manager, runtimeFactory, client, "https://api.example.com");
     expect(response.status).toBe(200);
@@ -197,29 +196,14 @@ describe("core/executor", () => {
 
   test("throws provider-scoped auth error when all accounts unusable", async () => {
     const account = createAccount();
-    const manager = {
-      getAccountCount: () => 1,
-      refresh: async () => {},
-      selectAccount: async () => account,
-      markSuccess: vi.fn(async () => {}),
-      markAuthFailure: vi.fn(async () => {}),
-      markRevoked: vi.fn(async () => {}),
-      hasAnyUsableAccount: () => false,
-      getMinWaitTime: () => 0,
-    };
-
+    const manager = createSingleAccountManager(account, {
+      hasAnyUsableAccount: vi.fn(() => false),
+    });
     const runtimeFactory = {
       getRuntime: async () => ({ fetch: async () => new Response("", { status: 401 }) }),
       invalidate: vi.fn(),
     };
-
-    const { executeWithAccountRotation } = createExecutorForProvider("Codex", {
-      handleRateLimitResponse: async () => {},
-      formatWaitTime: (ms) => `${ms}ms`,
-      sleep: async () => {},
-      showToast: async () => {},
-      getAccountLabel: () => "Account",
-    });
+    const { executeWithAccountRotation } = createExecutor("Codex");
 
     await expect(
       executeWithAccountRotation(manager, runtimeFactory, client, "https://api.example.com"),
@@ -239,7 +223,7 @@ describe("core/executor", () => {
     });
 
     const handleRateLimitResponse = vi.fn(async () => {});
-    const { executeWithAccountRotation } = createExecutor(handleRateLimitResponse);
+    const { executeWithAccountRotation } = createExecutor("Anthropic", handleRateLimitResponse);
 
     const response = await executeWithAccountRotation(manager, runtimeFactory, client, "https://api.example.com");
 
@@ -263,7 +247,7 @@ describe("core/executor", () => {
       "acct-2": [jsonResponse(200, { ok: true })],
     });
 
-    const { executeWithAccountRotation } = createExecutor(vi.fn(async () => {}));
+    const { executeWithAccountRotation } = createExecutor("Anthropic");
 
     const response = await executeWithAccountRotation(manager, runtimeFactory, client, "https://api.example.com");
 
@@ -285,7 +269,7 @@ describe("core/executor", () => {
       ],
     });
 
-    const { executeWithAccountRotation } = createExecutor(vi.fn(async () => {}));
+    const { executeWithAccountRotation } = createExecutor("Anthropic");
 
     const response = await executeWithAccountRotation(manager, runtimeFactory, client, "https://api.example.com");
 
@@ -306,7 +290,7 @@ describe("core/executor", () => {
       "acct-2": [jsonResponse(200, { ok: true })],
     });
 
-    const { executeWithAccountRotation } = createExecutor(vi.fn(async () => {}));
+    const { executeWithAccountRotation } = createExecutor("Anthropic");
 
     const response = await executeWithAccountRotation(manager, runtimeFactory, client, "https://api.example.com");
 
@@ -340,7 +324,7 @@ describe("core/executor", () => {
     });
 
     const handleRateLimitResponse = vi.fn(async () => {});
-    const { executeWithAccountRotation } = createExecutor(handleRateLimitResponse);
+    const { executeWithAccountRotation } = createExecutor("Anthropic", handleRateLimitResponse);
 
     await expect(
       executeWithAccountRotation(manager, runtimeFactory, client, "https://api.example.com"),
@@ -362,7 +346,7 @@ describe("core/executor", () => {
       "acct-2": [jsonResponse(200, { ok: true })],
     });
 
-    const { executeWithAccountRotation } = createExecutor(vi.fn(async () => {}));
+    const { executeWithAccountRotation } = createExecutor("Anthropic");
 
     const response = await executeWithAccountRotation(manager, runtimeFactory, client, "https://api.example.com");
 
@@ -389,7 +373,7 @@ describe("core/executor", () => {
       "acct-2": [jsonResponse(200, { ok: true })],
     });
 
-    const { executeWithAccountRotation } = createExecutor(vi.fn(async () => {}));
+    const { executeWithAccountRotation } = createExecutor("Anthropic");
 
     const response = await executeWithAccountRotation(manager, runtimeFactory, client, "https://api.example.com");
 
