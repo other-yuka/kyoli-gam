@@ -15,13 +15,12 @@ import { loadConfig } from "./config";
 import { ProactiveRefreshQueue } from "./proactive-refresh";
 import { AccountStore } from "./account-store";
 import { AccountRuntimeFactory } from "./runtime-factory";
-import { formatWaitTime, getAccountLabel, showToast } from "./utils";
+import { debugLog, formatWaitTime, getAccountLabel, showToast } from "./utils";
 import { ANTHROPIC_OAUTH_ADAPTER } from "./constants";
 import { loadCCDerivedAuthProfile, loadCCDerivedRequestProfile } from "./cc-derived-profile";
 import {
   checkCCCompat,
   detectDrift,
-  loadTemplate,
   refreshLiveFingerprintAsync,
 } from "./fingerprint-capture";
 import {
@@ -44,6 +43,10 @@ const EMPTY_OAUTH_CREDENTIALS: OAuthCredentials = {
   access: "",
   expires: 0,
 };
+
+if (process.env.CLAUDE_MULTI_ACCOUNT_TRACE_PLUGIN === "1") {
+  console.error("[anthropic-multi-account] module loaded");
+}
 
 
 function extractFirstUserText(input: Record<string, unknown>): string {
@@ -91,6 +94,10 @@ function applyOrderedHeaders(
 }
 
 export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
+  if (process.env.CLAUDE_MULTI_ACCOUNT_TRACE_PLUGIN === "1") {
+    console.error("[anthropic-multi-account] plugin function called");
+  }
+
   const { client } = ctx as unknown as { client: PluginClient } & Record<string, unknown>;
 
   await loadConfig();
@@ -198,7 +205,22 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
     });
 
   const store = new AccountStore();
-  await syncBootstrapAuth(client, store).catch(() => {});
+  await syncBootstrapAuth(client, store)
+    .then((synced) => {
+      debugLog(client, "Bootstrap auth sync completed", { synced });
+    })
+    .catch((error) => {
+      client.app.log({
+        body: {
+          service: ANTHROPIC_OAUTH_ADAPTER.serviceLogName,
+          level: "debug",
+          message: "bootstrap auth sync failed",
+          extra: {
+            error: sanitizeError(error),
+          },
+        },
+      }).catch(() => {});
+    });
 
   let manager: AccountManager | null = null;
   let runtimeFactory: AccountRuntimeFactory | null = null;
@@ -365,14 +387,103 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
         getAuth: () => Promise<unknown>,
         provider: Record<string, unknown>,
       ) {
-        ingestProviderModelsCapabilities((provider.models ?? {}) as Record<string, unknown>);
+        const providerModels = (provider.models ?? {}) as Record<string, unknown>;
+        ingestProviderModelsCapabilities(providerModels);
+        debugLog(client, "Auth loader received provider metadata", {
+          providerId: typeof provider.id === "string" ? provider.id : undefined,
+          providerName: typeof provider.name === "string" ? provider.name : undefined,
+          modelCount: Object.keys(providerModels).length,
+          modelIds: Object.keys(providerModels),
+        });
+
         const auth = await getAuth() as Record<string, unknown>;
+        debugLog(client, "Auth loader resolved auth payload", {
+          authType: typeof auth.type === "string" ? auth.type : undefined,
+          authKeys: Object.keys(auth),
+        });
+
         if (auth.type !== "oauth") {
-          stopHeartbeat();
-          return { apiKey: "", fetch };
+          await syncBootstrapAuth(client, store)
+            .then((synced) => {
+              debugLog(client, "Auth loader requested bootstrap auth sync", { synced });
+            })
+            .catch((error) => {
+              client.app.log({
+                body: {
+                  service: ANTHROPIC_OAUTH_ADAPTER.serviceLogName,
+                  level: "debug",
+                  message: "auth loader bootstrap sync failed",
+                  extra: {
+                    error: sanitizeError(error),
+                  },
+                },
+              }).catch(() => {});
+            });
+
+          const recoveredFromStore = await initializeManagerFromStore();
+          debugLog(client, "Auth loader attempted store recovery", {
+            recoveredFromStore,
+          });
+
+          if (!recoveredFromStore || !manager || !runtimeFactory) {
+            stopHeartbeat();
+            return { apiKey: "", fetch };
+          }
+
+          const authProfile = await loadCCDerivedAuthProfile();
+
+          return {
+            apiKey: "",
+            baseURL: authProfile.apiV1BaseUrl,
+            "chat.headers": async (input: { provider?: { info?: { id?: string } } }, output: { headers: Record<string, string> }) => {
+              if (input.provider?.info?.id !== ANTHROPIC_OAUTH_ADAPTER.authProviderId) return;
+
+              const sessionId = getUpstreamSessionId();
+              applyOrderedHeaders(output, {
+                ...output.headers,
+                ...getStaticHeaders(),
+                ...getPerRequestHeaders(sessionId),
+                "anthropic-beta": getBetaHeader(),
+              });
+            },
+            async fetch(input: RequestInfo | URL, init?: RequestInit) {
+              if (!manager || !runtimeFactory) {
+                stopHeartbeat();
+                return fetch(input, init);
+              }
+
+              if (manager.getAccountCount() === 0) {
+                stopHeartbeat();
+                throw new Error(
+                  "No Anthropic accounts configured. Run `opencode auth login` to add an account.",
+                );
+              }
+
+              ensureHeartbeat(manager.getActiveAccount()?.accessToken);
+
+              if (!poolManager || !cascadeStateManager) {
+                poolManager = new PoolManager();
+                poolManager.loadPools(poolChainConfig.pools);
+                cascadeStateManager = new CascadeStateManager();
+              }
+
+              return executeWithAccountRotation(
+                manager,
+                runtimeFactory,
+                client,
+                input,
+                init,
+                {
+                  poolManager,
+                  cascadeStateManager,
+                  poolChainConfig,
+                },
+              );
+            },
+          };
         }
 
-        for (const model of Object.values((provider as Record<string, unknown>).models ?? {}) as Record<string, unknown>[]) {
+        for (const model of Object.values(providerModels) as Record<string, unknown>[]) {
           if (model) {
             model.cost = { input: 0, output: 0, cache: { read: 0, write: 0 } };
           }
@@ -387,6 +498,11 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
         if (!initializedManager) {
           return { apiKey: "", fetch };
         }
+
+        debugLog(client, "Auth loader initialized manager state", {
+          accountCount: initializedManager.getAccountCount(),
+          activeAccountUuid: initializedManager.getActiveAccount()?.uuid,
+        });
 
         if (initializedManager.getAccountCount() > 0) {
           const activeAccount = initializedManager.getActiveAccount();

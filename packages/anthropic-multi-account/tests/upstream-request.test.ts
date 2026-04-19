@@ -253,27 +253,26 @@ describe("upstream-request", () => {
     expect(result.output_config).toEqual({});
   });
 
-  test("resolveMaxTokens clamps to model-specific caps", () => {
-    expect(resolveMaxTokens("claude-sonnet-4-6", undefined)).toBe(64_000);
-    expect(resolveMaxTokens("claude-haiku-4-5", 80_000)).toBe(64_000);
-    expect(resolveMaxTokens("claude-opus-4-6", undefined)).toBe(128_000);
-    expect(resolveMaxTokens("claude-opus-4-7", 200_000)).toBe(128_000);
-    expect(resolveMaxTokens("claude-opus-4-7", 32_000)).toBe(32_000);
-  });
+test("resolveMaxTokens clamps to the fixed 64k cap", () => {
+  expect(resolveMaxTokens(undefined)).toBe(64_000);
+  expect(resolveMaxTokens(80_000)).toBe(64_000);
+  expect(resolveMaxTokens(200_000)).toBe(64_000);
+  expect(resolveMaxTokens(32_000)).toBe(32_000);
+});
 
-  test("resolveMaxTokens prefers runtime provider metadata when available", () => {
-    ingestProviderModelsCapabilities({
-      "anthropic/claude-sonnet-4-6": {
-        id: "anthropic/claude-sonnet-4-6",
+test("resolveMaxTokens ignores runtime provider max output metadata", () => {
+  ingestProviderModelsCapabilities({
+    "anthropic/claude-sonnet-4-6": {
+      id: "anthropic/claude-sonnet-4-6",
         limit: { output: 12_345 },
         reasoning: false,
       },
-    });
-
-    expect(resolveMaxTokens("claude-sonnet-4-6", undefined)).toBe(12_345);
-    expect(resolveMaxTokens("claude-sonnet-4-6", 20_000)).toBe(12_345);
-    expect(resolveMaxTokens("claude-sonnet-4-6", 10_000)).toBe(10_000);
   });
+
+  expect(resolveMaxTokens(undefined)).toBe(64_000);
+  expect(resolveMaxTokens(20_000)).toBe(20_000);
+  expect(resolveMaxTokens(10_000)).toBe(10_000);
+});
 
   test("buildUpstreamRequest prefers runtime thinking capability metadata when available", () => {
     ingestProviderModelsCapabilities({
@@ -290,7 +289,7 @@ describe("upstream-request", () => {
     }, createIdentity(), createTemplate());
 
     expect("thinking" in result).toBe(false);
-    expect(result.max_tokens).toBe(12_345);
+    expect(result.max_tokens).toBe(64_000);
   });
 
   test("buildUpstreamRequest filters already-injected upstream system entries before rebuilding blocks", () => {

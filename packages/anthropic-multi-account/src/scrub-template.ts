@@ -49,6 +49,20 @@ function cleanupRemovedSections(text: string): string {
     .replace(/(?:\n\s*)+$/, "");
 }
 
+function removeDynamicStatusBlock(text: string): string {
+  return text.replace(
+    /\n\nStatus:\n(?:[\s\S]*?)\n\nRecent commits:\n/g,
+    "\n\nStatus:\n(dynamic)\n\nRecent commits:\n",
+  );
+}
+
+function removeDynamicRecentCommits(text: string): string {
+  return text.replace(
+    /(\n\nRecent commits:\n)(?:[0-9a-f]{7,}\s.*\n?)+/g,
+    "$1(dynamic)\n",
+  );
+}
+
 export function scrubText(text: string): string {
   let scrubbed = text;
 
@@ -99,7 +113,7 @@ export function removeHostContextSections(systemPrompt: string): string {
     keptLines.push(line);
   }
 
-  return cleanupRemovedSections(keptLines.join("\n"));
+  return cleanupRemovedSections(removeDynamicRecentCommits(removeDynamicStatusBlock(keptLines.join("\n"))));
 }
 
 export function scrubObjectStrings(value: unknown): unknown {

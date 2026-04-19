@@ -15,6 +15,7 @@ import {
 } from "../src/upstream-request";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
+import { loadConfig, resetConfigCache } from "../src/config";
 import { createMockClient, setupTestEnv } from "./helpers";
 
 const startHeartbeatMock = vi.fn();
@@ -29,6 +30,7 @@ afterEach(() => {
   resetHeartbeatForTest();
   resetRuntimeModelCapabilitiesForTest();
   resetUpstreamRequestForTest();
+  resetConfigCache();
 });
 
 describe("index", () => {
@@ -51,16 +53,60 @@ describe("index", () => {
     expect(output.system?.[0]).toContain("x-anthropic-billing-header: cc_version=");
   });
 
-  test("auth loader keeps api-key fallback path", async () => {
-    const plugin = await ClaudeMultiAuthPlugin({ client: createMockClient() } as any);
-    const auth = plugin.auth!;
-    const loaded = await auth.loader!(
-      async () => ({ type: "api", key: "" }),
-      { id: "anthropic", name: "Anthropic", env: {}, models: {} } as any,
-    );
+  test("auth loader keeps api-key fallback path when store is empty", async () => {
+    const { cleanup } = await setupTestEnv();
 
-    expect(loaded.apiKey).toBe("");
-    expect(loaded.fetch).toBe(fetch);
+    try {
+      const plugin = await ClaudeMultiAuthPlugin({ client: createMockClient() } as any);
+      const auth = plugin.auth!;
+      const loaded = await auth.loader!(
+        async () => ({ type: "api", key: "" }),
+        { id: "anthropic", name: "Anthropic", env: {}, models: {} } as any,
+      );
+
+      expect(loaded.apiKey).toBe("");
+      expect(loaded.fetch).toBe(fetch);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("auth loader recovers from store when auth payload is not oauth", async () => {
+    const { dir, cleanup } = await setupTestEnv();
+
+    try {
+      await fs.writeFile(join(dir, "anthropic-multi-account-accounts.json"), JSON.stringify({
+        version: 1,
+        activeAccountUuid: "account-1",
+        accounts: [
+          {
+            uuid: "account-1",
+            refreshToken: "refresh-1",
+            accessToken: "access-1",
+            expiresAt: Date.now() + 60_000,
+            addedAt: 1,
+            lastUsed: 1,
+            enabled: true,
+            planTier: "",
+            consecutiveAuthFailures: 0,
+            isAuthDisabled: false,
+          },
+        ],
+      }), "utf-8");
+
+      const plugin = await ClaudeMultiAuthPlugin({ client: createMockClient() } as any);
+      const auth = plugin.auth!;
+      const loaded = await auth.loader!(
+        async () => ({ type: "api", key: "" }),
+        { id: "anthropic", name: "Anthropic", env: {}, models: {} } as any,
+      );
+
+      expect(loaded.apiKey).toBe("");
+      expect(loaded.baseURL).toBe("https://api.anthropic.com/v1");
+      expect(loaded.fetch).not.toBe(fetch);
+    } finally {
+      await cleanup();
+    }
   });
 
   test("auth loader returns Anthropic v1 baseURL for oauth mode", async () => {
@@ -100,6 +146,40 @@ describe("index", () => {
       maxOutputTokens: 64_000,
       supportsThinking: true,
     });
+  });
+
+  test("auth loader emits debug logs for auth and provider models when debug is enabled", async () => {
+    const { dir, cleanup } = await setupTestEnv();
+    const client = createMockClient();
+
+    try {
+      await fs.writeFile(join(dir, "claude-multiauth.json"), JSON.stringify({ debug: true }), "utf-8");
+      await loadConfig();
+      const plugin = await ClaudeMultiAuthPlugin({ client } as any);
+      const auth = plugin.auth!;
+
+      await auth.loader!(
+        async () => ({ type: "oauth", access: "access", refresh: "refresh", expires: Date.now() + 60_000 }),
+        {
+          id: "anthropic",
+          name: "Anthropic",
+          env: {},
+          models: {
+            "anthropic/claude-sonnet-4-6": {
+              id: "anthropic/claude-sonnet-4-6",
+              limit: { output: 64_000 },
+              reasoning: true,
+            },
+          },
+        } as any,
+      );
+
+      expect(client.logs.some((entry) => entry.message === "Auth loader received provider metadata")).toBe(true);
+      expect(client.logs.some((entry) => entry.message === "Auth loader resolved auth payload")).toBe(true);
+      expect(client.logs.some((entry) => entry.message === "Auth loader initialized manager state")).toBe(true);
+    } finally {
+      await cleanup();
+    }
   });
 
   test("auth loader starts heartbeat immediately after oauth manager initialization", async () => {
