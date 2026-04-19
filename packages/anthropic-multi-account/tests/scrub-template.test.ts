@@ -92,6 +92,29 @@ describe("removeHostContextSections", () => {
 
     expect(result).toBe(["# Kept", "body"].join("\n"));
   });
+
+  test("normalizes dynamic plain-text git status blocks", () => {
+    const result = removeHostContextSections([
+      "Current branch: main",
+      "",
+      "Status:",
+      "M src/index.ts",
+      " M package.json",
+      "",
+      "Recent commits:",
+      "abc123 first commit",
+    ].join("\n"));
+
+    expect(result).toBe([
+      "Current branch: main",
+      "",
+      "Status:",
+      "(dynamic)",
+      "",
+      "Recent commits:",
+      "abc123 first commit",
+    ].join("\n"));
+  });
 });
 
 describe("scrubText", () => {

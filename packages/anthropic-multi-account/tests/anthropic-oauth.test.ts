@@ -22,9 +22,21 @@ import { runNodeTokenRequest, setNodeTokenRequestRunnerForTest } from "../src/to
 import { setupTestEnv } from "./helpers";
 
 const EXISTING_SMALL_FILE = import.meta.dir + "/helpers.ts";
+const DETECTED_CLIENT_ID = "11111111-1111-4111-8111-111111111111";
+const OVERRIDE_CLIENT_ID = "33333333-3333-4333-8333-333333333333";
+const DEFAULT_AUTHORIZE_URL = "https://claude.com/cai/oauth/authorize";
+const DEFAULT_TOKEN_URL = "https://platform.claude.com/v1/oauth/token";
+const DEFAULT_BASE_API_URL = "https://api.anthropic.com";
+const DETECTED_BINARY_BLOCK = `BASE_API_URL:"${DEFAULT_BASE_API_URL}" CLIENT_ID:"${DETECTED_CLIENT_ID}" CLAUDE_AI_AUTHORIZE_URL:"${DEFAULT_AUTHORIZE_URL}" TOKEN_URL:"${DEFAULT_TOKEN_URL}" SCOPES:"scope:detected user:sessions:claude_code"`;
 
 describe("anthropic-oauth", () => {
   afterEach(() => {
+    delete process.env.ANTHROPIC_MULTI_ACCOUNT_OAUTH_CLIENT_ID;
+    delete process.env.ANTHROPIC_MULTI_ACCOUNT_OAUTH_AUTHORIZE_URL;
+    delete process.env.ANTHROPIC_MULTI_ACCOUNT_OAUTH_TOKEN_URL;
+    delete process.env.ANTHROPIC_MULTI_ACCOUNT_OAUTH_SCOPES;
+    delete process.env.ANTHROPIC_MULTI_ACCOUNT_OAUTH_OVERRIDE_PATH;
+    delete process.env.ANTHROPIC_MULTI_ACCOUNT_OAUTH_DISABLE_OVERRIDE;
     resetOAuthConfigDetectionForTest();
     setOAuthConfigDetectionOverridesForTest(null);
     anthropicOAuthTestExports.setCallbackServerStarterForTest(null);
@@ -260,6 +272,76 @@ describe("anthropic-oauth", () => {
       const config = await detectOAuthConfig();
       expect(config.source).toBe("fallback");
     });
+
+    test("applies env override above detected config", async () => {
+      const { dir, cleanup } = await setupTestEnv();
+
+      try {
+        const ccPath = `${dir}/claude-override-bin`;
+        await Bun.write(ccPath, "override-test-binary");
+
+        process.env.ANTHROPIC_MULTI_ACCOUNT_OAUTH_CLIENT_ID = OVERRIDE_CLIENT_ID;
+        process.env.ANTHROPIC_MULTI_ACCOUNT_OAUTH_SCOPES = "scope:env user:sessions:claude_code";
+
+        setOAuthConfigDetectionOverridesForTest({
+          findCCBinary: () => ccPath,
+          readBinaryFile: async () => Buffer.from(DETECTED_BINARY_BLOCK),
+        });
+
+        const config = await detectOAuthConfig();
+
+        expect(config.source).toBe("override");
+        expect(config.clientId).toBe(OVERRIDE_CLIENT_ID);
+        expect(config.scopes).toBe("scope:env user:sessions:claude_code");
+        expect(config.tokenUrl).toBe(DEFAULT_TOKEN_URL);
+      } finally {
+        await cleanup();
+      }
+    });
+
+    test("applies file override when env override is absent", async () => {
+      const { dir, cleanup } = await setupTestEnv();
+
+      try {
+        const ccPath = `${dir}/claude-file-override-bin`;
+        const overridePath = `${dir}/oauth-config.override.json`;
+        await Bun.write(ccPath, "override-test-binary");
+        await Bun.write(overridePath, JSON.stringify({
+          authorizeUrl: "https://claude.ai/api/oauth/authorize",
+          baseApiUrl: "https://api.override.anthropic.test",
+        }));
+
+        process.env.ANTHROPIC_MULTI_ACCOUNT_OAUTH_OVERRIDE_PATH = overridePath;
+
+        setOAuthConfigDetectionOverridesForTest({
+          findCCBinary: () => ccPath,
+          readBinaryFile: async () => Buffer.from(DETECTED_BINARY_BLOCK),
+        });
+
+        const config = await detectOAuthConfig();
+
+        expect(config.source).toBe("override");
+        expect(config.authorizeUrl).toBe("https://claude.ai/api/oauth/authorize");
+        expect(config.baseApiUrl).toBe("https://api.override.anthropic.test");
+        expect(config.clientId).toBe(DETECTED_CLIENT_ID);
+      } finally {
+        await cleanup();
+      }
+    });
+
+    test("ignores override sources when disable flag is set", async () => {
+      process.env.ANTHROPIC_MULTI_ACCOUNT_OAUTH_DISABLE_OVERRIDE = "1";
+      process.env.ANTHROPIC_MULTI_ACCOUNT_OAUTH_CLIENT_ID = OVERRIDE_CLIENT_ID;
+
+      setOAuthConfigDetectionOverridesForTest({
+        findCCBinary: () => null,
+      });
+
+      const config = await detectOAuthConfig();
+
+      expect(config.source).toBe("fallback");
+      expect(config.clientId).toBe(FALLBACK.clientId);
+    });
   });
 
   describe("callback server", () => {
@@ -292,15 +374,7 @@ describe("anthropic-oauth", () => {
 
       expect(response.status).toBe(400);
 
-      let thrown: unknown;
-      try {
-        await waitForCode;
-      } catch (error) {
-        thrown = error;
-      }
-
-      expect(thrown).toBeInstanceOf(Error);
-      expect((thrown as Error).message).toContain("state mismatch");
+      await expect(waitForCode).rejects.toThrow("state mismatch");
     });
 
     test("rejects on missing code", async () => {
@@ -316,15 +390,7 @@ describe("anthropic-oauth", () => {
 
       expect(response.status).toBe(400);
 
-      let thrown: unknown;
-      try {
-        await waitForCode;
-      } catch (error) {
-        thrown = error;
-      }
-
-      expect(thrown).toBeInstanceOf(Error);
-      expect((thrown as Error).message).toContain("missing code");
+      await expect(waitForCode).rejects.toThrow("missing code");
     });
 
     test("returns 404 for non-callback paths", async () => {
@@ -346,15 +412,7 @@ describe("anthropic-oauth", () => {
       });
       waitForCode.catch(() => {});
 
-      let thrown: unknown;
-      try {
-        await waitForCode;
-      } catch (error) {
-        thrown = error;
-      }
-
-      expect(thrown).toBeInstanceOf(Error);
-      expect((thrown as Error).message).toContain("timed out");
+      await expect(waitForCode).rejects.toThrow("timed out");
     });
 
     test("stop is idempotent", async () => {
@@ -475,7 +533,7 @@ describe("anthropic-oauth", () => {
       JSON.stringify({ grant_type: "authorization_code" }),
     );
 
-      expect(receivedUserAgent).toBe(getUserAgent());
+    expect(receivedUserAgent).toBe(getUserAgent());
   });
 
   test("postTokenEndpoint parses a valid token response via TokenResponseSchema", async () => {
@@ -522,19 +580,16 @@ describe("anthropic-oauth", () => {
       body: "not-json",
     }));
 
-    let thrown: unknown;
-    try {
-      await anthropicOAuthTestExports.postTokenEndpoint(
+    const thrown = await anthropicOAuthTestExports
+      .postTokenEndpoint(
         "application/json",
         JSON.stringify({ grant_type: "refresh_token" }),
-      );
-    } catch (error) {
-      thrown = error;
-    }
+      )
+      .catch((error) => error as Error);
 
     expect(thrown).toBeInstanceOf(Error);
-    expect((thrown as Error).message).toContain("Anthropic token request returned invalid JSON.");
-    expect((thrown as Error).message).toContain("body=not-json");
+    expect(thrown.message).toContain("Anthropic token request returned invalid JSON.");
+    expect(thrown.message).toContain("body=not-json");
   });
 
   describe("refreshWithOAuth", () => {
@@ -613,16 +668,11 @@ describe("anthropic-oauth", () => {
         status: 401,
       }));
 
-      let thrown: unknown;
-      try {
-        await refreshWithOAuth("expired-refresh");
-      } catch (error) {
-        thrown = error;
-      }
+      const thrown = await refreshWithOAuth("expired-refresh").catch((error) => error as Error);
 
       expect(thrown).toBeInstanceOf(Error);
-      expect((thrown as Error).message).toContain("401");
-      expect((thrown as Error).message).toContain("Anthropic token request failed");
+      expect(thrown.message).toContain("401");
+      expect(thrown.message).toContain("Anthropic token request failed");
     });
   });
 
@@ -698,22 +748,18 @@ describe("anthropic-oauth", () => {
         body: "invalid_grant",
       }));
 
-      let thrown: unknown;
-      try {
-        await anthropicOAuthTestExports.exchangeCodeForTokens({
+      const thrown = await anthropicOAuthTestExports
+        .exchangeCodeForTokens({
           code: "bad-code",
           codeVerifier: "verifier",
           state: "state",
           redirectUri: "http://localhost:12345/callback",
-        });
-      } catch (error) {
-        thrown = error;
-      }
+        })
+        .catch((error) => error as Error);
 
       expect(thrown).toBeInstanceOf(Error);
-      const message = (thrown as Error).message;
-      expect(message).toContain("400");
-      expect(message).toContain("Anthropic token request failed");
+      expect(thrown.message).toContain("400");
+      expect(thrown.message).toContain("Anthropic token request failed");
     });
   });
 
@@ -891,20 +937,15 @@ describe("anthropic-oauth", () => {
         },
       }));
 
-      let thrown: unknown;
-      try {
-        await loginWithOAuth({
+      await expect(
+        loginWithOAuth({
           onAuth: () => {},
-        });
-      } catch (error) {
-        thrown = error;
-      }
-
-      expect(thrown).toBe(waitError);
+        }),
+      ).rejects.toBe(waitError);
       expect(stopCalls).toBe(1);
     });
 
-    test("exports the public login contract", async () => {
+    test("exports the public login contract", () => {
       const callbacks: LoginCallbacks = {
         onAuth: () => {},
       };

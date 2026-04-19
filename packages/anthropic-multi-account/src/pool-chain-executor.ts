@@ -38,7 +38,7 @@ function createQueueAwareManager(
   cascadeStateManager: CascadeStateManager,
 ): PoolChainAccountManager {
   return Object.create(manager, {
-    selectAccount: { value: async function selectAccount() {
+    selectAccount: { value: async function selectAccount(stickyKey?: string) {
       await manager.refresh();
 
       while (queue.length > 0) {
@@ -60,7 +60,7 @@ function createQueueAwareManager(
         return account;
       }
 
-      return manager.selectAccount();
+      return manager.selectAccount(stickyKey);
     }},
   });
 }

@@ -8,6 +8,7 @@ import {
   detectDrift,
   extractTemplate,
   loadTemplate,
+  matchesBundledClaudeCodeFingerprint,
   refreshLiveFingerprintAsync,
   resetFingerprintCaptureForTest,
   setFingerprintCaptureTestOverridesForTest,
@@ -22,23 +23,22 @@ afterEach(() => {
 });
 
 function createLiveTemplate(overrides?: Partial<TemplateData>): TemplateData {
+  const bundled = loadTemplate();
+
   return {
     _version: 1,
     _schemaVersion: 1,
     _captured: new Date().toISOString(),
     _source: "live",
-    agent_identity: "You are Claude Code.",
-    system_prompt: "Use the available tools.",
+    agent_identity: bundled.agent_identity,
+    system_prompt: bundled.system_prompt,
     tools: [
       { name: "Read", input_schema: { type: "object", properties: { filePath: { type: "string" } }, required: ["filePath"] } },
       { name: "Bash", input_schema: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } },
     ],
     tool_names: ["Read", "Bash"],
-    cc_version: "2.1.80",
-    header_values: {
-      "anthropic-version": "2023-06-01",
-      "x-app": "cli",
-    },
+    cc_version: bundled.cc_version,
+    header_values: bundled.header_values,
     ...overrides,
   };
 }
@@ -87,7 +87,7 @@ describe("fingerprint-capture", () => {
       const template = loadTemplate();
 
       expect(template._source).toBe("cached");
-      expect(template.cc_version).toBe("2.1.80");
+      expect(template.cc_version).toBe(createLiveTemplate().cc_version);
       expect(template.tools).toHaveLength(2);
     } finally {
       await cleanup();
@@ -205,6 +205,8 @@ describe("fingerprint-capture", () => {
     const { dir, cleanup } = await setupTestEnv();
 
     try {
+      const bundled = loadTemplate();
+
       const freshTemplate = createLiveTemplate({ _captured: new Date().toISOString() });
       await fs.writeFile(join(dir, CACHE_FILE_NAME), `${JSON.stringify(freshTemplate, null, 2)}\n`, "utf8");
 
@@ -226,22 +228,23 @@ describe("fingerprint-capture", () => {
 
       setFingerprintCaptureTestOverridesForTest({
         findClaudeBinary: () => "/mock/claude",
+        detectCliVersion: () => bundled.cc_version ?? "2.1.114",
         runClaudeCapture: async ({ baseUrl }) => {
           await fetch(`${baseUrl}/v1/messages`, {
             method: "POST",
             headers: {
               "anthropic-version": "2023-06-01",
               "content-type": "application/json",
-              "user-agent": "claude-code/2.1.90",
+              "user-agent": `claude-code/${bundled.cc_version ?? "2.1.114"}`,
               "x-app": "cli",
             },
             body: JSON.stringify({
               system: [
-                "x-anthropic-billing-header: cc_version=2.1.90.abc; cch=00000;",
-                "You are Claude Code.",
-                "Inspect the repo.",
+                `x-anthropic-billing-header: cc_version=${bundled.cc_version ?? "2.1.114"}.abc; cch=00000;`,
+                bundled.agent_identity,
+                bundled.system_prompt,
               ],
-              tools: [{ name: "Read", input_schema: { type: "object", properties: { filePath: { type: "string" } }, required: ["filePath"] } }],
+              tools: bundled.tools,
             }),
           });
         },
@@ -249,11 +252,11 @@ describe("fingerprint-capture", () => {
 
       const refreshed = await refreshLiveFingerprintAsync();
       expect(refreshed?._source).toBe("live");
-      expect(refreshed?.cc_version).toBe("2.1.90");
+      expect(refreshed?.cc_version).toBe(bundled.cc_version);
 
       const loaded = loadTemplate();
       expect(loaded._source).toBe("cached");
-      expect(loaded.cc_version).toBe("2.1.90");
+      expect(loaded.cc_version).toBe(bundled.cc_version);
     } finally {
       await cleanup();
     }
@@ -288,7 +291,7 @@ describe("fingerprint-capture", () => {
     expect(checkCCCompat(null).status).toBe("unknown");
     expect(checkCCCompat("dev-build").status).toBe("unknown");
     expect(checkCCCompat("0.9.9").status).toBe("below-min");
-    expect(checkCCCompat("2.1.104").status).toBe("ok");
+    expect(checkCCCompat("2.1.114").status).toBe("ok");
     expect(checkCCCompat("9.0.0").status).toBe("untested-above");
   });
 
@@ -328,6 +331,58 @@ describe("fingerprint-capture", () => {
       const template = loadTemplate();
 
       expect(template._source).toBe("bundled");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("loadTemplate quarantines cached data when cached version mismatches bundled version", async () => {
+    const { dir, cleanup } = await setupTestEnv();
+
+    try {
+      setFingerprintCaptureTestOverridesForTest({
+        detectCliVersion: () => "2.1.114",
+      });
+
+      await fs.writeFile(
+        join(dir, CACHE_FILE_NAME),
+        `${JSON.stringify(createLiveTemplate({ cc_version: "2.1.111" }), null, 2)}\n`,
+        "utf8",
+      );
+
+      const template = loadTemplate();
+      const files = await fs.readdir(dir);
+
+      expect(template._source).toBe("bundled");
+      expect(files).not.toContain(CACHE_FILE_NAME);
+      expect(files.some((file) => file.startsWith(`${CACHE_FILE_NAME}.stale-`))).toBe(true);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("loadTemplate quarantines cached data when cached version mismatches installed version", async () => {
+    const { dir, cleanup } = await setupTestEnv();
+
+    try {
+      setFingerprintCaptureTestOverridesForTest({
+        detectCliVersion: () => "2.1.114",
+      });
+
+      const bundled = loadTemplate();
+
+      await fs.writeFile(
+        join(dir, CACHE_FILE_NAME),
+        `${JSON.stringify({ ...bundled, _source: "live", _captured: new Date().toISOString(), cc_version: "2.1.113" }, null, 2)}\n`,
+        "utf8",
+      );
+
+      const template = loadTemplate();
+      const files = await fs.readdir(dir);
+
+      expect(template._source).toBe("bundled");
+      expect(files).not.toContain(CACHE_FILE_NAME);
+      expect(files.some((file) => file.startsWith(`${CACHE_FILE_NAME}.stale-`))).toBe(true);
     } finally {
       await cleanup();
     }
@@ -444,32 +499,41 @@ describe("fingerprint-capture", () => {
     }
   });
 
-  test("bundled template retains Claude Code identity and expected tool set", async () => {
+  test("bundled template retains the current bundled identity and expected tool set", async () => {
     const { cleanup } = await setupTestEnv();
 
     try {
       const template = loadTemplate();
 
       expect(template._source).toBe("bundled");
-      expect(template.agent_identity).toContain("Claude Code");
+      expect(template.agent_identity).toContain("Claude Agent SDK");
       expect(template.tool_names).toEqual([
+        "Agent",
+        "AskUserQuestion",
         "Bash",
-        "Read",
-        "Write",
+        "CronCreate",
+        "CronDelete",
+        "CronList",
         "Edit",
+        "EnterPlanMode",
+        "EnterWorktree",
+        "ExitPlanMode",
+        "ExitWorktree",
         "Glob",
         "Grep",
-        "WebFetch",
-        "TodoWrite",
-        "TaskCreate",
-        "TaskGet",
-        "TaskList",
-        "TaskOutput",
-        "TaskStop",
-        "LSP",
         "Monitor",
         "NotebookEdit",
+        "PushNotification",
+        "Read",
+        "RemoteTrigger",
+        "ScheduleWakeup",
         "Skill",
+        "TaskOutput",
+        "TaskStop",
+        "TodoWrite",
+        "WebFetch",
+        "WebSearch",
+        "Write",
       ]);
     } finally {
       await cleanup();
@@ -530,6 +594,8 @@ describe("fingerprint-capture", () => {
     const { dir, cleanup } = await setupTestEnv();
 
     try {
+      const bundled = loadTemplate();
+
       const invalidFreshTemplate = createLiveTemplate({
         _captured: new Date().toISOString(),
         _schemaVersion: 0,
@@ -555,10 +621,10 @@ describe("fingerprint-capture", () => {
             body: JSON.stringify({
               system: [
                 "x-anthropic-billing-header: cc_version=2.1.95.abc; cch=00000;",
-                "You are Claude Code.",
-                "Freshly recaptured prompt.",
+                bundled.agent_identity,
+                bundled.system_prompt,
               ],
-              tools: [{ name: "Read", input_schema: { type: "object", properties: { filePath: { type: "string" } }, required: ["filePath"] } }],
+              tools: bundled.tools,
             }),
           });
         },
@@ -568,7 +634,7 @@ describe("fingerprint-capture", () => {
 
       expect(refreshed?._source).toBe("live");
       expect(refreshed?.cc_version).toBe("2.1.95");
-      expect(refreshed?.system_prompt).toContain("Freshly recaptured prompt.");
+      expect(refreshed?.system_prompt.trim()).toBe(bundled.system_prompt.trim());
     } finally {
       await cleanup();
     }
@@ -578,6 +644,8 @@ describe("fingerprint-capture", () => {
     const { dir, cleanup } = await setupTestEnv();
 
     try {
+      const bundled = loadTemplate();
+
       const staleTemplate = createLiveTemplate({
         _captured: new Date(Date.now() - (26 * 60 * 60 * 1000)).toISOString(),
       });
@@ -597,11 +665,11 @@ describe("fingerprint-capture", () => {
             body: JSON.stringify({
               system: [
                 "x-anthropic-billing-header: cc_version=2.1.90.abc; cch=00000;",
-                "You are Claude Code.",
-                "# Environment\nOS: darwin\n# Remaining\nInspect the repo at /Users/testuser/project.",
+                bundled.agent_identity,
+                `${bundled.system_prompt}\n# Environment\nOS: darwin\n# Remaining\nInspect the repo at /Users/testuser/project.`,
               ],
-              tools: [
-                { name: "Read", description: "Read files at /Users/testuser/project" },
+                tools: [
+                ...bundled.tools,
                 { name: "mcp__secret__tool", description: "Secret tool" },
               ],
             }),
@@ -619,6 +687,67 @@ describe("fingerprint-capture", () => {
       const cachedJson = JSON.parse(await fs.readFile(join(dir, CACHE_FILE_NAME), "utf8")) as Record<string, unknown>;
       const cachedTools = cachedJson.tools as Array<{ name: string }>;
       expect(cachedTools.some((t) => t.name === "mcp__secret__tool")).toBe(true);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("refreshLiveFingerprintAsync rejects Agent SDK-style captures and preserves bundled fallback", async () => {
+    const { dir, cleanup } = await setupTestEnv();
+
+    try {
+      setFingerprintCaptureTestOverridesForTest({
+        findClaudeBinary: () => "/mock/claude",
+        runClaudeCapture: async ({ baseUrl }) => {
+          await fetch(`${baseUrl}/v1/messages`, {
+            method: "POST",
+            headers: {
+              "anthropic-version": "2023-06-01",
+              "content-type": "application/json",
+              "user-agent": "claude-cli/2.1.114 (external, sdk-cli)",
+              "x-app": "cli",
+            },
+            body: JSON.stringify({
+              system: [
+                "x-anthropic-billing-header: cc_version=2.1.114.bb5; cch=00000;",
+                "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+                "You are an interactive agent that helps users with software engineering tasks.",
+              ],
+              tools: [
+                { name: "Agent", input_schema: { type: "object", properties: {} } },
+                { name: "AskUserQuestion", input_schema: { type: "object", properties: {} } },
+              ],
+            }),
+          });
+        },
+      });
+
+      const refreshed = await refreshLiveFingerprintAsync({ force: true });
+
+      expect(refreshed).toBeNull();
+      expect(loadTemplate()._source).toBe("bundled");
+      expect(await fs.access(join(dir, CACHE_FILE_NAME)).then(() => true).catch(() => false)).toBe(false);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("matchesBundledClaudeCodeFingerprint rejects mismatched identity or tool set", async () => {
+    const { cleanup } = await setupTestEnv();
+
+    try {
+      const bundled = loadTemplate();
+
+      expect(matchesBundledClaudeCodeFingerprint(bundled)).toBe(true);
+      expect(matchesBundledClaudeCodeFingerprint({
+        ...bundled,
+        agent_identity: "Different agent identity",
+      })).toBe(false);
+      expect(matchesBundledClaudeCodeFingerprint({
+        ...bundled,
+        tools: [{ name: "Agent", input_schema: { type: "object", properties: {} } }],
+        tool_names: ["Agent"],
+      })).toBe(false);
     } finally {
       await cleanup();
     }

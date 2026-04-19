@@ -22,6 +22,7 @@ const LIVE_TTL_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_CAPTURE_TIMEOUT_MS = 10_000;
 const CACHE_FILE_NAME = "fingerprint-cache.json";
 const CORRUPT_SUFFIX = ".corrupt";
+const STALE_SUFFIX = ".stale";
 const LOOPBACK_HOST = "127.0.0.1";
 const STATIC_HEADER_NAMES = [
   "accept",
@@ -35,7 +36,7 @@ const STATIC_HEADER_NAMES = [
 ] as const;
 const SUPPORTED_CC_RANGE = {
   min: "1.0.0",
-  maxTested: "2.1.104",
+  maxTested: "2.1.114",
 } as const;
 
 type TemplateSource = "bundled" | "cached" | "live";
@@ -162,6 +163,18 @@ export function prepareBundledTemplate(template: TemplateData): TemplateData {
   };
 }
 
+export function matchesBundledClaudeCodeFingerprint(
+  template: TemplateData,
+  reference: TemplateData = bundledTemplate,
+): boolean {
+  const expectedToolNames = reference.tool_names;
+  const actualToolNames = template.tools.map((tool) => tool.name);
+  const matchesExpectedTools = actualToolNames.length === expectedToolNames.length
+    && expectedToolNames.every((name, index) => actualToolNames[index] === name);
+
+  return template.agent_identity === reference.agent_identity && matchesExpectedTools;
+}
+
 function loadBundledTemplate(): TemplateData {
   if (bundledTemplate._schemaVersion !== CURRENT_SCHEMA_VERSION) {
     throw new Error(
@@ -172,16 +185,24 @@ function loadBundledTemplate(): TemplateData {
   return prepareBundledTemplate(bundledTemplate);
 }
 
-function quarantineCorruptCache(cachePath: string): void {
+function quarantineCache(cachePath: string, suffix: string): void {
   if (!existsSync(cachePath)) {
     return;
   }
 
   try {
-    const quarantinedPath = `${cachePath}${CORRUPT_SUFFIX}-${now()}-${process.pid}`;
+    const quarantinedPath = `${cachePath}${suffix}-${now()}-${process.pid}`;
     renameSync(cachePath, quarantinedPath);
   } catch {
   }
+}
+
+function quarantineCorruptCache(cachePath: string): void {
+  quarantineCache(cachePath, CORRUPT_SUFFIX);
+}
+
+function quarantineStaleCache(cachePath: string): void {
+  quarantineCache(cachePath, STALE_SUFFIX);
 }
 
 function readLiveCacheSync(sourceOverride: TemplateSource = "cached"): TemplateData | null {
@@ -209,6 +230,18 @@ function readLiveCacheSync(sourceOverride: TemplateSource = "cached"): TemplateD
 function isFreshTemplate(template: TemplateData): boolean {
   const capturedAt = Date.parse(template._captured);
   return Number.isFinite(capturedAt) && (now() - capturedAt) < LIVE_TTL_MS;
+}
+
+function hasVersionMismatch(template: TemplateData, bundled: TemplateData, installedVersion: string | null): boolean {
+  if (template.cc_version && bundled.cc_version && template.cc_version !== bundled.cc_version) {
+    return true;
+  }
+
+  if (template.cc_version && installedVersion && template.cc_version !== installedVersion) {
+    return true;
+  }
+
+  return false;
 }
 
 async function atomicWriteJson(targetPath: string, payload: unknown): Promise<void> {
@@ -417,11 +450,18 @@ function probeInstalledCCVersion(): string | null {
 
 export function loadTemplate(): TemplateData {
   const cached = readLiveCacheSync("cached");
+  const bundled = loadBundledTemplate();
   if (cached && isUsableTemplate(cached)) {
+    const installedVersion = probeInstalledCCVersion();
+    if (hasVersionMismatch(cached, bundled, installedVersion)) {
+      quarantineStaleCache(getCachePath());
+      return bundled;
+    }
+
     return cached;
   }
 
-  return loadBundledTemplate();
+  return bundled;
 }
 
 export function extractTemplate(captured: CapturedRequest): TemplateData | null {
@@ -546,6 +586,11 @@ export async function refreshLiveFingerprintAsync(options?: {
     }
 
     const scrubbed = scrubTemplate(live, { dropMcpTools: false });
+    const comparableTemplate = prepareBundledTemplate(scrubTemplate(live, { dropMcpTools: true }));
+    if (!matchesBundledClaudeCodeFingerprint(comparableTemplate)) {
+      return null;
+    }
+
     await writeLiveCache(scrubbed);
     return scrubbed;
   } catch {

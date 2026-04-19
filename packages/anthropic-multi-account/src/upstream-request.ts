@@ -258,12 +258,7 @@ const ADAPTIVE_THINKING_MODEL_MATCHERS = [
   (modelId: string) => modelId.includes("claude-opus-4-6") || modelId.includes("claude-opus-4.6"),
   (modelId: string) => /claude-opus-4[-._]([7-9]|\d{2,})/.test(modelId),
 ];
-const LARGE_OUTPUT_MODEL_MATCHERS = [
-  (modelId: string) => modelId.includes("claude-opus-4-6") || modelId.includes("claude-opus-4.6"),
-  (modelId: string) => /claude-opus-4[-._]([7-9]|\d{2,})/.test(modelId),
-];
 const DEFAULT_MAX_OUTPUT_TOKENS = 64_000;
-const LARGE_MODEL_MAX_OUTPUT_TOKENS = 128_000;
 
 function normalizeModelId(modelId: string): string {
   return modelId.trim().toLowerCase();
@@ -283,20 +278,12 @@ function supportsAdaptiveThinking(modelId: string): boolean {
   return ADAPTIVE_THINKING_MODEL_MATCHERS.some((matches) => matches(normalized));
 }
 
-function getModelMaxOutputTokens(modelId: string): number {
-  const runtimeCapability = getRuntimeModelCapability(modelId);
-  if (typeof runtimeCapability?.maxOutputTokens === "number") {
-    return runtimeCapability.maxOutputTokens;
-  }
-
-  const normalized = normalizeModelId(modelId);
-  return LARGE_OUTPUT_MODEL_MATCHERS.some((matches) => matches(normalized))
-    ? LARGE_MODEL_MAX_OUTPUT_TOKENS
-    : DEFAULT_MAX_OUTPUT_TOKENS;
+function getModelMaxOutputTokens(): number {
+  return DEFAULT_MAX_OUTPUT_TOKENS;
 }
 
-export function resolveMaxTokens(modelId: string, requestedMaxTokens: unknown): number {
-  const modelCap = getModelMaxOutputTokens(modelId);
+export function resolveMaxTokens(requestedMaxTokens: unknown): number {
+  const modelCap = getModelMaxOutputTokens();
   if (typeof requestedMaxTokens !== "number" || !Number.isFinite(requestedMaxTokens)) {
     return modelCap;
   }
@@ -641,7 +628,7 @@ export function buildUpstreamRequest(
     body.context_management = DEFAULT_CONTEXT_MANAGEMENT;
     body.output_config = DEFAULT_OUTPUT_CONFIG;
   }
-  body.max_tokens = resolveMaxTokens(modelId, body.max_tokens);
+  body.max_tokens = resolveMaxTokens(body.max_tokens);
 
   return orderBodyForOutbound(body, template.body_field_order);
 }

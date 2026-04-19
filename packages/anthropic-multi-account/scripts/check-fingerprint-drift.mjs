@@ -1,5 +1,6 @@
 import {
   captureLiveTemplateAsync,
+  matchesBundledClaudeCodeFingerprint,
   prepareBundledTemplate,
 } from "../dist/fingerprint-capture.js";
 import {
@@ -39,6 +40,7 @@ async function main() {
   const normalized = prepareBundledTemplate(scrubbed);
   const residualHits = findUserPathHits(JSON.stringify(normalized));
   const summary = summarizeDiff(bundled, normalized);
+  const captureMatchesBundledIdentity = matchesBundledClaudeCodeFingerprint(normalized, bundled);
   const drift = residualHits.length > 0
     || !summary.agentIdentityMatches
     || !summary.systemPromptMatches
@@ -48,6 +50,7 @@ async function main() {
     drift,
     checkedAt: new Date().toISOString(),
     residualUserPathHits: residualHits,
+    captureMatchesBundledIdentity,
     summary,
   }, null, 2));
 

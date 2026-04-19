@@ -1,6 +1,7 @@
 import { writeFile } from "node:fs/promises";
 import {
   captureLiveTemplateAsync,
+  matchesBundledClaudeCodeFingerprint,
   prepareBundledTemplate,
 } from "../dist/fingerprint-capture.js";
 import {
@@ -15,13 +16,7 @@ import {
 const captureTimeoutMs = Number(process.env.FINGERPRINT_CAPTURE_TIMEOUT_MS ?? "10000");
 
 function assertClaudeCodeFingerprint(template, pinnedTemplate) {
-  const toolNames = template.tools.map((tool) => tool.name);
-  const expectedToolNames = Array.isArray(pinnedTemplate.tool_names) ? pinnedTemplate.tool_names : [];
-  const matchesExpectedTools = toolNames.length === expectedToolNames.length
-    && expectedToolNames.every((name, index) => toolNames[index] === name);
-  const matchesExpectedIdentity = template.agent_identity === pinnedTemplate.agent_identity;
-
-  if (!matchesExpectedIdentity || !matchesExpectedTools) {
+  if (!matchesBundledClaudeCodeFingerprint(template, pinnedTemplate)) {
     throw new Error(
       "captured fingerprint does not match bundled Claude Code identity; refusing to overwrite fallback template",
     );

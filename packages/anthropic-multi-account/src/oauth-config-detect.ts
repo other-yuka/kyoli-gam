@@ -12,7 +12,7 @@ export interface DetectedOAuthConfig {
   tokenUrl: string;
   scopes: string;
   baseApiUrl: string;
-  source: "detected" | "cached" | "fallback";
+  source: "detected" | "cached" | "fallback" | "override";
   ccPath?: string;
   ccHash?: string;
 }
@@ -37,6 +37,7 @@ const SAFE_FALLBACK_SCOPES = "user:profile user:inference user:sessions:claude_c
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CACHE_FILE_NAME = "anthropic-oauth-config-cache.json";
+const DEFAULT_OVERRIDE_FILE_NAME = "oauth-config.override.json";
 const derivedDefaults = derivedDefaultsJson as {
   oauth?: {
     clientId?: string;
@@ -55,6 +56,8 @@ export const FALLBACK: DetectedOAuthConfig = {
   baseApiUrl: derivedDefaults.oauth?.baseApiUrl || "https://api.anthropic.com",
   source: "fallback",
 };
+
+export const FALLBACK_FOR_DRIFT_CHECK = FALLBACK;
 
 function sanitizeScopes(scopes: string | null | undefined): string {
   if (!scopes || scopes.includes(REJECTED_SCOPE)) {
@@ -91,12 +94,7 @@ function extractCandidateBlocks(binaryText: string): string[] {
   const seenRanges = new Set<string>();
   const clientIdMatches = [...binaryText.matchAll(/CLIENT_ID\s*:\s*"([0-9a-f-]{36})"/gi)];
 
-  for (let index = 0; index < clientIdMatches.length; index += 1) {
-    const currentMatch = clientIdMatches[index];
-    if (!currentMatch) {
-      continue;
-    }
-
+  for (const [index, currentMatch] of clientIdMatches.entries()) {
     const currentIndex = currentMatch.index ?? 0;
     const previousClientIdIndex = clientIdMatches[index - 1]?.index;
     const nextClientIdIndex = clientIdMatches[index + 1]?.index;
@@ -223,6 +221,10 @@ function getCachePath(): string {
   return join(getConfigDir(), CACHE_FILE_NAME);
 }
 
+function getDefaultOverridePath(): string {
+  return join(getConfigDir(), DEFAULT_OVERRIDE_FILE_NAME);
+}
+
 function isValidUrl(value: string): boolean {
   try {
     new URL(value);
@@ -253,6 +255,95 @@ function toFallbackConfig(ccPath?: string, ccHash?: string): DetectedOAuthConfig
     ...FALLBACK,
     ...(ccPath ? { ccPath } : {}),
     ...(ccHash ? { ccHash } : {}),
+  };
+}
+
+function isOverrideDisabled(): boolean {
+  return process.env.ANTHROPIC_MULTI_ACCOUNT_OAUTH_DISABLE_OVERRIDE === "1";
+}
+
+function readOverrideString(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function getOverridePath(): string {
+  return readOverrideString(process.env.ANTHROPIC_MULTI_ACCOUNT_OAUTH_OVERRIDE_PATH) ?? getDefaultOverridePath();
+}
+
+function normalizeOverride(value: unknown): Partial<DetectedOAuthConfigPayload> {
+  if (typeof value !== "object" || value === null) {
+    return {};
+  }
+
+  const candidate = value as Record<string, unknown>;
+  const normalized: Partial<DetectedOAuthConfigPayload> = {};
+
+  const clientId = readOverrideString(typeof candidate.clientId === "string" ? candidate.clientId : undefined);
+  if (clientId && UUID_PATTERN.test(clientId)) {
+    normalized.clientId = clientId;
+  }
+
+  const authorizeUrl = readOverrideString(typeof candidate.authorizeUrl === "string" ? candidate.authorizeUrl : undefined);
+  if (authorizeUrl && isValidUrl(authorizeUrl)) {
+    normalized.authorizeUrl = authorizeUrl;
+  }
+
+  const tokenUrl = readOverrideString(typeof candidate.tokenUrl === "string" ? candidate.tokenUrl : undefined);
+  if (tokenUrl && isValidUrl(tokenUrl)) {
+    normalized.tokenUrl = tokenUrl;
+  }
+
+  const scopes = readOverrideString(typeof candidate.scopes === "string" ? candidate.scopes : undefined);
+  if (scopes) {
+    normalized.scopes = sanitizeScopes(scopes);
+  }
+
+  const baseApiUrl = readOverrideString(typeof candidate.baseApiUrl === "string" ? candidate.baseApiUrl : undefined);
+  if (baseApiUrl && isValidUrl(baseApiUrl)) {
+    normalized.baseApiUrl = baseApiUrl;
+  }
+
+  return normalized;
+}
+
+async function loadManualOverride(): Promise<Partial<DetectedOAuthConfigPayload>> {
+  if (isOverrideDisabled()) {
+    return {};
+  }
+
+  const envOverride = normalizeOverride({
+    clientId: process.env.ANTHROPIC_MULTI_ACCOUNT_OAUTH_CLIENT_ID,
+    authorizeUrl: process.env.ANTHROPIC_MULTI_ACCOUNT_OAUTH_AUTHORIZE_URL,
+    tokenUrl: process.env.ANTHROPIC_MULTI_ACCOUNT_OAUTH_TOKEN_URL,
+    scopes: process.env.ANTHROPIC_MULTI_ACCOUNT_OAUTH_SCOPES,
+  });
+  if (Object.keys(envOverride).length > 0) {
+    return envOverride;
+  }
+
+  try {
+    const fileOverride = JSON.parse(await readFile(getOverridePath(), "utf-8")) as unknown;
+    return normalizeOverride(fileOverride);
+  } catch {
+    return {};
+  }
+}
+
+async function applyManualOverride(baseConfig: DetectedOAuthConfig): Promise<DetectedOAuthConfig> {
+  const override = await loadManualOverride();
+  if (Object.keys(override).length === 0) {
+    return baseConfig;
+  }
+
+  return {
+    ...baseConfig,
+    ...override,
+    source: "override",
   };
 }
 
@@ -333,7 +424,7 @@ export async function detectOAuthConfig(): Promise<DetectedOAuthConfig> {
   try {
     const ccPath = (detectorTestOverrides.findCCBinary || findCCBinary)();
     if (!ccPath) {
-      memoizedConfig = FALLBACK;
+      memoizedConfig = await applyManualOverride(FALLBACK);
       return memoizedConfig;
     }
 
@@ -342,32 +433,32 @@ export async function detectOAuthConfig(): Promise<DetectedOAuthConfig> {
     const cachedConfig = cachedEntries[ccHash];
 
     if (cachedConfig) {
-      memoizedConfig = {
+      memoizedConfig = await applyManualOverride({
         ...cachedConfig,
         source: "cached",
         ccPath,
         ccHash,
-      };
+      });
       return memoizedConfig;
     }
 
     const readBinaryFile = detectorTestOverrides.readBinaryFile || readFile;
     const scannedConfig = scanBinaryForOAuthConfig(await readBinaryFile(ccPath));
-    if (!scannedConfig || !isDetectedOAuthConfigPayload(scannedConfig)) {
-      memoizedConfig = toFallbackConfig(ccPath, ccHash);
+    if (!scannedConfig) {
+      memoizedConfig = await applyManualOverride(toFallbackConfig(ccPath, ccHash));
       return memoizedConfig;
     }
 
     await saveCache(ccHash, scannedConfig);
-    memoizedConfig = {
+    memoizedConfig = await applyManualOverride({
       ...scannedConfig,
       source: "detected",
       ccPath,
       ccHash,
-    };
+    });
     return memoizedConfig;
   } catch {
-    memoizedConfig = FALLBACK;
+    memoizedConfig = await applyManualOverride(FALLBACK);
     return memoizedConfig;
   }
 }
