@@ -248,6 +248,28 @@ describe("transformRequestBody", () => {
       await cleanup();
     }
   });
+
+  test("masks the same tool name identically across different first user prompts", async () => {
+    const { cleanup } = await setupTestEnv();
+
+    try {
+      const bodyA = JSON.stringify({
+        tools: [{ name: "search_docs", input_schema: { type: "object" } }],
+        messages: [{ role: "user", content: "first prompt" }],
+      });
+      const bodyB = JSON.stringify({
+        tools: [{ name: "search_docs", input_schema: { type: "object" } }],
+        messages: [{ role: "user", content: "second prompt" }],
+      });
+
+      const parsedA = JSON.parse(transformRequestBody(bodyA) as string) as { tools: Array<{ name?: string }> };
+      const parsedB = JSON.parse(transformRequestBody(bodyB) as string) as { tools: Array<{ name?: string }> };
+
+      expect(parsedA.tools[0]?.name).toBe(parsedB.tools[0]?.name);
+    } finally {
+      await cleanup();
+    }
+  });
 });
 
 describe("transformRequestUrl", () => {

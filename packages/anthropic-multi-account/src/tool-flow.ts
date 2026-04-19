@@ -27,35 +27,9 @@ function shouldMaskToolName(name: string | undefined, claudeToolNames: ReadonlyS
     && !name.startsWith(TOOL_MASK_PREFIX);
 }
 
-function extractFirstUserText(parsed: RequestPayload): string {
-  if (!Array.isArray(parsed.messages)) {
-    return "";
-  }
-
-  const firstUser = parsed.messages.find((message) => message.role === "user");
-  if (!isRecord(firstUser)) {
-    return "";
-  }
-
-  const content = firstUser.content;
-  if (typeof content === "string") {
-    return content.trim();
-  }
-
-  if (!Array.isArray(content)) {
-    return "";
-  }
-
-  return content
-    .filter((block) => isRecord(block) && block.type === "text" && typeof block.text === "string")
-    .map((block) => String(block.text))
-    .join("\n\n")
-    .trim();
-}
-
-function buildMaskedToolName(seed: string, toolName: string, length = 8): string {
+function buildMaskedToolName(toolName: string, length = 8): string {
   const digest = createHash("sha256")
-    .update(`tool-mask:${seed}:${toolName}`)
+    .update(`tool-mask:${toolName}`)
     .digest("hex")
     .slice(0, length);
 
@@ -104,7 +78,6 @@ export function buildRequestScopedToolLookup(
 ): ReverseLookup {
   const lookup: ReverseLookup = new Map();
   const usedOutgoing = new Set<string>();
-  const seed = extractFirstUserText(parsed);
   const claudeToolSet = buildClaudeToolNameSet(claudeToolNames);
 
   for (const originalName of collectToolNames(parsed)) {
@@ -115,10 +88,10 @@ export function buildRequestScopedToolLookup(
     }
 
     let length = 8;
-    let masked = buildMaskedToolName(seed, originalName, length);
+    let masked = buildMaskedToolName(originalName, length);
     while (usedOutgoing.has(masked)) {
       length += 2;
-      masked = buildMaskedToolName(seed, originalName, length);
+      masked = buildMaskedToolName(originalName, length);
     }
 
     lookup.set(masked, originalName);
