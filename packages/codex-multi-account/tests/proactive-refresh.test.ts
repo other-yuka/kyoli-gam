@@ -222,7 +222,7 @@ describe("proactive-refresh", () => {
     expect(updated?.isAuthDisabled).toBe(false);
   });
 
-  test("permanent refresh failure removes account and clears provider auth when pool is empty", async () => {
+  test("permanent refresh failure disables account and keeps provider auth", async () => {
     await seedStorage([
       createAccount(6, { uuid: "permanent", expiresAt: Date.now() + 30_000 }),
     ]);
@@ -235,14 +235,13 @@ describe("proactive-refresh", () => {
     await runCheckNow();
 
     const persisted = await readStorage();
-    const removed = persisted.accounts.find((entry) => entry.uuid === "permanent");
-    expect(removed).toBeUndefined();
-
-    expect(authSetSpy).toHaveBeenCalledTimes(1);
-    expect(authSetSpy).toHaveBeenCalledWith({
-      path: { id: "openai" },
-      body: { type: "oauth", refresh: "", access: "", expires: 0 },
+    expect(persisted.accounts).toHaveLength(1);
+    expect(persisted.accounts[0]).toMatchObject({
+      uuid: "permanent",
+      isAuthDisabled: true,
+      authDisabledReason: "refresh failed permanently (proactive refresh)",
     });
+    expect(authSetSpy).not.toHaveBeenCalled();
   });
 
   test("stop() cancels pending initial timer", async () => {

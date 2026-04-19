@@ -617,7 +617,7 @@ describe("proactive-refresh", () => {
     expect(refreshTokenCalls.length).toBe(1);
   });
 
-  test("persistFailure removes account and clears Anthropic auth for permanent failures", async () => {
+  test("persistFailure disables account and keeps Anthropic auth for permanent failures", async () => {
     await seedStorage([
       createAccount(14, {
         uuid: "permanent-failure-account",
@@ -633,11 +633,13 @@ describe("proactive-refresh", () => {
     await firePendingTimerByDelay(5_000);
 
     const persisted = await readPersistedStorage();
-    expect(persisted.accounts).toHaveLength(0);
-    expect(authSetSpy).toHaveBeenCalledWith({
-      path: { id: "anthropic" },
-      body: { type: "oauth", refresh: "", access: "", expires: 0 },
+    expect(persisted.accounts).toHaveLength(1);
+    expect(persisted.accounts[0]).toMatchObject({
+      uuid: "permanent-failure-account",
+      isAuthDisabled: true,
+      authDisabledReason: "refresh failed permanently (proactive refresh)",
     });
+    expect(authSetSpy).not.toHaveBeenCalled();
   });
 
   test("persistFailure increments consecutiveAuthFailures for transient failures", async () => {
