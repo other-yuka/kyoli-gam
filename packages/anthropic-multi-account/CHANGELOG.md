@@ -1,5 +1,14 @@
 # opencode-anthropic-multi-account
 
+## 0.2.24
+
+### Patch Changes
+
+- [`47e4aed`](https://github.com/other-yuka/kyoli-gam/commit/47e4aed8df3662724244070160ec128ec7d62412) Thanks [@other-yuka](https://github.com/other-yuka)! - Align Anthropic outbound request wire shape and tests with the current upstream parity defaults so releases preserve compatibility with the latest request format changes.
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.24
+
 ## 0.2.23
 
 ### Patch Changes
