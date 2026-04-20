@@ -73,8 +73,12 @@ describe("runtime-factory", () => {
     const transformedUrl = input instanceof URL ? input.toString() : String(input);
     const headers = toHeaders(init?.headers);
     const body = JSON.parse(String(init?.body)) as {
-      system: Array<{ text?: string }>;
+      system: Array<{ text?: string; cache_control?: { type?: string; ttl?: string } }>;
       tools: Array<{ name?: string }>;
+      thinking?: { type?: string };
+      context_management?: Record<string, unknown>;
+      output_config?: { effort?: string };
+      max_tokens?: number;
     };
 
     expect(transformedUrl).toContain("/v1/messages?beta=true");
@@ -83,6 +87,13 @@ describe("runtime-factory", () => {
     expect(headers.get("anthropic-beta")).toContain("effort-2025-11-24");
     expect(body.system).toHaveLength(3);
     expect(body.system[0]?.text).toContain("x-anthropic-billing-header:");
+    expect(body.system[0]?.text).toContain("cc_entrypoint=sdk-cli");
+    expect(body.system[1]?.cache_control).toEqual({ type: "ephemeral" });
+    expect(body.system[1]?.cache_control).not.toHaveProperty("ttl");
+    expect(body.thinking).toEqual({ type: "adaptive" });
+    expect(body.context_management).toEqual({});
+    expect(body.output_config).toEqual({ effort: "high" });
+    expect(body.max_tokens).toBe(32_000);
     expect(body.tools).toHaveLength(1);
     expect(body.tools[0]?.name).toMatch(/^tool_[a-f0-9]+$/);
   });

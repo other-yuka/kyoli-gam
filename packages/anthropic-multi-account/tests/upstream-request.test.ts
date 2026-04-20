@@ -82,6 +82,30 @@ describe("upstream-request", () => {
     expect(assistantBlocks[0]?.text).toBe("before  after");
   });
 
+  test("sanitizeMessages drops empty text blocks after scrubbing while preserving non-text blocks", () => {
+    const body = {
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "before" },
+            { type: "text", text: "<system-reminder>hidden</system-reminder>" },
+            { type: "tool_use", id: "toolu_1", name: "AskUserQuestion", input: { question: "x" } },
+            { type: "text", text: "after" },
+          ],
+        },
+      ],
+    } satisfies Record<string, unknown>;
+
+    sanitizeMessages(body);
+
+    expect(body.messages[0]?.content).toEqual([
+      { type: "text", text: "before" },
+      { type: "tool_use", id: "toolu_1", name: "AskUserQuestion", input: { question: "x" } },
+      { type: "text", text: "after" },
+    ]);
+  });
+
   test("scrubFrameworkIdentifiers removes prose mentions while preserving path-like occurrences", () => {
     const input = "/Users/foo/.opencode/file.ts mentions opencode and openai in prose";
     const output = scrubFrameworkIdentifiers(input);
@@ -161,11 +185,12 @@ describe("upstream-request", () => {
 
     expect(systemBlocks).toHaveLength(3);
     expect(systemBlocks[0]?.text).toContain("x-anthropic-billing-header:");
-    expect(systemBlocks[0]?.text).toMatch(/^x-anthropic-billing-header: cc_version=2\.1\.80\.[a-f0-9]{3}; cc_entrypoint=cli; cch=00000;$/);
+    expect(systemBlocks[0]?.text).toMatch(/^x-anthropic-billing-header: cc_version=2\.1\.80\.[a-f0-9]{3}; cc_entrypoint=sdk-cli; cch=00000;$/);
     expect(systemBlocks[1]).toMatchObject({
       text: template.agent_identity,
       cache_control: { type: "ephemeral" },
     });
+    expect(systemBlocks[1]?.cache_control).not.toHaveProperty("ttl");
     expect(systemBlocks[2]?.text).toContain(template.system_prompt);
     expect(systemBlocks[2]?.text).toContain("Local  reminder");
     expect(systemBlocks[2]?.text).not.toContain("Local opencode reminder");
@@ -174,7 +199,7 @@ describe("upstream-request", () => {
       account_uuid: "account-456",
       session_id: "session-fixed",
     });
-    expect(result.max_tokens).toBe(64_000);
+    expect(result.max_tokens).toBe(32_000);
     expect("thinking" in result).toBe(false);
     expect("context_management" in result).toBe(false);
     expect("output_config" in result).toBe(false);
@@ -258,6 +283,7 @@ describe("upstream-request", () => {
     expect("top_p" in result).toBe(false);
     expect("top_k" in result).toBe(false);
     expect(result.thinking).toEqual({ type: "adaptive" });
+    expect(result.output_config).toEqual({ effort: "high" });
   });
 
   test("buildUpstreamRequest drops incoming thinking controls and does not force adaptive on Haiku", () => {
@@ -287,29 +313,29 @@ describe("upstream-request", () => {
 
     expect(result.thinking).toEqual({ type: "adaptive" });
     expect(result.context_management).toEqual({});
-    expect(result.output_config).toEqual({});
+    expect(result.output_config).toEqual({ effort: "high" });
   });
 
-test("resolveMaxTokens clamps to the fixed 64k cap", () => {
-  expect(resolveMaxTokens(undefined)).toBe(64_000);
-  expect(resolveMaxTokens(80_000)).toBe(64_000);
-  expect(resolveMaxTokens(200_000)).toBe(64_000);
-  expect(resolveMaxTokens(32_000)).toBe(32_000);
-});
+  test("resolveMaxTokens uses the fixed 32k cap edge cases", () => {
+    expect(resolveMaxTokens(undefined)).toBe(32_000);
+    expect(resolveMaxTokens(20_000)).toBe(20_000);
+    expect(resolveMaxTokens(32_000)).toBe(32_000);
+    expect(resolveMaxTokens(50_000)).toBe(32_000);
+  });
 
-test("resolveMaxTokens ignores runtime provider max output metadata", () => {
-  ingestProviderModelsCapabilities({
-    "anthropic/claude-sonnet-4-6": {
-      id: "anthropic/claude-sonnet-4-6",
+  test("resolveMaxTokens ignores runtime provider max output metadata", () => {
+    ingestProviderModelsCapabilities({
+      "anthropic/claude-sonnet-4-6": {
+        id: "anthropic/claude-sonnet-4-6",
         limit: { output: 12_345 },
         reasoning: false,
       },
-  });
+    });
 
-  expect(resolveMaxTokens(undefined)).toBe(64_000);
-  expect(resolveMaxTokens(20_000)).toBe(20_000);
-  expect(resolveMaxTokens(10_000)).toBe(10_000);
-});
+    expect(resolveMaxTokens(undefined)).toBe(32_000);
+    expect(resolveMaxTokens(20_000)).toBe(20_000);
+    expect(resolveMaxTokens(50_000)).toBe(32_000);
+  });
 
   test("buildUpstreamRequest prefers runtime thinking capability metadata when available", () => {
     ingestProviderModelsCapabilities({
@@ -326,13 +352,13 @@ test("resolveMaxTokens ignores runtime provider max output metadata", () => {
     }, createIdentity(), createTemplate());
 
     expect("thinking" in result).toBe(false);
-    expect(result.max_tokens).toBe(64_000);
+    expect(result.max_tokens).toBe(32_000);
   });
 
   test("buildUpstreamRequest filters already-injected upstream system entries before rebuilding blocks", () => {
     const template = createTemplate();
     const firstUserMessage = "hello reviewer";
-    const billingHeader = `x-anthropic-billing-header: cc_version=${template.cc_version}.${computeBuildTag(firstUserMessage, template.cc_version!)}; cc_entrypoint=cli; cch=00000;`;
+    const billingHeader = `x-anthropic-billing-header: cc_version=${template.cc_version}.${computeBuildTag(firstUserMessage, template.cc_version!)}; cc_entrypoint=sdk-cli; cch=00000;`;
 
     const result = buildUpstreamRequest({
       model: "claude-sonnet-4-6",
