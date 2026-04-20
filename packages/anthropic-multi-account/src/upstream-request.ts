@@ -9,7 +9,7 @@ const SESSION_IDLE_ROTATE_MS = 15 * 60 * 1000;
 const MAX_TOOL_RESULT_TEXT_LENGTH = 30 * 1024;
 const TRUNCATION_SUFFIX = "[...truncated]";
 const DEFAULT_CONTEXT_MANAGEMENT = {};
-const DEFAULT_OUTPUT_CONFIG = {};
+const DEFAULT_OUTPUT_CONFIG = { effort: "high" };
 const ORCHESTRATION_TAG_NAMES = [
   "system-reminder",
   "env",
@@ -303,7 +303,7 @@ const ADAPTIVE_THINKING_MODEL_MATCHERS = [
   (modelId: string) => modelId.includes("claude-opus-4-6") || modelId.includes("claude-opus-4.6"),
   (modelId: string) => /claude-opus-4[-._]([7-9]|\d{2,})/.test(modelId),
 ];
-const DEFAULT_MAX_OUTPUT_TOKENS = 64_000;
+const DEFAULT_MAX_OUTPUT_TOKENS = 32_000;
 
 function normalizeModelId(modelId: string): string {
   return modelId.trim().toLowerCase();
@@ -463,7 +463,7 @@ function getCcVersion(template: TemplateData): string {
 function buildBillingHeader(firstUserMessage: string, template: TemplateData): string {
   const version = getCcVersion(template);
   const buildTag = computeBuildTag(firstUserMessage, version);
-  return `x-anthropic-billing-header: cc_version=${version}.${buildTag}; cc_entrypoint=cli; cch=00000;`;
+  return `x-anthropic-billing-header: cc_version=${version}.${buildTag}; cc_entrypoint=sdk-cli; cch=00000;`;
 }
 
 function truncateToolResultText(text: string): string {
@@ -551,6 +551,10 @@ export function sanitizeMessages(body: Record<string, unknown>): void {
         block.text = sanitizeContent(block.text);
       }
     }
+
+    message.content = message.content.filter((block) => {
+      return !isRecord(block) || block.type !== "text" || block.text !== "";
+    });
   }
 }
 
