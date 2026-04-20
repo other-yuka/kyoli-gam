@@ -70,7 +70,7 @@ function extractFirstUserText(input: Record<string, unknown>): string {
 
 function composeBillingSystemEntry(firstUserMessage: string, version: string): string {
   const buildTag = computeBuildTag(firstUserMessage, version);
-  return `x-anthropic-billing-header: cc_version=${version}.${buildTag}; cc_entrypoint=cli; cch=00000;`;
+  return `x-anthropic-billing-header: cc_version=${version}.${buildTag}; cc_entrypoint=sdk-cli; cch=00000;`;
 }
 
 function prependMissingSystemEntries(output: { system?: string[] }, entries: string[]): void {
