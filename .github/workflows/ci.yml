@@ -48,3 +48,28 @@ jobs:
           test -f packages/multi-account-core/dist/index.js
           test -f packages/anthropic-multi-account/dist/index.js
           test -f packages/codex-multi-account/dist/index.js
+
+  build-node-matrix:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - run: bun install
+      - name: Build with Bun
+        run: bun run build
+      - name: Verify dist loads on Node ${{ matrix.node-version }}
+        run: |
+          node --input-type=module -e "
+            import('./packages/multi-account-core/dist/index.js').then(m => console.log('core ok:', Object.keys(m).length, 'exports'));
+            import('./packages/anthropic-multi-account/dist/index.js').then(m => console.log('anthropic ok:', Object.keys(m).length, 'exports'));
+            import('./packages/codex-multi-account/dist/index.js').then(m => console.log('codex ok:', Object.keys(m).length, 'exports'));
+          "

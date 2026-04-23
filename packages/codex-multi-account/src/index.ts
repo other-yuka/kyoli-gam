@@ -1,4 +1,4 @@
-import { tool } from "@opencode-ai/plugin";
+import { tool } from "@opencode-ai/plugin/tool";
 import { migrateFromAuthJson } from "opencode-multi-account-core";
 import { AccountManager } from "./account-manager";
 import { executeWithAccountRotation } from "./executor";

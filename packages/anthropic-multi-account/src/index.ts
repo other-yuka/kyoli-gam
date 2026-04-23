@@ -1,4 +1,4 @@
-import { tool } from "@opencode-ai/plugin";
+import { tool } from "@opencode-ai/plugin/tool";
 import type { Plugin } from "@opencode-ai/plugin";
 import {
   CascadeStateManager,
@@ -7,35 +7,35 @@ import {
   PoolManager,
   type PoolChainConfig,
 } from "opencode-multi-account-core";
-import { AccountManager } from "./account-manager";
-import { executeWithAccountRotation } from "./executor";
+import { AccountManager } from "./accounts/manager";
+import { executeWithAccountRotation } from "./runtime/executor";
 import { getPlanLabel, getUsageSummary } from "./usage";
-import { handleAuthorize } from "./auth-handler";
-import { loadConfig } from "./config";
-import { ProactiveRefreshQueue } from "./proactive-refresh";
-import { AccountStore } from "./account-store";
-import { AccountRuntimeFactory } from "./runtime-factory";
-import { debugLog, formatWaitTime, getAccountLabel, showToast } from "./utils";
-import { ANTHROPIC_OAUTH_ADAPTER } from "./constants";
-import { loadCCDerivedAuthProfile, loadCCDerivedRequestProfile } from "./cc-derived-profile";
+import { handleAuthorize } from "./auth-ux/handler";
+import { loadConfig } from "./shared/config";
+import { ProactiveRefreshQueue } from "./accounts/proactive-refresh";
+import { AccountStore } from "./accounts/store";
+import { AccountRuntimeFactory } from "./runtime/factory";
+import { debugLog, formatWaitTime, getAccountLabel, showToast } from "./shared/utils";
+import { ANTHROPIC_OAUTH_ADAPTER } from "./shared/constants";
+import { loadCCDerivedAuthProfile, loadCCDerivedRequestProfile } from "./claude-code/derived-profile";
 import {
   checkCCCompat,
   detectDrift,
   refreshLiveFingerprintAsync,
-} from "./fingerprint-capture";
+} from "./claude-code/fingerprint/capture";
 import {
   getBetaHeader,
   getPerRequestHeaders,
   getStaticHeaders,
   orderHeadersForOutbound,
-} from "./upstream-headers";
-import { computeBuildTag, getUpstreamSessionId } from "./upstream-request";
-import { loadClaudeIdentity } from "./claude-identity";
-import { syncBootstrapAuth } from "./bootstrap-auth";
-import { sanitizeError } from "./error-utils";
+} from "./request/headers";
+import { computeBuildTag, getUpstreamSessionId } from "./request/upstream-request";
+import { loadClaudeIdentity } from "./claude-code/identity";
+import { syncBootstrapAuth } from "./oauth/bootstrap";
+import { sanitizeError } from "./shared/error-utils";
 import { getSessionId, startHeartbeat } from "./session-heartbeat";
-import type { OAuthCredentials, PluginClient } from "./types";
-import { ingestProviderModelsCapabilities } from "./model-capabilities";
+import type { OAuthCredentials, PluginClient } from "./shared/types";
+import { ingestProviderModelsCapabilities } from "./model/capabilities";
 
 const EMPTY_OAUTH_CREDENTIALS: OAuthCredentials = {
   type: "oauth",
@@ -47,7 +47,6 @@ const EMPTY_OAUTH_CREDENTIALS: OAuthCredentials = {
 if (process.env.CLAUDE_MULTI_ACCOUNT_TRACE_PLUGIN === "1") {
   console.error("[anthropic-multi-account] module loaded");
 }
-
 
 function extractFirstUserText(input: Record<string, unknown>): string {
   try {
@@ -141,6 +140,64 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
       accessToken,
     });
   };
+
+  const ensurePoolInfrastructure = (): void => {
+    if (!poolManager || !cascadeStateManager) {
+      poolManager = new PoolManager();
+      poolManager.loadPools(poolChainConfig.pools);
+      cascadeStateManager = new CascadeStateManager();
+    }
+  };
+
+  const createAuthLoaderResult = (
+    activeManager: AccountManager | null,
+  ): {
+    apiKey: string;
+    "chat.headers": (input: { provider?: { info?: { id?: string } } }, output: { headers: Record<string, string> }) => Promise<void>;
+    fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+  } => ({
+    apiKey: "",
+    "chat.headers": async (input, output) => {
+      if (input.provider?.info?.id !== ANTHROPIC_OAUTH_ADAPTER.authProviderId) return;
+
+      const sessionId = getUpstreamSessionId();
+      applyOrderedHeaders(output, {
+        ...output.headers,
+        ...getStaticHeaders(),
+        ...getPerRequestHeaders(sessionId),
+        "anthropic-beta": getBetaHeader(),
+      });
+    },
+    async fetch(input: RequestInfo | URL, init?: RequestInit) {
+      if (!activeManager || !runtimeFactory) {
+        stopHeartbeat();
+        return fetch(input, init);
+      }
+
+      if (activeManager.getAccountCount() === 0) {
+        stopHeartbeat();
+        throw new Error(
+          "No Anthropic accounts configured. Run `opencode auth login` to add an account.",
+        );
+      }
+
+      ensureHeartbeat(activeManager.getActiveAccount()?.accessToken);
+      ensurePoolInfrastructure();
+
+      return executeWithAccountRotation(
+        activeManager,
+        runtimeFactory,
+        client,
+        input,
+        init,
+        {
+          poolManager: poolManager!,
+          cascadeStateManager: cascadeStateManager!,
+          poolChainConfig,
+        },
+      );
+    },
+  });
 
   const startupDrift = detectDrift(template);
   if (startupDrift.drifted) {
@@ -433,53 +490,8 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
           const authProfile = await loadCCDerivedAuthProfile();
 
           return {
-            apiKey: "",
+            ...createAuthLoaderResult(manager),
             baseURL: authProfile.apiV1BaseUrl,
-            "chat.headers": async (input: { provider?: { info?: { id?: string } } }, output: { headers: Record<string, string> }) => {
-              if (input.provider?.info?.id !== ANTHROPIC_OAUTH_ADAPTER.authProviderId) return;
-
-              const sessionId = getUpstreamSessionId();
-              applyOrderedHeaders(output, {
-                ...output.headers,
-                ...getStaticHeaders(),
-                ...getPerRequestHeaders(sessionId),
-                "anthropic-beta": getBetaHeader(),
-              });
-            },
-            async fetch(input: RequestInfo | URL, init?: RequestInit) {
-              if (!manager || !runtimeFactory) {
-                stopHeartbeat();
-                return fetch(input, init);
-              }
-
-              if (manager.getAccountCount() === 0) {
-                stopHeartbeat();
-                throw new Error(
-                  "No Anthropic accounts configured. Run `opencode auth login` to add an account.",
-                );
-              }
-
-              ensureHeartbeat(manager.getActiveAccount()?.accessToken);
-
-              if (!poolManager || !cascadeStateManager) {
-                poolManager = new PoolManager();
-                poolManager.loadPools(poolChainConfig.pools);
-                cascadeStateManager = new CascadeStateManager();
-              }
-
-              return executeWithAccountRotation(
-                manager,
-                runtimeFactory,
-                client,
-                input,
-                init,
-                {
-                  poolManager,
-                  cascadeStateManager,
-                  poolChainConfig,
-                },
-              );
-            },
           };
         }
 
@@ -527,53 +539,8 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
         const authProfile = await loadCCDerivedAuthProfile();
 
         return {
-          apiKey: "",
+          ...createAuthLoaderResult(initializedManager),
           baseURL: authProfile.apiV1BaseUrl,
-          "chat.headers": async (input: { provider?: { info?: { id?: string } } }, output: { headers: Record<string, string> }) => {
-            if (input.provider?.info?.id !== ANTHROPIC_OAUTH_ADAPTER.authProviderId) return;
-
-            const sessionId = getUpstreamSessionId();
-            applyOrderedHeaders(output, {
-              ...output.headers,
-              ...getStaticHeaders(),
-              ...getPerRequestHeaders(sessionId),
-              "anthropic-beta": getBetaHeader(),
-            });
-          },
-          async fetch(input: RequestInfo | URL, init?: RequestInit) {
-            if (!initializedManager || !runtimeFactory) {
-              stopHeartbeat();
-              return fetch(input, init);
-            }
-
-            if (initializedManager.getAccountCount() === 0) {
-              stopHeartbeat();
-              throw new Error(
-                "No Anthropic accounts configured. Run `opencode auth login` to add an account.",
-              );
-            }
-
-            ensureHeartbeat(initializedManager.getActiveAccount()?.accessToken);
-
-            if (!poolManager || !cascadeStateManager) {
-              poolManager = new PoolManager();
-              poolManager.loadPools(poolChainConfig.pools);
-              cascadeStateManager = new CascadeStateManager();
-            }
-
-            return executeWithAccountRotation(
-              initializedManager,
-              runtimeFactory,
-              client,
-              input,
-              init,
-              {
-                poolManager,
-                cascadeStateManager,
-                poolChainConfig,
-              },
-            );
-          },
         };
       },
     },

@@ -1,4 +1,4 @@
-import { readClaims, writeClaim } from "../../src/claims";
+import { readClaims, writeClaim } from "../../src/accounts/claims";
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => {

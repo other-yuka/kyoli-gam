@@ -3,11 +3,11 @@ import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import * as v from "valibot";
-import { ACCOUNTS_FILENAME, CLAIMS_FILENAME } from "../src/constants";
-import { AccountStore } from "../src/account-store";
-import { loadAccounts } from "../src/storage";
-import { AccountStorageSchema } from "../src/types";
-import type { AccountStorage, StoredAccount } from "../src/types";
+import { ACCOUNTS_FILENAME, CLAIMS_FILENAME } from "../src/shared/constants";
+import { AccountStore } from "../src/accounts/store";
+import { loadAccounts } from "../src/accounts/storage";
+import { AccountStorageSchema } from "../src/shared/types";
+import type { AccountStorage, StoredAccount } from "../src/shared/types";
 import { setupTestEnv } from "../tests/helpers";
 
 const STORAGE_WORKER_PATH = join(process.cwd(), "tests/workers/storage-worker.ts");
@@ -91,7 +91,7 @@ describe("multi-process integration", () => {
     }
   });
 
-  test("concurrent saveAccounts with 5 processes", { timeout: 15_000 }, async () => {
+  test("concurrent saveAccounts with 5 processes", async () => {
     const env = getTestEnv();
     const workers = Array.from({ length: 5 }, (_, index) => {
       const accountId = `save-${index}`;
@@ -123,7 +123,7 @@ describe("multi-process integration", () => {
     }
   });
 
-  test("concurrent claim racing with 3 processes", { timeout: 15_000 }, async () => {
+  test("concurrent claim racing with 3 processes", async () => {
     const env = getTestEnv();
     const accountIds = ["claim-a", "claim-b", "claim-c"];
 
@@ -137,7 +137,7 @@ describe("multi-process integration", () => {
 
     for (const result of results) {
       expect(result.code).toBe(0);
-      expect(result.stdout.length > 0).toBe(true);
+      expect(result.stdout.length).toBeGreaterThan(0);
     }
 
     const rawClaims = await fs.readFile(join(env.dir, CLAIMS_FILENAME), "utf-8");
@@ -149,11 +149,11 @@ describe("multi-process integration", () => {
     expect(pids.size).toBe(3);
 
     for (const accountId of accountIds) {
-      expect(claims[accountId] === undefined).toBe(false);
+      expect(claims[accountId]).toBeDefined();
     }
   });
 
-  test("save and load interleaving keeps all accounts", { timeout: 15_000 }, async () => {
+  test("save and load interleaving keeps all accounts", async () => {
     const env = getTestEnv();
 
     const storageA = createStorage([
@@ -174,7 +174,7 @@ describe("multi-process integration", () => {
     expect(resultB.code).toBe(0);
 
     const loaded = await loadAccounts();
-    expect(loaded === null).toBe(false);
+    expect(loaded).not.toBeNull();
     if (!loaded) {
       throw new Error("Expected non-null storage");
     }
@@ -187,7 +187,7 @@ describe("multi-process integration", () => {
     expect(uuids.has("interleave-4")).toBe(true);
   });
 
-  test("no data loss under contention", { timeout: 15_000 }, async () => {
+  test("no data loss under contention", async () => {
     const env = getTestEnv();
 
     await new AccountStore().addAccount(createAccount("base-a", 20));
@@ -209,7 +209,7 @@ describe("multi-process integration", () => {
     }
 
     const finalStorage = await loadAccounts();
-    expect(finalStorage === null).toBe(false);
+    expect(finalStorage).not.toBeNull();
     if (!finalStorage) {
       throw new Error("Expected non-null storage");
     }

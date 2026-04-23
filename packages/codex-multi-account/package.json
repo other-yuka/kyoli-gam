@@ -40,11 +40,11 @@
     "directory": "packages/codex-multi-account"
   },
   "dependencies": {
+    "@opencode-ai/plugin": "^0.15.30",
     "opencode-multi-account-core": "^0.2.24",
     "valibot": "^1.2.0"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "^0.15.30",
     "@types/node": "^25.2.2",
     "typescript": "^5.8.0"
   },

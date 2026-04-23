@@ -1,5 +1,5 @@
-import { AccountStore } from "../../src/account-store";
-import type { AccountStorage } from "../../src/types";
+import { AccountStore } from "../../src/accounts/store";
+import type { AccountStorage } from "../../src/shared/types";
 
 async function main(): Promise<void> {
   const configDir = process.env.OPENCODE_CONFIG_DIR;
@@ -12,7 +12,7 @@ async function main(): Promise<void> {
   process.env.OPENCODE_CONFIG_DIR = configDir;
   const data = JSON.parse(rawData) as AccountStorage;
   const accountStore = new AccountStore();
-  for (const account of data.accounts || []) {
+  for (const account of data.accounts) {
     await accountStore.addAccount(account);
   }
 }

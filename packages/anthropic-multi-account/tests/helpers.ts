@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
-import type { PluginClient, AccountStorage } from "../src/types";
+import type { PluginClient, AccountStorage } from "../src/shared/types";
 
 export function createTestDir(): string {
   return join(tmpdir(), `multiauth-test-${randomBytes(8).toString("hex")}`);
@@ -52,6 +52,7 @@ export function createTestStorage(count: number): AccountStorage {
   const accounts = Array.from({ length: count }, (_, i) => ({
     uuid: `test-uuid-${i}`,
     email: `test${i}@example.com`,
+    planTier: "",
     refreshToken: `refresh-token-${i}`,
     addedAt: Date.now() - (count - i) * 1000,
     lastUsed: Date.now() - (count - i) * 1000,

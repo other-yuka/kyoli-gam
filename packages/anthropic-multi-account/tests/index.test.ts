@@ -2,9 +2,9 @@ import { afterEach, describe, expect, test, vi } from "bun:test";
 import {
   resetClaudeIdentityForTest,
   setClaudeIdentityForTest,
-} from "../src/claude-identity";
-import { loadTemplate } from "../src/fingerprint-capture";
-import { getRuntimeModelCapability, resetRuntimeModelCapabilitiesForTest } from "../src/model-capabilities";
+} from "../src/claude-code/identity";
+import { loadTemplate } from "../src/claude-code/fingerprint/capture";
+import { getRuntimeModelCapability, resetRuntimeModelCapabilitiesForTest } from "../src/model/capabilities";
 import {
   resetHeartbeatForTest,
   setHeartbeatTestOverridesForTest,
@@ -12,10 +12,10 @@ import {
 import {
   resetUpstreamRequestForTest,
   setUpstreamRequestTestOverridesForTest,
-} from "../src/upstream-request";
+} from "../src/request/upstream-request";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
-import { loadConfig, resetConfigCache } from "../src/config";
+import { loadConfig, resetConfigCache } from "../src/shared/config";
 import { createMockClient, setupTestEnv } from "./helpers";
 
 const startHeartbeatMock = vi.fn();
