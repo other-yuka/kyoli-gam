@@ -4,7 +4,8 @@ import * as ansiModule from "../../src/auth-ux/menu/ansi";
 import * as authMenuModule from "../../src/auth-ux/menu/menu";
 import * as childProcess from "node:child_process";
 import { handleAuthorize } from "../../src/auth-ux/handler";
-import { createMockClient } from "../helpers";
+import { AccountStore } from "../../src/accounts/store";
+import { createMockClient, setupTestEnv } from "../helpers";
 
 describe("auth-handler", () => {
   let ttySpy: ReturnType<typeof vi.spyOn<typeof ansiModule, "isTTY">>;
@@ -89,6 +90,35 @@ describe("auth-handler", () => {
     expect(manager.addAccount).toHaveBeenCalledTimes(1);
     expect(accounts).toHaveLength(1);
 
+  });
+
+  test("persists fallback account email on callback success", async () => {
+    const { cleanup } = await setupTestEnv();
+
+    try {
+      vi.spyOn(anthropicOAuth, "loginWithOAuth").mockImplementation(async (callbacks) => {
+        callbacks.onAuth({ url: "https://pi.ai/oauth/authorize?code=fallback", instructions: "Authorize to continue." });
+        return {
+          refreshToken: "refresh-fallback",
+          accessToken: "access-fallback",
+          expiresAt: Date.now() + 3_600_000,
+          email: "fallback@example.com",
+        };
+      });
+
+      const flow = await handleAuthorize(null, undefined, createMockClient());
+      const callbackResult = await flow.callback();
+      expect(callbackResult.type).toBe("success");
+
+      const storage = await new AccountStore().load();
+      expect(storage.accounts).toHaveLength(1);
+      expect(storage.accounts[0]).toMatchObject({
+        email: "fallback@example.com",
+        refreshToken: "refresh-fallback",
+      });
+    } finally {
+      await cleanup();
+    }
   });
 
   test("returns failed flow when pi-ai flow cannot start", async () => {

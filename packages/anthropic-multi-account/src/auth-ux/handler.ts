@@ -119,7 +119,7 @@ function wrapCallbackWithManagerSync(
             ? `\n✅ Account added to multi-auth pool (${countAfter} total).\n`
             : `\nℹ️  Account already exists in multi-auth pool (${countAfter} total).\n`);
         } else {
-          await persistFallback(auth);
+          await persistFallback(auth, email);
           console.log("\n✅ Account saved.\n");
         }
       }
@@ -129,12 +129,13 @@ function wrapCallbackWithManagerSync(
   };
 }
 
-async function persistFallback(auth: OAuthCredentials): Promise<void> {
+async function persistFallback(auth: OAuthCredentials, email?: string): Promise<void> {
   try {
     const store = new AccountStore();
     const now = Date.now();
     const account: StoredAccount = {
       uuid: randomUUID(),
+      email,
       refreshToken: auth.refresh,
       accessToken: auth.access,
       expiresAt: auth.expires,
