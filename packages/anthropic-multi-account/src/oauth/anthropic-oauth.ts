@@ -104,6 +104,26 @@ function openBrowser(url: string): void {
   }
 }
 
+function buildAuthorizeUrl(params: {
+  authorizeUrl: string;
+  clientId: string;
+  scopes: string;
+  redirectUri: string;
+  codeChallenge: string;
+  state: string;
+}): string {
+  const url = new URL(params.authorizeUrl);
+  url.searchParams.set("code", "true");
+  url.searchParams.set("client_id", params.clientId);
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("redirect_uri", params.redirectUri);
+  url.searchParams.set("scope", params.scopes);
+  url.searchParams.set("code_challenge", params.codeChallenge);
+  url.searchParams.set("code_challenge_method", "S256");
+  url.searchParams.set("state", params.state);
+  return url.toString();
+}
+
 async function postTokenEndpoint(
   contentType: string,
   body: string,
@@ -176,16 +196,14 @@ export async function loginWithOAuth(callbacks: LoginCallbacks): Promise<Partial
   const redirectUri = `http://localhost:${port}/callback`;
 
   try {
-    const authorizeUrl = `${cfg.authorizeUrl}?${new URLSearchParams({
-      code: "true",
-      client_id: cfg.clientId,
-      response_type: "code",
-      redirect_uri: redirectUri,
-      scope: cfg.scopes,
-      code_challenge: codeChallenge,
-      code_challenge_method: "S256",
+    const authorizeUrl = buildAuthorizeUrl({
+      authorizeUrl: cfg.authorizeUrl,
+      clientId: cfg.clientId,
+      scopes: cfg.scopes,
+      redirectUri,
+      codeChallenge,
       state,
-    }).toString()}`;
+    });
 
     callbacks.onAuth({
       url: authorizeUrl,
