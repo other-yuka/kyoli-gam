@@ -3,11 +3,11 @@ import {
   ANTHROPIC_PROFILE_ENDPOINT,
   ANTHROPIC_USAGE_ENDPOINT,
   PLAN_LABELS,
-} from "./constants";
-import { formatWaitTime } from "./utils";
+} from "./shared/constants";
+import { formatWaitTime } from "./shared/utils";
 import * as v from "valibot";
-import { UsageLimitsSchema } from "./types";
-import type { ManagedAccount, UsageLimits } from "./types";
+import { UsageLimitsSchema } from "./shared/types";
+import type { ManagedAccount, UsageLimits } from "./shared/types";
 
 const OAUTH_BETA_HEADER = ANTHROPIC_OAUTH_ADAPTER.oauthBetaHeader;
 

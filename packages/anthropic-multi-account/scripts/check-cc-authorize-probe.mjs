@@ -37,30 +37,11 @@ async function fetchOnce(url) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
   try {
-    const requestUrl = new URL(url);
-    let response = await fetch(url, {
+    const response = await fetch(url, {
       method: "GET",
       redirect: "manual",
       signal: controller.signal,
     });
-
-    const redirectLocation = response.headers.get("location");
-    const redirectUrl = redirectLocation ? new URL(redirectLocation, requestUrl) : null;
-    const shouldFollowProviderRedirect = (
-      response.status >= 300
-      && response.status < 400
-      && redirectLocation
-      && requestUrl.hostname === "claude.com"
-      && redirectUrl?.hostname === "claude.ai"
-    );
-
-    if (shouldFollowProviderRedirect) {
-      response = await fetch(redirectUrl, {
-        method: "GET",
-        redirect: "manual",
-        signal: controller.signal,
-      });
-    }
 
     const location = response.headers.get("location");
     const bodyText = await response.text().catch(() => "");

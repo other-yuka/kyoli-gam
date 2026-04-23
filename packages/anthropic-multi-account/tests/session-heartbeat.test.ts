@@ -2,7 +2,7 @@ import { afterEach, describe, expect, mock, test } from "bun:test";
 import {
   resetUpstreamRequestForTest,
   setUpstreamRequestTestOverridesForTest,
-} from "../src/upstream-request";
+} from "../src/request/upstream-request";
 import {
   getSessionId,
   resetHeartbeatForTest,
@@ -91,9 +91,9 @@ describe("session-heartbeat", () => {
   });
 
   test("stop is idempotent", async () => {
-    const mockFetch = mock(async () => {
-      return new Response(null, { status: 200 });
-    }) as unknown as typeof globalThis.fetch;
+    const mockFetch = mock(
+      async () => new Response(null, { status: 200 }),
+    ) as unknown as typeof globalThis.fetch;
 
     setHeartbeatTestOverridesForTest({ fetch: mockFetch });
 

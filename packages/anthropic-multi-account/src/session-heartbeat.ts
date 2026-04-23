@@ -1,6 +1,6 @@
-import { getUpstreamSessionId } from "./upstream-request";
-import { loadCCDerivedRequestProfile } from "./cc-derived-profile";
-import { getAnthropicVersion } from "./upstream-headers";
+import { getUpstreamSessionId } from "./request/upstream-request";
+import { loadCCDerivedRequestProfile } from "./claude-code/derived-profile";
+import { getAnthropicVersion } from "./request/headers";
 
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;
 const CLIENT_PLATFORM = "cli";
