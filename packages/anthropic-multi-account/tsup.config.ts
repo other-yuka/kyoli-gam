@@ -7,7 +7,11 @@ export default defineConfig({
     "scrub-template": "src/claude-code/scrub-template.ts",
   },
   format: ["esm"],
-  dts: true,
+  dts: {
+    compilerOptions: {
+      ignoreDeprecations: "6.0",
+    },
+  },
   sourcemap: true,
   clean: true,
   platform: "node",
