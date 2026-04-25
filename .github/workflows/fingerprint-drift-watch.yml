@@ -1,6 +1,6 @@
 name: Fingerprint drift watch
 
-# Nightly static scan of @anthropic-ai/claude-code@latest against the
+# Hourly gated static scan of @anthropic-ai/claude-code@latest against the
 # bundled OAuth constants in anthropic-multi-account. Does NOT require
 # Claude Code authentication — npm pack + binary regex scan only. Opens
 # a GitHub issue on drift so maintainers can rebake constants before
@@ -8,8 +8,18 @@ name: Fingerprint drift watch
 
 on:
   schedule:
+    - cron: '0 * * * *'
     - cron: '0 2 * * *'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Bypass the version cache (always run full check)
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
 
 permissions:
   contents: read
@@ -20,7 +30,67 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  version_check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.probe.outputs.version }}
+      should_run: ${{ steps.gate.outputs.should_run }}
+    steps:
+      - name: Fetch CC latest version from npm registry
+        id: probe
+        run: |
+          set +e
+          VERSION=$(curl -sS --fail --max-time 15 \
+            https://registry.npmjs.org/@anthropic-ai/claude-code/latest \
+            | node -pe "JSON.parse(require('fs').readFileSync(0, 'utf8')).version" 2>/dev/null)
+          EXIT=$?
+          set -e
+          if [ $EXIT -ne 0 ] || [ -z "$VERSION" ]; then
+            echo "::warning::npm registry probe failed (exit=$EXIT). Failing open: heavy check will run."
+            echo "version=unknown-fail-open" >> "$GITHUB_OUTPUT"
+          else
+            echo "CC latest on npm: $VERSION"
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Cache sentinel (keyed on CC version)
+        id: version_cache
+        if: steps.probe.outputs.version != 'unknown-fail-open'
+        uses: actions/cache@v4
+        with:
+          path: .cc-version-sentinel
+          key: cc-drift-checked-${{ steps.probe.outputs.version }}
+
+      - name: Gate full check
+        id: gate
+        run: |
+          FORCED='${{ github.event_name == 'workflow_dispatch' && inputs.force == 'true' }}'
+          VERSION='${{ steps.probe.outputs.version }}'
+          CACHE_HIT='${{ steps.version_cache.outputs.cache-hit }}'
+          EVENT='${{ github.event.schedule }}'
+
+          if [ "$FORCED" = "true" ]; then
+            echo "Manual force=true — running."
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          elif [ "$VERSION" = "unknown-fail-open" ]; then
+            echo "npm registry probe failed; failing open."
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT" = "0 2 * * *" ]; then
+            echo "Daily fallback cron — running heavy check regardless of cache."
+            touch .cc-version-sentinel
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          elif [ "$CACHE_HIT" = "true" ]; then
+            echo "CC v$VERSION already full-checked. Skipping."
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "CC v$VERSION is new — running heavy check."
+            touch .cc-version-sentinel
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          fi
+
   check:
+    needs: version_check
+    if: needs.version_check.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -37,6 +107,36 @@ jobs:
 
       - name: Build
         run: bun run build
+
+      - name: Install Playwright Chromium for headless probe
+        continue-on-error: true
+        run: |
+          set +e
+          npm install --no-save playwright@1.49.0
+          npx playwright install chromium --with-deps
+          exit 0
+
+      - name: Run authorize-URL probe (headless Chromium)
+        id: probe
+        run: |
+          set +e
+          node packages/anthropic-multi-account/scripts/check-cc-authorize-probe-headless.mjs > probe-report.json 2> probe-log.txt
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          set -e
+          cat probe-log.txt
+          echo "--- report ---"
+          cat probe-report.json
+
+      - name: Run authorize-URL probe (fetch fallback, only if headless failed)
+        if: steps.probe.outputs.exit_code == '2'
+        run: |
+          set +e
+          node packages/anthropic-multi-account/scripts/check-cc-authorize-probe.mjs > probe-report.json 2> probe-log.txt
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          set -e
+          cat probe-log.txt
+          echo "--- report ---"
+          cat probe-report.json
 
       - name: Run static drift check
         id: drift
@@ -85,7 +185,12 @@ jobs:
             echo ""
             echo "Run \`bun run --cwd packages/anthropic-multi-account bake:fingerprint\` locally to rebake the template from the current Claude Code binary, then open a PR with the updated \`fingerprint-data.json\`."
             echo ""
-            echo "### Raw report"
+            echo "### Authorize probe report"
+            echo '```json'
+            cat probe-report.json
+            echo '```'
+            echo ""
+            echo "### Raw drift report"
             echo '```json'
             cat drift-report.json
             echo '```'
@@ -125,4 +230,6 @@ jobs:
           path: |
             drift-report.json
             drift-log.txt
+            probe-report.json
+            probe-log.txt
           retention-days: 30
