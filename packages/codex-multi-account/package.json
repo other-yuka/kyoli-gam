@@ -1,6 +1,6 @@
 {
   "name": "opencode-codex-multi-account",
-  "version": "0.2.24",
+  "version": "0.2.25",
   "description": "OpenCode plugin for Codex (OpenAI) multi-account management with automatic rate limit switching",
   "main": "./dist/index.js",
   "type": "module",
@@ -41,7 +41,7 @@
   },
   "dependencies": {
     "@opencode-ai/plugin": "^0.15.30",
-    "opencode-multi-account-core": "^0.2.24",
+    "opencode-multi-account-core": "^0.2.25",
     "valibot": "^1.2.0"
   },
   "devDependencies": {
