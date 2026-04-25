@@ -17,7 +17,7 @@ import { SUPPORTED_CC_RANGE } from "../dist/fingerprint-capture.js";
 
 const PINNED_OAUTH = {
   clientId: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
-  authorizeUrl: "https://claude.com/cai/oauth/authorize",
+  authorizeUrl: "https://claude.ai/oauth/authorize",
   tokenUrl: "https://platform.claude.com/v1/oauth/token",
 };
 
@@ -26,6 +26,10 @@ const CONFIG_SCAN_LOOKBACK_CHARS = 512;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const JS_CANDIDATES = ["cli.js", "cli.mjs", "dist/cli.js", "dist/cli.mjs"];
 const NATIVE_SIZE_FLOOR_BYTES = 1_000_000;
+const CLIENT_ID_PATTERN = /CLIENT_ID\s*:\s*"([0-9a-f-]{36})"/gi;
+const AUTHORIZE_URL_PATTERN = /CLAUDE_AI_AUTHORIZE_URL\s*:\s*"([^"]+)"/gi;
+const TOKEN_URL_PATTERN = /TOKEN_URL\s*:\s*"(https:\/\/[^\"]*\/oauth\/token[^\"]*)"/gi;
+const BASE_API_URL_PATTERN = /BASE_API_URL\s*:\s*"([^"]+)"/gi;
 
 function compareVersions(left, right) {
   const leftParts = left.split(".").map(Number);
@@ -64,6 +68,12 @@ function isLikelyLocalUrl(value) {
   }
 }
 
+function normalizeAuthorizeUrl(url) {
+  return url === "https://claude.com/cai/oauth/authorize"
+    ? "https://claude.ai/oauth/authorize"
+    : url;
+}
+
 function pickNearestValue(block, centerIndex, pattern) {
   let nearestValue;
   let nearestDistance = Number.POSITIVE_INFINITY;
@@ -83,7 +93,7 @@ function pickNearestValue(block, centerIndex, pattern) {
 function extractCandidateBlocks(binaryText) {
   const blocks = [];
   const seenRanges = new Set();
-  const clientIdMatches = [...binaryText.matchAll(/CLIENT_ID\s*:\s*"([0-9a-f-]{36})"/gi)];
+  const clientIdMatches = [...binaryText.matchAll(CLIENT_ID_PATTERN)];
 
   for (const [index, currentMatch] of clientIdMatches.entries()) {
     const currentIndex = currentMatch.index ?? 0;
@@ -137,9 +147,11 @@ function scanBinaryForOAuthConfig(buf) {
     const clientIdIndex = clientIdMatch.index ?? 0;
     const payload = {
       clientId: clientIdMatch[1],
-      authorizeUrl: pickNearestValue(block, clientIdIndex, /CLAUDE_AI_AUTHORIZE_URL\s*:\s*"([^"]+)"/gi) || "",
-      tokenUrl: pickNearestValue(block, clientIdIndex, /TOKEN_URL\s*:\s*"(https:\/\/[^\"]*\/oauth\/token[^\"]*)"/gi) || "",
-      baseApiUrl: pickNearestValue(block, clientIdIndex, /BASE_API_URL\s*:\s*"([^"]+)"/gi) || "",
+      authorizeUrl: normalizeAuthorizeUrl(
+        pickNearestValue(block, clientIdIndex, AUTHORIZE_URL_PATTERN) || "",
+      ),
+      tokenUrl: pickNearestValue(block, clientIdIndex, TOKEN_URL_PATTERN) || "",
+      baseApiUrl: pickNearestValue(block, clientIdIndex, BASE_API_URL_PATTERN) || "",
     };
 
     if (!UUID_PATTERN.test(payload.clientId)) {
@@ -298,6 +310,83 @@ function buildReportItem(category, severity, message, extra = {}) {
   };
 }
 
+function pinnedReportData() {
+  return {
+    ...PINNED_OAUTH,
+    maxTested: SUPPORTED_CC_RANGE.maxTested,
+  };
+}
+
+function scriptRelativePath() {
+  return fileURLToPath(import.meta.url).replace(`${projectRoot()}/`, "");
+}
+
+function buildReport({ items, ccVersion, scanned, scanTarget }) {
+  return {
+    drift: items.length > 0,
+    checkedAt: new Date().toISOString(),
+    ccVersion,
+    pinned: pinnedReportData(),
+    scanned,
+    scanTarget,
+    scriptPath: scriptRelativePath(),
+    items,
+  };
+}
+
+function writeReport(report) {
+  process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+}
+
+function findWrapperScanTarget(packageDir) {
+  for (const candidate of JS_CANDIDATES) {
+    const candidatePath = join(packageDir, candidate);
+    if (!existsSync(candidatePath)) {
+      continue;
+    }
+
+    return {
+      cliPath: candidatePath,
+      scanTarget: {
+        package: "@anthropic-ai/claude-code",
+        kind: "wrapper-js",
+        path: candidate,
+      },
+    };
+  }
+
+  return {
+    cliPath: null,
+    scanTarget: null,
+  };
+}
+
+function addOAuthDriftItems(items, scanned) {
+  if (scanned.clientId !== PINNED_OAUTH.clientId) {
+    items.push(buildReportItem(
+      "oauth.clientId",
+      "high",
+      `clientId drifted from ${PINNED_OAUTH.clientId} to ${scanned.clientId}.`,
+    ));
+  }
+
+  if (scanned.authorizeUrl !== PINNED_OAUTH.authorizeUrl) {
+    items.push(buildReportItem(
+      "oauth.authorizeUrl",
+      "high",
+      `authorizeUrl drifted from ${PINNED_OAUTH.authorizeUrl} to ${scanned.authorizeUrl}.`,
+    ));
+  }
+
+  if (scanned.tokenUrl !== PINNED_OAUTH.tokenUrl) {
+    items.push(buildReportItem(
+      "oauth.tokenUrl",
+      "high",
+      `tokenUrl drifted from ${PINNED_OAUTH.tokenUrl} to ${scanned.tokenUrl}.`,
+    ));
+  }
+}
+
 function main() {
   const scratchDir = join(tmpdir(), `cc-static-drift-${process.pid}-${Date.now()}`);
   mkdirSync(scratchDir, { recursive: true });
@@ -316,18 +405,9 @@ function main() {
     ccVersion = typeof packageJson.version === "string" ? packageJson.version : null;
 
     let cliPath = null;
-    for (const candidate of JS_CANDIDATES) {
-      const candidatePath = join(packageDir, candidate);
-      if (existsSync(candidatePath)) {
-        cliPath = candidatePath;
-        scanTarget = {
-          package: "@anthropic-ai/claude-code",
-          kind: "wrapper-js",
-          path: candidate,
-        };
-        break;
-      }
-    }
+    const wrapperTarget = findWrapperScanTarget(packageDir);
+    cliPath = wrapperTarget.cliPath;
+    scanTarget = wrapperTarget.scanTarget;
 
     if (!cliPath && ccVersion) {
       const nativeResult = fetchNativeBinary(packageJson.optionalDependencies, ccVersion, scratchDir);
@@ -358,29 +438,7 @@ function main() {
           "scanner returned null — CLIENT_ID/TOKEN_URL regexes may need updates.",
         ));
       } else {
-        if (scanned.clientId !== PINNED_OAUTH.clientId) {
-          items.push(buildReportItem(
-            "oauth.clientId",
-            "high",
-            `clientId drifted from ${PINNED_OAUTH.clientId} to ${scanned.clientId}.`,
-          ));
-        }
-
-        if (scanned.authorizeUrl !== PINNED_OAUTH.authorizeUrl) {
-          items.push(buildReportItem(
-            "oauth.authorizeUrl",
-            "high",
-            `authorizeUrl drifted from ${PINNED_OAUTH.authorizeUrl} to ${scanned.authorizeUrl}.`,
-          ));
-        }
-
-        if (scanned.tokenUrl !== PINNED_OAUTH.tokenUrl) {
-          items.push(buildReportItem(
-            "oauth.tokenUrl",
-            "high",
-            `tokenUrl drifted from ${PINNED_OAUTH.tokenUrl} to ${scanned.tokenUrl}.`,
-          ));
-        }
+        addOAuthDriftItems(items, scanned);
       }
     }
 
@@ -395,21 +453,8 @@ function main() {
     rmSync(scratchDir, { recursive: true, force: true });
   }
 
-  const report = {
-    drift: items.length > 0,
-    checkedAt: new Date().toISOString(),
-    ccVersion,
-    pinned: {
-      ...PINNED_OAUTH,
-      maxTested: SUPPORTED_CC_RANGE.maxTested,
-    },
-    scanned,
-    scanTarget,
-    scriptPath: fileURLToPath(import.meta.url).replace(`${projectRoot()}/`, ""),
-    items,
-  };
-
-  process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+  const report = buildReport({ items, ccVersion, scanned, scanTarget });
+  writeReport(report);
   process.exitCode = items.length > 0 ? 1 : 0;
 }
 
@@ -417,18 +462,11 @@ try {
   main();
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
-  process.stdout.write(`${JSON.stringify({
-    drift: true,
-    checkedAt: new Date().toISOString(),
+  writeReport(buildReport({
+    items: [buildReportItem("runner", "high", message)],
     ccVersion: null,
-    pinned: {
-      ...PINNED_OAUTH,
-      maxTested: SUPPORTED_CC_RANGE.maxTested,
-    },
     scanned: null,
     scanTarget: null,
-    scriptPath: fileURLToPath(import.meta.url).replace(`${projectRoot()}/`, ""),
-    items: [buildReportItem("runner", "high", message)],
-  }, null, 2)}\n`);
+  }));
   process.exitCode = 1;
 }

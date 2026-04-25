@@ -581,26 +581,31 @@ function parseVersion(version: string): [number, number, number] | null {
     return null;
   }
 
-  return [Number(match[1]), Number(match[2]), Number(match[3])];
+  const [, major, minor, patch] = match;
+  return [Number(major), Number(minor), Number(patch)];
 }
 
-function compareVersions(left: string, right: string): number | null {
-  const leftVersion = parseVersion(left);
-  const rightVersion = parseVersion(right);
-  if (!leftVersion || !rightVersion) {
+export function compareVersions(left: string, right: string): number | null {
+  const leftParts = parseVersion(left);
+  const rightParts = parseVersion(right);
+  if (!leftParts || !rightParts) {
     return null;
   }
 
-  for (let index = 0; index < leftVersion.length; index += 1) {
-    const leftPart = leftVersion[index] ?? 0;
-    const rightPart = rightVersion[index] ?? 0;
-    const diff = leftPart - rightPart;
-    if (diff !== 0) {
-      return diff;
-    }
+  const [leftMajor, leftMinor, leftPatch] = leftParts;
+  const [rightMajor, rightMinor, rightPatch] = rightParts;
+
+  const majorDiff = leftMajor - rightMajor;
+  if (majorDiff !== 0) {
+    return majorDiff;
   }
 
-  return 0;
+  const minorDiff = leftMinor - rightMinor;
+  if (minorDiff !== 0) {
+    return minorDiff;
+  }
+
+  return leftPatch - rightPatch;
 }
 
 export function detectDrift(template: TemplateData, installedOverride?: string | null): DriftResult {

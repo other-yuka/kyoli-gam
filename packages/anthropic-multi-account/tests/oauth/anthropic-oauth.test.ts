@@ -24,12 +24,11 @@ import { getUserAgent } from "../../src/model/config";
 import { runNodeTokenRequest, setNodeTokenRequestRunnerForTest } from "../../src/oauth/token-node-request";
 import { setupTestEnv } from "../helpers";
 
-const EXISTING_SMALL_FILE = import.meta.dir + "/../helpers.ts";
 const DETECTED_CLIENT_ID = "11111111-1111-4111-8111-111111111111";
 const DEV_CLIENT_ID = "22422756-60c9-4084-8eb7-27705fd5cf9a";
 const OVERRIDE_CLIENT_ID = "33333333-3333-4333-8333-333333333333";
-const DEFAULT_AUTHORIZE_URL = "https://claude.com/cai/oauth/authorize";
-const LEGACY_AUTHORIZE_URL = "https://claude.ai/oauth/authorize";
+const DEFAULT_AUTHORIZE_URL = "https://claude.ai/oauth/authorize";
+const LEGACY_AUTHORIZE_URL = "https://claude.com/cai/oauth/authorize";
 const DEFAULT_TOKEN_URL = "https://platform.claude.com/v1/oauth/token";
 const DEFAULT_BASE_API_URL = "https://api.anthropic.com";
 const DETECTED_BINARY_BLOCK = `BASE_API_URL:"${DEFAULT_BASE_API_URL}" CLIENT_ID:"${DETECTED_CLIENT_ID}" CLAUDE_AI_AUTHORIZE_URL:"${DEFAULT_AUTHORIZE_URL}" TOKEN_URL:"${DEFAULT_TOKEN_URL}" SCOPES:"scope:detected user:sessions:claude_code"`;
@@ -181,9 +180,10 @@ describe("anthropic-oauth", () => {
   });
 
   describe("detectOAuthConfig", () => {
-    test("removes org:create_api_key from fallback scopes", () => {
-      expect(FALLBACK.scopes).toBe("user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload");
-      expect(FALLBACK.scopes).not.toContain("org:create_api_key");
+    test("keeps org:create_api_key as the leading fallback scope", () => {
+      expect(FALLBACK.scopes).toBe("org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload");
+      expect(FALLBACK.scopes.split(" ")).toHaveLength(6);
+      expect(FALLBACK.scopes.split(" ")[0]).toBe("org:create_api_key");
     });
 
     test("returns FALLBACK when binary not found", async () => {
@@ -199,31 +199,31 @@ describe("anthropic-oauth", () => {
 
     test("prefers non-local config block over local development-style candidates", () => {
       const localBlock = 'BASE_API_URL:"http://localhost:3000" CLIENT_ID:"22222222-2222-4222-8222-222222222222" CLAUDE_AI_AUTHORIZE_URL:"http://localhost:3000/oauth/authorize" TOKEN_URL:"http://localhost:3000/oauth/token" SCOPES:"scope:local"';
-      const prodBlock = 'BASE_API_URL:"https://api.anthropic.com" CLIENT_ID:"11111111-1111-4111-8111-111111111111" CLAUDE_AI_AUTHORIZE_URL:"https://claude.com/cai/oauth/authorize" TOKEN_URL:"https://platform.claude.com/v1/oauth/token" SCOPES:"org:create_api_key user:profile user:inference user:sessions:claude_code"';
+      const prodBlock = 'BASE_API_URL:"https://api.anthropic.com" CLIENT_ID:"11111111-1111-4111-8111-111111111111" CLAUDE_AI_AUTHORIZE_URL:"https://claude.ai/oauth/authorize" TOKEN_URL:"https://platform.claude.com/v1/oauth/token" SCOPES:"org:create_api_key user:profile user:inference user:sessions:claude_code"';
       const buf = Buffer.from(`${localBlock} ${prodBlock}`);
 
       expect(scanBinaryForOAuthConfig(buf)).toMatchObject({
         clientId: "11111111-1111-4111-8111-111111111111",
-        authorizeUrl: "https://claude.com/cai/oauth/authorize",
+        authorizeUrl: "https://claude.ai/oauth/authorize",
         baseApiUrl: "https://api.anthropic.com",
       });
     });
 
     test("prefers the known prod client when dev and prod candidates both exist", () => {
       const devBlock = `BASE_API_URL:"https://api.anthropic.com" CLIENT_ID:"${DEV_CLIENT_ID}" CLAUDE_AI_AUTHORIZE_URL:"${LEGACY_AUTHORIZE_URL}" TOKEN_URL:"https://platform.claude.com/v1/oauth/token" SCOPES:"scope:dev user:sessions:claude_code"`;
-      const prodBlock = `BASE_API_URL:"https://api.anthropic.com" CLIENT_ID:"${FALLBACK.clientId}" CLAUDE_AI_AUTHORIZE_URL:"https://claude.com/cai/oauth/authorize" TOKEN_URL:"https://platform.claude.com/v1/oauth/token" SCOPES:"scope:prod user:sessions:claude_code"`;
+      const prodBlock = `BASE_API_URL:"https://api.anthropic.com" CLIENT_ID:"${FALLBACK.clientId}" CLAUDE_AI_AUTHORIZE_URL:"https://claude.ai/oauth/authorize" TOKEN_URL:"https://platform.claude.com/v1/oauth/token" SCOPES:"scope:prod user:sessions:claude_code"`;
       const buf = Buffer.from(`${devBlock}${"x".repeat(6000)}${prodBlock}`);
 
       expect(scanBinaryForOAuthConfig(buf)).toMatchObject({
         clientId: FALLBACK.clientId,
-        authorizeUrl: "https://claude.com/cai/oauth/authorize",
+        authorizeUrl: "https://claude.ai/oauth/authorize",
         baseApiUrl: "https://api.anthropic.com",
         scopes: "scope:prod user:sessions:claude_code",
       });
     });
 
     test("extracts scopes from the production binary block when present", () => {
-      const buf = Buffer.from('CLIENT_ID:"11111111-1111-4111-8111-111111111111" CLAUDE_AI_AUTHORIZE_URL:"https://claude.com/cai/oauth/authorize" TOKEN_URL:"https://platform.claude.com/v1/oauth/token" SCOPES:"scope:a scope:b" BASE_API_URL:"https://api.anthropic.com"');
+      const buf = Buffer.from('CLIENT_ID:"11111111-1111-4111-8111-111111111111" CLAUDE_AI_AUTHORIZE_URL:"https://claude.ai/oauth/authorize" TOKEN_URL:"https://platform.claude.com/v1/oauth/token" SCOPES:"scope:a scope:b" BASE_API_URL:"https://api.anthropic.com"');
 
       expect(scanBinaryForOAuthConfig(buf)).toMatchObject({
         baseApiUrl: "https://api.anthropic.com",
@@ -231,12 +231,12 @@ describe("anthropic-oauth", () => {
       });
     });
 
-    test("falls back to safe scopes when scanned scopes contain org:create_api_key", () => {
-      const buf = Buffer.from('CLIENT_ID:"11111111-1111-4111-8111-111111111111" CLAUDE_AI_AUTHORIZE_URL:"https://claude.com/cai/oauth/authorize" TOKEN_URL:"https://platform.claude.com/v1/oauth/token" SCOPES:"org:create_api_key user:profile user:inference user:sessions:claude_code" BASE_API_URL:"https://api.anthropic.com"');
+    test("preserves scanned scopes when the binary contains org:create_api_key", () => {
+      const buf = Buffer.from('CLIENT_ID:"11111111-1111-4111-8111-111111111111" CLAUDE_AI_AUTHORIZE_URL:"https://claude.ai/oauth/authorize" TOKEN_URL:"https://platform.claude.com/v1/oauth/token" SCOPES:"org:create_api_key user:profile user:inference user:sessions:claude_code" BASE_API_URL:"https://api.anthropic.com"');
 
       expect(scanBinaryForOAuthConfig(buf)).toMatchObject({
         baseApiUrl: "https://api.anthropic.com",
-        scopes: FALLBACK.scopes,
+        scopes: "org:create_api_key user:profile user:inference user:sessions:claude_code",
       });
     });
 
@@ -266,7 +266,7 @@ describe("anthropic-oauth", () => {
     });
 
     test("does not associate a far-away foreign scope token before the next client block", () => {
-      const prodCluster = 'BASE_API_URL:"https://api.anthropic.com" CLIENT_ID:"11111111-1111-4111-8111-111111111111" CLAUDE_AI_AUTHORIZE_URL:"https://claude.com/cai/oauth/authorize" TOKEN_URL:"https://platform.claude.com/v1/oauth/token"';
+      const prodCluster = 'BASE_API_URL:"https://api.anthropic.com" CLIENT_ID:"11111111-1111-4111-8111-111111111111" CLAUDE_AI_AUTHORIZE_URL:"https://claude.ai/oauth/authorize" TOKEN_URL:"https://platform.claude.com/v1/oauth/token"';
       const foreignScope = 'SCOPES:"https://www.googleapis.com/auth/cloud-platform"';
       const nextClientBlock = 'CLIENT_ID:"22222222-2222-4222-8222-222222222222" BASE_API_URL:"http://localhost:3000"';
       const buf = Buffer.from(`${prodCluster}${"x".repeat(5000)}${foreignScope}${"y".repeat(5000)}${nextClientBlock}`);
@@ -357,6 +357,30 @@ describe("anthropic-oauth", () => {
       });
     });
 
+    test("does not overwrite scanned scopes with a partial canonical subset", async () => {
+      await withTempDir(async (dir) => {
+        const ccPath = await writeTempFile(dir, "claude-partial-scope-bin", "partial-scope-test-binary");
+        const partialCanonicalSubset = [
+          '"user:profile"',
+          '"user:inference"',
+          '"user:sessions:claude_code"',
+          '"user:mcp_servers"',
+          '"user:file_upload"',
+        ].join(" ");
+        const binaryWithPartialCanonicalSubset = `${DETECTED_BINARY_BLOCK} ${partialCanonicalSubset}`;
+
+        setOAuthConfigDetectionOverridesForTest({
+          findCCBinary: () => ccPath,
+          readBinaryFile: async () => Buffer.from(binaryWithPartialCanonicalSubset),
+        });
+
+        const config = await detectOAuthConfig();
+
+        expect(config.source).toBe("detected");
+        expect(config.scopes).toBe("scope:detected user:sessions:claude_code");
+      });
+    });
+
     test("applies file override when env override is absent", async () => {
       await withTempDir(async (dir) => {
         const ccPath = await writeTempFile(dir, "claude-file-override-bin", "override-test-binary");
@@ -428,12 +452,12 @@ describe("anthropic-oauth", () => {
   });
 
   describe("normalizeAuthorizeUrl", () => {
-    test("rewrites exact legacy claude.ai URL to the current claude.com URL", () => {
+    test("rewrites exact legacy claude.com URL to the current claude.ai URL", () => {
       expect(normalizeAuthorizeUrl(LEGACY_AUTHORIZE_URL))
         .toBe(DEFAULT_AUTHORIZE_URL);
     });
 
-    test("passes through already-normalized claude.com URL unchanged", () => {
+    test("passes through already-normalized claude.ai URL unchanged", () => {
       expect(normalizeAuthorizeUrl(DEFAULT_AUTHORIZE_URL))
         .toBe(DEFAULT_AUTHORIZE_URL);
     });
@@ -465,7 +489,7 @@ describe("anthropic-oauth", () => {
           clientId: "11111111-1111-4111-8111-111111111111",
           authorizeUrl: LEGACY_AUTHORIZE_URL,
           tokenUrl: "https://platform.claude.com/v1/oauth/token",
-          scopes: "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload",
+            scopes: "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload",
           baseApiUrl: "https://api.anthropic.com",
         };
 
@@ -488,7 +512,7 @@ describe("anthropic-oauth", () => {
           clientId: "11111111-1111-4111-8111-111111111111",
           authorizeUrl: LEGACY_AUTHORIZE_URL,
           tokenUrl: DEFAULT_TOKEN_URL,
-          scopes: "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload",
+            scopes: "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload",
           baseApiUrl: DEFAULT_BASE_API_URL,
         };
 
@@ -1002,6 +1026,7 @@ describe("anthropic-oauth", () => {
       expect(authorizeUrl.searchParams.get("client_id")).toBe("9d1c250a-e61b-44d9-88ed-5944d1962f5e");
       expect(authorizeUrl.searchParams.get("response_type")).toBe("code");
       expect(authorizeUrl.searchParams.get("scope")).toBeString();
+      expect(authorizeUrl.searchParams.get("scope")).toContain("org:create_api_key");
       expect(authorizeUrl.searchParams.get("code_challenge")).toBeString();
       expect(authorizeUrl.searchParams.get("code_challenge_method")).toBe("S256");
       expect(authorizeUrl.searchParams.get("state")).toBeString();
@@ -1029,6 +1054,60 @@ describe("anthropic-oauth", () => {
       expect(result.addedAt).toBeNumber();
       expect(result.lastUsed).toBeNumber();
       expect(usageTokens).toEqual(["access-123"]);
+    });
+
+    test("includes org:create_api_key in the public authorize URL scope parameter", async () => {
+      setOAuthConfigDetectionOverridesForTest({
+        findCCBinary: () => null,
+      });
+
+      anthropicOAuthTestExports.setBrowserExecForTest((_command, callback) => {
+        callback?.(null);
+      });
+
+      anthropicOAuthTestExports.setProfileFetcherForTest(async () => ({
+        ok: true,
+        data: {
+          email: "scope-check@example.com",
+          planTier: "max",
+        },
+      }));
+
+      anthropicOAuthTestExports.setUsageFetcherForTest(async () => ({
+        ok: false,
+        reason: "not needed",
+      }));
+
+      setNodeTokenRequestRunnerForTest(async () => JSON.stringify({
+        ok: true,
+        body: JSON.stringify({
+          access_token: "access-123",
+          refresh_token: "refresh-456",
+          expires_in: 3600,
+        }),
+      }));
+
+      let capturedUrl = "";
+      let callbackResponsePromise: Promise<Response> | undefined;
+
+      await loginWithOAuth({
+        onAuth: (info) => {
+          capturedUrl = info.url;
+          const authorizeUrl = new URL(info.url);
+          const redirectUri = authorizeUrl.searchParams.get("redirect_uri");
+          const state = authorizeUrl.searchParams.get("state");
+
+          callbackResponsePromise = fetch(`${redirectUri}?code=oauth-code-123&state=${state}`, {
+            redirect: "manual",
+          });
+        },
+      });
+
+      const callbackResponse = await callbackResponsePromise;
+      const authorizeUrl = new URL(capturedUrl);
+
+      expect(callbackResponse?.status).toBe(302);
+      expect(authorizeUrl.searchParams.get("scope")).toContain("org:create_api_key");
     });
 
     test("treats usage fetch as best-effort and still succeeds when it throws", async () => {

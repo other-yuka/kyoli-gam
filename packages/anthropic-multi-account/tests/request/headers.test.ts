@@ -169,7 +169,7 @@ describe("getBetaHeader", () => {
     const beta = getBetaHeader();
 
     expect(beta).toContain("claude-code-20250219");
-    expect(beta).toContain("oauth-2025-04-20");
+    expect(beta).toContain("afk-mode-2026-01-31");
     expect(beta).toContain("effort-2025-11-24");
   });
 
