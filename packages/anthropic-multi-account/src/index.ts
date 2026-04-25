@@ -351,7 +351,10 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
   await initializeManagerFromStore().catch(() => {});
 
   return {
-    "experimental.chat.system.transform": (input: Record<string, unknown>, output: { system?: string[] }) => {
+    "experimental.chat.system.transform": async (
+      input: Record<string, unknown>,
+      output: { system?: string[] },
+    ): Promise<void> => {
       const billingHeader = composeBillingSystemEntry(extractFirstUserText(input), claudeCodeVersion);
       prependMissingSystemEntries(output, [
         billingHeader,

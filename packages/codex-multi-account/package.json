@@ -40,7 +40,7 @@
     "directory": "packages/codex-multi-account"
   },
   "dependencies": {
-    "@opencode-ai/plugin": "^0.15.30",
+    "@opencode-ai/plugin": "^1.14.24",
     "opencode-multi-account-core": "^0.2.25",
     "valibot": "^1.2.0"
   },
