@@ -18,6 +18,7 @@
     "test": "bun test tests",
     "check:fingerprint-drift": "bun run build && node scripts/check-live-fingerprint-drift.mjs",
     "check:cc-authorize-probe": "bun run build && node scripts/check-cc-authorize-probe.mjs",
+    "check:cc-authorize-probe-headless": "node scripts/check-cc-authorize-probe-headless.mjs",
     "bake:fingerprint": "bun run build && ALLOW_FINGERPRINT_OVERWRITE=1 node scripts/rebake-bundled-fingerprint.mjs",
     "prepack": "bun run build",
     "dev": "bun run build --watch"
