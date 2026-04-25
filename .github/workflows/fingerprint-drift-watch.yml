@@ -56,7 +56,7 @@ jobs:
       - name: Cache sentinel (keyed on CC version)
         id: version_cache
         if: steps.probe.outputs.version != 'unknown-fail-open'
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: .cc-version-sentinel
           key: cc-drift-checked-${{ steps.probe.outputs.version }}
@@ -93,7 +93,7 @@ jobs:
     if: needs.version_check.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -223,7 +223,7 @@ jobs:
 
       - name: Upload report artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fingerprint-drift-report
           path: |
