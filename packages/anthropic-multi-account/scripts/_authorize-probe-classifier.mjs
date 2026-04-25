@@ -1,11 +1,21 @@
 export const REJECT_MARKER = "Invalid request format";
 
+const MATCHES_EXPECTED_POLICY_MESSAGE = "authorize scope behavior matches expected policy";
+const MORE_PERMISSIVE_POLICY_MESSAGE = "authorize policy is more permissive than expected but pinned 6-scope remains accepted";
+const PINNED_FALLBACK_REJECTED_MESSAGE = "pinned 6-scope fallback is no longer accepted";
+
+function createVerdict(drifted, message) {
+  return { drifted, message };
+}
+
 export function classifyAuthorizeResponse(status, location, bodyText) {
-  if (typeof location === "string" && location.length > 0) {
+  const hasRedirectLocation = typeof location === "string" && location.length > 0;
+  if (hasRedirectLocation) {
     return "accepted";
   }
 
-  if (status >= 400 && typeof bodyText === "string" && bodyText.includes(REJECT_MARKER)) {
+  const hasRejectMarker = typeof bodyText === "string" && bodyText.includes(REJECT_MARKER);
+  if (status >= 400 && hasRejectMarker) {
     return "rejected";
   }
 
@@ -14,12 +24,16 @@ export function classifyAuthorizeResponse(status, location, bodyText) {
 
 export function combineVerdicts(baseVerdict, expandedVerdict) {
   if (baseVerdict === "accepted" && expandedVerdict === "rejected") {
-    return { drifted: false, message: "authorize scope behavior matches expected policy" };
+    return createVerdict(false, MATCHES_EXPECTED_POLICY_MESSAGE);
   }
 
   if (baseVerdict === "accepted" && expandedVerdict === "accepted") {
-    return { drifted: true, message: "expanded OAuth scopes were accepted unexpectedly" };
+    return createVerdict(false, MORE_PERMISSIVE_POLICY_MESSAGE);
   }
 
-  return { drifted: false, message: `authorize probe inconclusive (${baseVerdict}/${expandedVerdict})` };
+  if (baseVerdict === "rejected") {
+    return createVerdict(true, PINNED_FALLBACK_REJECTED_MESSAGE);
+  }
+
+  return createVerdict(false, `authorize probe inconclusive (${baseVerdict}/${expandedVerdict})`);
 }

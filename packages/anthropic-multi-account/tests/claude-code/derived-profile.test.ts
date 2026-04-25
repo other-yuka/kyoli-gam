@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   loadCCDerivedAuthProfile,
   loadCCDerivedRequestProfile,
@@ -11,6 +11,10 @@ import { resetDetectedVersionForTest } from "../../src/claude-code/cli-version";
 import { setupTestEnv } from "../helpers";
 
 describe("cc-derived-profile", () => {
+  beforeEach(() => {
+    resetDetectedVersionForTest();
+  });
+
   afterEach(() => {
     delete process.env.ANTHROPIC_CLI_VERSION;
     resetDetectedVersionForTest();
@@ -39,7 +43,7 @@ test("upgrades auth profile with detected OAuth base API url", async () => {
 
       setOAuthConfigDetectionOverridesForTest({
         findCCBinary: () => ccPath,
-        readBinaryFile: async () => Buffer.from('BASE_API_URL:"https://api.custom.anthropic.test" CLIENT_ID:"11111111-1111-4111-8111-111111111111" CLAUDE_AI_AUTHORIZE_URL:"https://claude.com/cai/oauth/authorize" TOKEN_URL:"https://platform.claude.com/v1/oauth/token" SCOPES:"scope:a scope:b"'),
+        readBinaryFile: async () => Buffer.from('BASE_API_URL:"https://api.custom.anthropic.test" CLIENT_ID:"11111111-1111-4111-8111-111111111111" CLAUDE_AI_AUTHORIZE_URL:"https://claude.ai/oauth/authorize" TOKEN_URL:"https://platform.claude.com/v1/oauth/token" SCOPES:"scope:a scope:b"'),
       });
 
       const profile = await loadCCDerivedAuthProfile();
@@ -62,12 +66,12 @@ test("normalizes legacy authorize url in derived auth profile", async () => {
 
     setOAuthConfigDetectionOverridesForTest({
       findCCBinary: () => ccPath,
-      readBinaryFile: async () => Buffer.from('BASE_API_URL:"https://api.anthropic.com" CLIENT_ID:"11111111-1111-4111-8111-111111111111" CLAUDE_AI_AUTHORIZE_URL:"https://claude.ai/oauth/authorize" TOKEN_URL:"https://platform.claude.com/v1/oauth/token" SCOPES:"scope:a scope:b"'),
+      readBinaryFile: async () => Buffer.from('BASE_API_URL:"https://api.anthropic.com" CLIENT_ID:"11111111-1111-4111-8111-111111111111" CLAUDE_AI_AUTHORIZE_URL:"https://claude.com/cai/oauth/authorize" TOKEN_URL:"https://platform.claude.com/v1/oauth/token" SCOPES:"scope:a scope:b"'),
     });
 
     const profile = await loadCCDerivedAuthProfile();
 
-    expect(profile.oauthConfig.authorizeUrl).toBe("https://claude.com/cai/oauth/authorize");
+    expect(profile.oauthConfig.authorizeUrl).toBe("https://claude.ai/oauth/authorize");
   } finally {
     await cleanup();
   }

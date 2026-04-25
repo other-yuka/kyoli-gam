@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
+import { execFileSync as defaultExecFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir, platform } from "node:os";
 import { dirname, join } from "node:path";
 import derivedDefaultsJson from "../../fixtures/defaults/cc-derived-defaults.json";
+import { compareVersions } from "../fingerprint/capture";
 import { getConfigDir } from "../../shared/utils";
 
 export interface DetectedOAuthConfig {
@@ -28,14 +30,17 @@ interface CacheFilePayload {
 interface DetectorTestOverrides {
   findCCBinary?: () => string | null;
   readBinaryFile?: (path: string) => Promise<Buffer>;
+  existsSync?: (path: string) => boolean;
+  execFileSync?: typeof defaultExecFileSync;
+  pathEnv?: string;
+  platform?: () => NodeJS.Platform;
 }
 
 const CONFIG_SCAN_WINDOW_CHARS = 4096;
 const CONFIG_SCAN_LOOKBACK_CHARS = 512;
 const KNOWN_PROD_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
-const REJECTED_SCOPE = ["org", "create_api_key"].join(":");
 const POLLUTED_CACHED_SCOPE = "https://www.googleapis.com/auth/cloud-platform";
-const SAFE_FALLBACK_SCOPES = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
+const SAFE_FALLBACK_SCOPES = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CACHE_FILE_NAME = "anthropic-oauth-config-cache.json";
@@ -52,9 +57,9 @@ const derivedDefaults = derivedDefaultsJson as {
 
 const fallbackPayload = normalizeDetectedOAuthConfigPayload({
   clientId: derivedDefaults.oauth?.clientId || KNOWN_PROD_CLIENT_ID,
-  authorizeUrl: derivedDefaults.oauth?.authorizeUrl || "https://claude.com/cai/oauth/authorize",
+  authorizeUrl: derivedDefaults.oauth?.authorizeUrl || "https://claude.ai/oauth/authorize",
   tokenUrl: derivedDefaults.oauth?.tokenUrl || "https://platform.claude.com/v1/oauth/token",
-  scopes: sanitizeScopes(derivedDefaults.oauth?.scopes),
+  scopes: derivedDefaults.oauth?.scopes || SAFE_FALLBACK_SCOPES,
   baseApiUrl: derivedDefaults.oauth?.baseApiUrl || "https://api.anthropic.com",
 });
 
@@ -65,21 +70,34 @@ export const FALLBACK: DetectedOAuthConfig = {
 
 export const FALLBACK_FOR_DRIFT_CHECK = FALLBACK;
 
-function sanitizeScopes(scopes: string | null | undefined): string {
-  if (!scopes || scopes.includes(REJECTED_SCOPE)) {
-    return SAFE_FALLBACK_SCOPES;
-  }
-
-  return scopes;
+function hasPollutedCachedScope(scopes: string): boolean {
+  const parsedScopes = scopes.split(/\s+/).filter(Boolean);
+  return parsedScopes.includes(POLLUTED_CACHED_SCOPE) || !parsedScopes.includes("org:create_api_key");
 }
 
-function hasPollutedCachedScope(scopes: string): boolean {
-  return scopes.split(/\s+/).includes(POLLUTED_CACHED_SCOPE);
+export function filterScopesByBinaryPresence(buf: Buffer, expected: string[]): string[] {
+  const verified: string[] = [];
+
+  for (const scope of expected) {
+    const needle = Buffer.from(`"${scope}"`);
+    if (buf.includes(needle)) {
+      verified.push(scope);
+    }
+  }
+
+  return verified;
+}
+
+function getVerifiedCanonicalScopes(buf: Buffer, fallbackScopes: string): string | null {
+  const expectedScopes = fallbackScopes.split(/\s+/).filter(Boolean);
+  const verifiedScopes = filterScopesByBinaryPresence(buf, expectedScopes);
+
+  return verifiedScopes.length === expectedScopes.length ? verifiedScopes.join(" ") : null;
 }
 
 export function normalizeAuthorizeUrl(url: string): string {
-  if (url === "https://claude.ai/oauth/authorize") {
-    return "https://claude.com/cai/oauth/authorize";
+  if (url === "https://claude.com/cai/oauth/authorize") {
+    return "https://claude.ai/oauth/authorize";
   }
 
   return url;
@@ -225,7 +243,7 @@ function extractCandidateFromBlock(block: string): ScoredOAuthCandidate | null {
     clientId: clientIdMatch[1],
     authorizeUrl: authorizeUrl || FALLBACK.authorizeUrl,
     tokenUrl: tokenUrl || FALLBACK.tokenUrl,
-    scopes: sanitizeScopes(extractedScopes),
+    scopes: extractedScopes || FALLBACK.scopes,
     baseApiUrl: baseApiUrl || FALLBACK.baseApiUrl,
   };
 
@@ -242,10 +260,18 @@ function extractCandidateFromBlock(block: string): ScoredOAuthCandidate | null {
 let memoizedConfig: DetectedOAuthConfig | null = null;
 let detectorTestOverrides: DetectorTestOverrides = {};
 
+function getPlatform(): NodeJS.Platform {
+  return detectorTestOverrides.platform?.() ?? platform();
+}
+
+function fileExists(path: string): boolean {
+  return (detectorTestOverrides.existsSync ?? existsSync)(path);
+}
+
 function candidatePaths(): string[] {
   const home = homedir();
 
-  if (platform() === "win32") {
+  if (getPlatform() === "win32") {
     return [
       join(home, ".local", "bin", "claude.exe"),
       join(home, "AppData", "Roaming", "npm", "node_modules", "@anthropic-ai", "claude-code", "cli.js"),
@@ -265,6 +291,62 @@ function candidatePaths(): string[] {
     join(home, ".claude", "local", "node_modules", "@anthropic-ai", "claude-code", "cli.js"),
     join(home, ".claude", "local", "node_modules", "@anthropic-ai", "claude-code", "cli.mjs"),
   ];
+}
+
+export function enumerateCCCandidates(): string[] {
+  const seen = new Set<string>();
+  const candidates: string[] = [];
+  const currentPlatform = getPlatform();
+  const pathDelimiter = currentPlatform === "win32" ? ";" : ":";
+  const pathDirs = (detectorTestOverrides.pathEnv ?? process.env.PATH ?? "")
+    .split(pathDelimiter)
+    .filter(Boolean);
+  const pathCandidateNames = currentPlatform === "win32"
+    ? ["claude.exe", "claude.cmd", "claude"]
+    : ["claude"];
+
+  const addCandidate = (candidatePath: string): void => {
+    const key = currentPlatform === "win32" ? candidatePath.toLowerCase() : candidatePath;
+    if (seen.has(key) || !fileExists(candidatePath)) {
+      return;
+    }
+
+    seen.add(key);
+    candidates.push(candidatePath);
+  };
+
+  for (const dir of pathDirs) {
+    for (const fileName of pathCandidateNames) {
+      addCandidate(join(dir, fileName));
+    }
+  }
+
+  for (const candidatePath of candidatePaths()) {
+    addCandidate(candidatePath);
+  }
+
+  return candidates;
+}
+
+function probeOneVersion(binPath: string): string | null {
+  const currentPlatform = getPlatform();
+
+  if (currentPlatform === "win32" && /\.(cmd|bat)$/i.test(binPath) && /[&|><^"'%\r\n`$;(){}\[\]]/.test(binPath)) {
+    return null;
+  }
+
+  try {
+    const output = (detectorTestOverrides.execFileSync ?? defaultExecFileSync)(binPath, ["--version"], {
+      timeout: 2_000,
+      encoding: "utf-8",
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "ignore"],
+      shell: currentPlatform === "win32" && /\.(cmd|bat)$/i.test(binPath),
+    });
+    return output.match(/(\d+\.\d+\.\d+(?:[.\-][\w.\-]+)?)/)?.[1] ?? null;
+  } catch {
+    return null;
+  }
 }
 
 function getCachePath(): string {
@@ -381,7 +463,7 @@ function normalizeOverride(value: unknown): Partial<DetectedOAuthConfigPayload> 
 
   const scopes = readOverrideField(candidate, "scopes");
   if (scopes) {
-    normalized.scopes = sanitizeScopes(scopes);
+    normalized.scopes = scopes;
   }
 
   const baseApiUrl = readOverrideUrl(candidate, "baseApiUrl");
@@ -430,17 +512,28 @@ async function applyManualOverride(baseConfig: DetectedOAuthConfig): Promise<Det
 
 export function findCCBinary(): string | null {
   const override = process.env.ANTHROPIC_CC_PATH;
-  if (override && existsSync(override)) {
+  if (override && fileExists(override)) {
     return override;
   }
 
-  for (const candidatePath of candidatePaths()) {
-    if (existsSync(candidatePath)) {
-      return candidatePath;
-    }
+  const candidates = enumerateCCCandidates();
+  if (candidates.length === 0) {
+    return null;
   }
 
-  return null;
+  if (candidates.length === 1) {
+    return candidates[0] ?? null;
+  }
+
+  const probedCandidates = candidates
+    .map((candidatePath) => {
+      const version = probeOneVersion(candidatePath);
+      return version ? { path: candidatePath, version } : null;
+    })
+    .filter((candidate): candidate is { path: string; version: string } => candidate !== null)
+    .sort((left, right) => (compareVersions(right.version, left.version) ?? 0));
+
+  return probedCandidates[0]?.path ?? candidates[0] ?? null;
 }
 
 export async function fingerprintBinary(path: string): Promise<string> {
@@ -531,10 +624,16 @@ export async function detectOAuthConfig(): Promise<DetectedOAuthConfig> {
     }
 
     const readBinaryFile = detectorTestOverrides.readBinaryFile || readFile;
-    const scannedConfig = scanBinaryForOAuthConfig(await readBinaryFile(ccPath));
+    const binaryBuffer = await readBinaryFile(ccPath);
+    const scannedConfig = scanBinaryForOAuthConfig(binaryBuffer);
     if (!scannedConfig) {
       memoizedConfig = await applyManualOverride(toFallbackConfig(ccPath, ccHash));
       return memoizedConfig;
+    }
+
+    const verifiedCanonicalScopes = getVerifiedCanonicalScopes(binaryBuffer, FALLBACK.scopes);
+    if (verifiedCanonicalScopes) {
+      scannedConfig.scopes = verifiedCanonicalScopes;
     }
 
     const runtimeDetectedConfig = normalizeDetectedOAuthConfigPayload(scannedConfig);
