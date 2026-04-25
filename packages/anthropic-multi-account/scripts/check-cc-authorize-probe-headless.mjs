@@ -1,6 +1,11 @@
 #!/usr/bin/env node
-import { createHash, randomBytes } from "node:crypto";
 import { classifyAuthorizeResponse } from "./_authorize-probe-classifier.mjs";
+import {
+  AUTHORIZE_PROBE_BASE_SCOPES,
+  AUTHORIZE_PROBE_EXPANDED_SCOPES,
+  buildAuthorizeProbePayload,
+  buildAuthorizeUrl,
+} from "./_authorize-probe-contract.mjs";
 
 let playwright;
 try {
@@ -10,46 +15,8 @@ try {
   process.exit(2);
 }
 
-const FALLBACK_FOR_DRIFT_CHECK = {
-  clientId: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
-  authorizeUrl: "https://claude.ai/oauth/authorize",
-  scopes: "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload",
-};
-
 const PROBE_TIMEOUT_MS = Number(process.env.PROBE_TIMEOUT_MS ?? "15000");
-const REDIRECT_URI = "http://127.0.0.1:45454/callback";
-const PKCE_CHALLENGE_METHOD = "S256";
-const EXCLUDED_EXPANDED_SCOPE = "org:create_api_key";
 const INCONCLUSIVE_VERDICT = "inconclusive";
-const BASE_SCOPES = FALLBACK_FOR_DRIFT_CHECK.scopes;
-const EXPANDED_SCOPES = BASE_SCOPES
-  .split(" ")
-  .filter((scope) => scope !== EXCLUDED_EXPANDED_SCOPE)
-  .join(" ");
-
-function base64url(buffer) {
-  return buffer.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-}
-
-function createPkceChallenge() {
-  const verifier = base64url(randomBytes(32));
-  return base64url(createHash("sha256").update(verifier).digest());
-}
-
-function buildAuthorizeUrl(scopes) {
-  const challenge = createPkceChallenge();
-  const url = new URL(FALLBACK_FOR_DRIFT_CHECK.authorizeUrl);
-
-  url.searchParams.set("response_type", "code");
-  url.searchParams.set("client_id", FALLBACK_FOR_DRIFT_CHECK.clientId);
-  url.searchParams.set("redirect_uri", REDIRECT_URI);
-  url.searchParams.set("scope", scopes);
-  url.searchParams.set("state", base64url(randomBytes(12)));
-  url.searchParams.set("code_challenge", challenge);
-  url.searchParams.set("code_challenge_method", PKCE_CHALLENGE_METHOD);
-
-  return url;
-}
 
 async function readResponseBody(response) {
   return response.text().catch(() => "");
@@ -111,39 +78,12 @@ async function probe(browser, scopes, label) {
   }
 }
 
-function createVerdict(drifted, message) {
-  return { drifted, message };
-}
-
-function summarizeVerdicts(baseVerdict, expandedVerdict) {
-  if (baseVerdict === "accepted" && expandedVerdict === "rejected") {
-    return createVerdict(false, "authorize scope behavior matches expected policy");
-  }
-
-  if (baseVerdict === "accepted" && expandedVerdict === "accepted") {
-    return createVerdict(false, "authorize policy is more permissive than expected but pinned 6-scope remains accepted");
-  }
-
-  if (baseVerdict === "rejected") {
-    return createVerdict(true, "pinned 6-scope fallback is no longer accepted");
-  }
-
-  return createVerdict(false, `authorize probe inconclusive (${baseVerdict}/${expandedVerdict})`);
-}
-
 function writeReport(baseVerdict, expandedVerdict) {
-  const verdict = summarizeVerdicts(baseVerdict, expandedVerdict);
-  const payload = {
-    checkedAt: new Date().toISOString(),
-    baseVerdict,
-    expandedVerdict,
-    drifted: verdict.drifted,
-    message: verdict.message,
-  };
+  const payload = buildAuthorizeProbePayload({ baseVerdict, expandedVerdict });
 
   console.log(JSON.stringify(payload, null, 2));
 
-  process.exitCode = verdict.drifted ? 1 : 0;
+  process.exitCode = payload.drifted ? 1 : 0;
 }
 
 async function main() {
@@ -165,8 +105,8 @@ async function main() {
   }
 
   try {
-    const baseVerdict = await probe(browser, BASE_SCOPES, "base");
-    const expandedVerdict = await probe(browser, EXPANDED_SCOPES, "expanded");
+    const baseVerdict = await probe(browser, AUTHORIZE_PROBE_BASE_SCOPES, "base");
+    const expandedVerdict = await probe(browser, AUTHORIZE_PROBE_EXPANDED_SCOPES, "expanded");
     writeReport(baseVerdict, expandedVerdict);
   } finally {
     await browser.close().catch(() => {});
