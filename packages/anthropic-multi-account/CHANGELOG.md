@@ -1,5 +1,14 @@
 # opencode-anthropic-multi-account
 
+## 0.2.25
+
+### Patch Changes
+
+- [`d83c36e`](https://github.com/other-yuka/kyoli-gam/commit/d83c36ed84e9dbf6a752d1aad1215232a5822851) Thanks [@other-yuka](https://github.com/other-yuka)! - Add the headless Claude Code authorize probe, wire the drift-watch fallback flow, and share the probe contract across fetch and browser implementations.
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.25
+
 ## 0.2.24
 
 ### Patch Changes
