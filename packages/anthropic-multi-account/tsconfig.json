@@ -3,7 +3,6 @@
     "target": "ESNext",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "baseUrl": ".",
     "paths": {
       "opencode-multi-account-core": ["../multi-account-core/src/index.ts"]
     },

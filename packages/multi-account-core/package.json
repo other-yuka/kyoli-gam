@@ -42,7 +42,7 @@
     "valibot": "^1.2.0"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "^0.15.30",
+    "@opencode-ai/plugin": "^1.14.24",
     "@types/node": "^25.2.2",
     "typescript": "^5.8.0"
   },

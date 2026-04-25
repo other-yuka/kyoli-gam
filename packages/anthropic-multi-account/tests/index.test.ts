@@ -39,12 +39,12 @@ describe("index", () => {
     const transform = plugin["experimental.chat.system.transform"] as (
       input: unknown,
       output: { system?: string[] },
-    ) => void;
+    ) => Promise<void>;
     const template = loadTemplate();
 
     const output: { system?: string[] } = { system: ["existing"] };
-    transform({}, output);
-    transform({}, output);
+    await transform({}, output);
+    await transform({}, output);
 
     expect(output.system).toContain(template.agent_identity);
     expect(output.system?.filter((entry) => entry === template.agent_identity)).toHaveLength(1);
