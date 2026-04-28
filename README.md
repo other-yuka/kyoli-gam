@@ -160,17 +160,14 @@ bun run build
 
 ## Release Process
 
-> [!NOTE]
-> Draft: this release flow will be finalized after the release workflow update in Task 3.
-
 This project uses [Changesets](https://github.com/changesets/changesets) for versioning and release automation.
 
 1. After making changes, run `bunx changeset` to add a changeset file.
    - Select the bump type: `patch`, `minor`, or `major`
    - Add a short description of the change (used in `CHANGELOG`)
 2. Create a PR that includes the changeset file, then merge it.
-3. After merge, the Changesets bot automatically opens a `Version Packages` PR.
-4. Merge the `Version Packages` PR to trigger automatic npm publish and GitHub Release creation.
+3. After merge, the release workflow opens or updates a `Version Packages` PR.
+4. Merge the `Version Packages` PR to publish packages to npm and create GitHub Releases.
 
 ## Legal
 
