@@ -1,4 +1,9 @@
+import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, mock, test, vi } from "bun:test";
+
+const bundledTemplateJson = JSON.parse(
+  readFileSync(new URL("../../src/claude-code/fingerprint/data.json", import.meta.url), "utf8"),
+) as MinimalTemplate;
 
 const detectCliVersionMock = vi.fn(() => "2.3.5");
 const loadTemplateMock = vi.fn();
@@ -8,6 +13,7 @@ mock.module("../../src/claude-code/cli-version", () => ({
 }));
 
 mock.module("../../src/claude-code/fingerprint/capture", () => ({
+  compareVersions: vi.fn(() => 0),
   loadTemplate: loadTemplateMock,
 }));
 
@@ -44,6 +50,11 @@ function createMinimalTemplate(overrides?: Partial<MinimalTemplate>): MinimalTem
     tool_names: ["Bash"],
     ...overrides,
   };
+}
+
+function getBundledBetaFallback(): string {
+  const bundledTemplate = bundledTemplateJson as MinimalTemplate;
+  return bundledTemplate.anthropic_beta ?? bundledTemplate.header_values?.["anthropic-beta"] ?? "";
 }
 
 beforeEach(() => {
@@ -168,9 +179,8 @@ describe("getBetaHeader", () => {
 
     const beta = getBetaHeader();
 
-    expect(beta).toContain("claude-code-20250219");
-    expect(beta).toContain("afk-mode-2026-01-31");
-    expect(beta).toContain("effort-2025-11-24");
+    expect(beta).toBe(getBundledBetaFallback());
+    expect(beta.length).toBeGreaterThan(0);
   });
 
   test("falls back when template beta is empty string", () => {
@@ -180,7 +190,8 @@ describe("getBetaHeader", () => {
 
     const beta = getBetaHeader();
 
-    expect(beta).toContain("claude-code-20250219");
+    expect(beta).toBe(getBundledBetaFallback());
+    expect(beta.length).toBeGreaterThan(0);
   });
 });
 
