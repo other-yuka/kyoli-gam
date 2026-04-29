@@ -1,5 +1,14 @@
 # opencode-anthropic-multi-account
 
+## 0.2.27
+
+### Patch Changes
+
+- Retry provider-rejected assistant prefill requests, strengthen authorize probe state generation, and refresh the bundled Claude Code 2.1.122 fingerprint.
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.27
+
 ## 0.2.26
 
 ### Patch Changes
