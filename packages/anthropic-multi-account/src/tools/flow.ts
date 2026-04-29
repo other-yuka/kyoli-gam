@@ -13,18 +13,32 @@ export type ReverseLookup = Map<string, string>;
 
 const TOOL_MASK_PREFIX = "tool_";
 
+type ToolFlowLookup = {
+  originalToOutgoing: Map<string, string>;
+  outgoingToOriginal: ReverseLookup;
+};
+
+type OutgoingNameRegistry = {
+  usedOutgoing: Set<string>;
+  reservedOriginals: ReadonlySet<string>;
+};
+
 function isRecord(value: unknown): value is JsonRecord {
   return typeof value === "object" && value !== null;
 }
 
-function shouldMaskToolName(name: string | undefined, claudeToolNames: ReadonlySet<string>): name is string {
+function shouldMaskToolName(
+  name: string | undefined,
+  claudeToolNames: ReadonlySet<string>,
+  options: { preserveToolPrefix: boolean },
+): name is string {
   if (!name) {
     return false;
   }
 
   return !claudeToolNames.has(name)
     && !name.startsWith("mcp__")
-    && !name.startsWith(TOOL_MASK_PREFIX);
+    && (!options.preserveToolPrefix || !name.startsWith(TOOL_MASK_PREFIX));
 }
 
 function buildMaskedToolName(toolName: string, length = 8): string {
@@ -36,7 +50,30 @@ function buildMaskedToolName(toolName: string, length = 8): string {
   return `${TOOL_MASK_PREFIX}${digest}`;
 }
 
-function collectToolNames(parsed: RequestPayload): string[] {
+function isOutgoingNameAvailable(name: string, registry: OutgoingNameRegistry): boolean {
+  return !registry.usedOutgoing.has(name) && !registry.reservedOriginals.has(name);
+}
+
+function buildAvailableMaskedToolName(toolName: string, registry: OutgoingNameRegistry): string {
+  for (let length = 8; length <= 64; length += 2) {
+    const masked = buildMaskedToolName(toolName, length);
+    if (isOutgoingNameAvailable(masked, registry)) {
+      return masked;
+    }
+  }
+
+  const fullDigestName = buildMaskedToolName(toolName, 64);
+  for (let suffix = 1; suffix <= 1_024; suffix += 1) {
+    const masked = `${fullDigestName}_${suffix}`;
+    if (isOutgoingNameAvailable(masked, registry)) {
+      return masked;
+    }
+  }
+
+  return `${fullDigestName}_${registry.usedOutgoing.size + registry.reservedOriginals.size}`;
+}
+
+function collectCurrentToolNames(parsed: RequestPayload): string[] {
   const names = new Set<string>();
 
   if (Array.isArray(parsed.tools)) {
@@ -46,6 +83,12 @@ function collectToolNames(parsed: RequestPayload): string[] {
       }
     }
   }
+
+  return [...names];
+}
+
+function collectReferencedToolNames(parsed: RequestPayload): string[] {
+  const names = new Set<string>();
 
   if (Array.isArray(parsed.messages)) {
     for (const message of parsed.messages) {
@@ -76,48 +119,88 @@ export function buildRequestScopedToolLookup(
   parsed: RequestPayload,
   claudeToolNames: readonly string[],
 ): ReverseLookup {
-  const lookup: ReverseLookup = new Map();
-  const usedOutgoing = new Set<string>();
-  const claudeToolSet = buildClaudeToolNameSet(claudeToolNames);
-
-  for (const originalName of collectToolNames(parsed)) {
-    if (!shouldMaskToolName(originalName, claudeToolSet)) {
-      lookup.set(originalName, originalName);
-      usedOutgoing.add(originalName);
-      continue;
-    }
-
-    let length = 8;
-    let masked = buildMaskedToolName(originalName, length);
-    while (usedOutgoing.has(masked)) {
-      length += 2;
-      masked = buildMaskedToolName(originalName, length);
-    }
-
-    lookup.set(masked, originalName);
-    usedOutgoing.add(masked);
-  }
-
-  return lookup;
+  return buildToolFlowLookup(parsed, claudeToolNames).outgoingToOriginal;
 }
 
-function getOutgoingName(name: string | undefined, reverseLookup: ReverseLookup): string | undefined {
+function buildToolFlowLookup(
+  parsed: RequestPayload,
+  claudeToolNames: readonly string[],
+): ToolFlowLookup {
+  const originalToOutgoing = new Map<string, string>();
+  const outgoingToOriginal: ReverseLookup = new Map();
+  const registry: OutgoingNameRegistry = {
+    usedOutgoing: new Set<string>(),
+    reservedOriginals: new Set(collectCurrentToolNames(parsed)),
+  };
+  const claudeToolSet = buildClaudeToolNameSet(claudeToolNames);
+
+  const registerCurrent = (originalName: string) => {
+    if (originalToOutgoing.has(originalName)) {
+      return;
+    }
+
+    if (!shouldMaskToolName(originalName, claudeToolSet, { preserveToolPrefix: false })) {
+      originalToOutgoing.set(originalName, originalName);
+      outgoingToOriginal.set(originalName, originalName);
+      registry.usedOutgoing.add(originalName);
+      return;
+    }
+
+    const masked = buildAvailableMaskedToolName(originalName, registry);
+
+    originalToOutgoing.set(originalName, masked);
+    outgoingToOriginal.set(masked, originalName);
+    registry.usedOutgoing.add(masked);
+  };
+
+  const registerReference = (originalName: string) => {
+    if (originalToOutgoing.has(originalName) || outgoingToOriginal.has(originalName)) {
+      return;
+    }
+
+    if (!shouldMaskToolName(originalName, claudeToolSet, { preserveToolPrefix: true })) {
+      originalToOutgoing.set(originalName, originalName);
+      outgoingToOriginal.set(originalName, originalName);
+      registry.usedOutgoing.add(originalName);
+      return;
+    }
+
+    const masked = buildAvailableMaskedToolName(originalName, registry);
+    originalToOutgoing.set(originalName, masked);
+    outgoingToOriginal.set(masked, originalName);
+    registry.usedOutgoing.add(masked);
+  };
+
+  for (const originalName of collectCurrentToolNames(parsed)) {
+    registerCurrent(originalName);
+  }
+
+  for (const originalName of collectReferencedToolNames(parsed)) {
+    registerReference(originalName);
+  }
+
+  return { originalToOutgoing, outgoingToOriginal };
+}
+
+function getOutgoingName(name: string | undefined, lookup: ToolFlowLookup): string | undefined {
   if (!name) {
     return name;
   }
 
-  for (const [outgoing, original] of reverseLookup) {
-    if (original === name) {
-      return outgoing;
-    }
+  if (lookup.outgoingToOriginal.has(name)) {
+    return name;
   }
 
-  return name;
+  return lookup.originalToOutgoing.get(name) ?? name;
 }
 
-function rewriteToolUseNames(value: unknown, reverseLookup: ReverseLookup): unknown {
+function getOriginalName(name: string, reverseLookup: ReverseLookup): string {
+  return reverseLookup.get(name) ?? name;
+}
+
+function rewriteToolUseNames(value: unknown, lookup: ToolFlowLookup): unknown {
   if (Array.isArray(value)) {
-    return value.map((item) => rewriteToolUseNames(item, reverseLookup));
+    return value.map((item) => rewriteToolUseNames(item, lookup));
   }
 
   if (!isRecord(value)) {
@@ -126,11 +209,32 @@ function rewriteToolUseNames(value: unknown, reverseLookup: ReverseLookup): unkn
 
   const cloned: JsonRecord = {};
   for (const [key, nested] of Object.entries(value)) {
-    cloned[key] = rewriteToolUseNames(nested, reverseLookup);
+    cloned[key] = rewriteToolUseNames(nested, lookup);
   }
 
   if (cloned.type === "tool_use" && typeof cloned.name === "string") {
-    cloned.name = getOutgoingName(cloned.name, reverseLookup);
+    cloned.name = getOutgoingName(cloned.name, lookup);
+  }
+
+  return cloned;
+}
+
+function reverseToolUseNames(value: unknown, reverseLookup: ReverseLookup): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => reverseToolUseNames(item, reverseLookup));
+  }
+
+  if (!isRecord(value)) {
+    return value;
+  }
+
+  const cloned: JsonRecord = {};
+  for (const [key, nested] of Object.entries(value)) {
+    cloned[key] = reverseToolUseNames(nested, reverseLookup);
+  }
+
+  if (cloned.type === "tool_use" && typeof cloned.name === "string") {
+    cloned.name = getOriginalName(cloned.name, reverseLookup);
   }
 
   return cloned;
@@ -140,13 +244,13 @@ export function applyOutboundToolFlow(
   parsed: RequestPayload,
   claudeToolNames: readonly string[],
 ): { body: string; reverseLookup: ReverseLookup } {
-  const reverseLookup = buildRequestScopedToolLookup(parsed, claudeToolNames);
+  const lookup = buildToolFlowLookup(parsed, claudeToolNames);
   const next: RequestPayload = { ...parsed };
 
   if (Array.isArray(parsed.tools)) {
     next.tools = parsed.tools.map((tool) => ({
       ...tool,
-      name: getOutgoingName(tool.name, reverseLookup),
+      name: getOutgoingName(tool.name, lookup),
     }));
   }
 
@@ -158,7 +262,7 @@ export function applyOutboundToolFlow(
 
       return {
         ...message,
-        content: rewriteToolUseNames(message.content, reverseLookup),
+        content: rewriteToolUseNames(message.content, lookup),
       };
     });
   }
@@ -166,20 +270,20 @@ export function applyOutboundToolFlow(
   if (isRecord(parsed.tool_choice) && parsed.tool_choice.type === "tool") {
     next.tool_choice = {
       ...parsed.tool_choice,
-      name: getOutgoingName(parsed.tool_choice.name as string | undefined, reverseLookup),
+      name: getOutgoingName(parsed.tool_choice.name as string | undefined, lookup),
     };
   }
 
   return {
     body: JSON.stringify(next),
-    reverseLookup,
+    reverseLookup: lookup.outgoingToOriginal,
   };
 }
 
 export function reverseToolFlowPayload<T>(value: T, reverseLookup?: ReverseLookup): T {
   if (!reverseLookup || reverseLookup.size === 0) {
-    return rewriteToolUseNames(value, new Map()) as T;
+    return value;
   }
 
-  return rewriteToolUseNames(value, reverseLookup) as T;
+  return reverseToolUseNames(value, reverseLookup) as T;
 }
