@@ -236,6 +236,43 @@ describe("upstream-request", () => {
     ]);
   });
 
+  test("buildUpstreamRequest preserves trailing assistant text for provider-level prefill handling", () => {
+    const result = buildUpstreamRequest({
+      model: "claude-sonnet-4-6",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hello" }] },
+        { role: "assistant", content: [{ type: "text", text: "partial answer" }] },
+      ],
+    }, createIdentity(), createTemplate());
+
+    const messages = result.messages as Array<{ role: string; content: unknown }>;
+
+    expect(messages).toEqual([
+      { role: "user", content: [{ type: "text", text: "hello" }] },
+      { role: "assistant", content: [{ type: "text", text: "partial answer" }] },
+    ]);
+  });
+
+  test("buildUpstreamRequest preserves trailing assistant tool_use for dangling validation", () => {
+    const result = buildUpstreamRequest({
+      model: "claude-sonnet-4-6",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hello" }] },
+        {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "toolu_1", name: "AskUserQuestion", input: { question: "x" } },
+          ],
+        },
+      ],
+    }, createIdentity(), createTemplate());
+
+    const messages = result.messages as Array<{ role: string; content: unknown }>;
+
+    expect(messages).toHaveLength(2);
+    expect(messages[1]?.role).toBe("assistant");
+  });
+
   test("buildUpstreamRequest preserves trailing tool_result even when sanitization empties its content", () => {
     const result = buildUpstreamRequest({
       model: "claude-sonnet-4-6",

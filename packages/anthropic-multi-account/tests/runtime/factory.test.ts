@@ -221,6 +221,46 @@ describe("runtime-factory", () => {
     });
   });
 
+  test("runtime.fetch retries once without trailing assistant prefill when provider rejects it", async () => {
+    const uuid = await seedAccount();
+    const factory = new AccountRuntimeFactory(store, client);
+    const runtime = await factory.getRuntime(uuid);
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: {
+          message: "This model does not support assistant message prefill. The conversation must end with a user message.",
+        },
+      }), { status: 400, headers: { "content-type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { headers: { "content-type": "application/json" } }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const response = await runtime.fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        messages: [
+          { role: "user", content: [{ type: "text", text: "hello" }] },
+          { role: "assistant", content: [{ type: "text", text: "partial answer" }] },
+        ],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    const firstBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as {
+      messages: Array<{ role: string }>;
+    };
+    const secondBody = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body)) as {
+      messages: Array<{ role: string }>;
+    };
+
+    expect(firstBody.messages.at(-1)?.role).toBe("assistant");
+    expect(secondBody.messages.at(-1)?.role).toBe("user");
+  });
+
   test("retries without long-context beta when provider rejects it", async () => {
     process.env.ANTHROPIC_ENABLE_1M_CONTEXT = "true";
     try {
