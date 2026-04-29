@@ -38,7 +38,7 @@ export function deriveExpandedScopes(scopes) {
 
 export function buildAuthorizeUrl(scopes, options = {}) {
   const url = new URL(AUTHORIZE_PROBE_CONFIG.authorizeUrl);
-  const state = options.state ?? base64url(randomBytes(12));
+  const state = options.state ?? base64url(randomBytes(32));
   const codeChallenge = options.codeChallenge ?? createPkceChallenge();
 
   url.searchParams.set("response_type", "code");
