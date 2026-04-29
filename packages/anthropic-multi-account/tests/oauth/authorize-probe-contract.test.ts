@@ -17,6 +17,7 @@ const FIXED_CHECKED_AT = "2026-04-25T00:00:00.000Z";
 const FIXED_STATE = "fixed-state";
 const FIXED_CODE_CHALLENGE = "fixed-code-challenge";
 const PAYLOAD_KEYS = ["baseVerdict", "checkedAt", "drifted", "expandedVerdict", "message"];
+const BASE64URL_32_BYTE_LENGTH = 43;
 
 const responseFixtures = [
   {
@@ -99,6 +100,14 @@ describe("authorize probe contract", () => {
     expect(url.searchParams.get("state")).toBe(FIXED_STATE);
     expect(url.searchParams.get("code_challenge")).toBe(FIXED_CODE_CHALLENGE);
     expect(url.searchParams.get("code_challenge_method")).toBe(AUTHORIZE_PROBE_PKCE_CHALLENGE_METHOD);
+  });
+
+  test("builds authorize URLs with a 32-byte state", () => {
+    const url = buildAuthorizeUrl(AUTHORIZE_PROBE_BASE_SCOPES);
+    const state = url.searchParams.get("state") ?? "";
+
+    expect(state).toHaveLength(BASE64URL_32_BYTE_LENGTH);
+    expect(state).toMatch(/^[A-Za-z0-9_-]+$/);
   });
 
   for (const { name, response, expectedVerdict } of responseFixtures) {
