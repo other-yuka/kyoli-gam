@@ -11,6 +11,18 @@ function toHeaders(headers: HeadersInit | undefined): Headers {
   return new Headers(headers);
 }
 
+function createChunkedStream(chunks: string[]): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      const encoder = new TextEncoder();
+      for (const chunk of chunks) {
+        controller.enqueue(encoder.encode(chunk));
+      }
+      controller.close();
+    },
+  });
+}
+
 describe("runtime-factory", () => {
   let originalFetch: typeof globalThis.fetch;
   let cleanup: () => Promise<void>;
@@ -135,6 +147,39 @@ describe("runtime-factory", () => {
 
     const parsed = await response.json() as { content: Array<{ name?: string }> };
     expect(parsed.content[0]?.name).toBe("search_docs");
+  });
+
+  test("reverse maps masked tool names in streaming responses", async () => {
+    const uuid = await seedAccount();
+    const factory = new AccountRuntimeFactory(store, client);
+    const runtime = await factory.getRuntime(uuid);
+
+    globalThis.fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const outbound = JSON.parse(String(init?.body)) as { tools: Array<{ name?: string }> };
+      const maskedName = outbound.tools[0]?.name ?? "tool_fallback";
+
+      return new Response(createChunkedStream([
+        "event: content_block_start\n",
+        `data: {"content_block":{"type":"tool_use","id":"toolu_1","name":"${maskedName}","input":{}}}\n\n`,
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+      ]), {
+        headers: { "content-type": "text/event-stream" },
+      });
+    }) as unknown as typeof fetch;
+
+    const response = await runtime.fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        tools: [{ name: "search_docs", input_schema: { type: "object" } }],
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    });
+
+    const text = await response.text();
+    expect(text).toContain('"name":"search_docs"');
+    expect(text).not.toContain('"name":"tool_');
   });
 
   test("runtime.fetch preserves empty tool_result after upstream request sanitization", async () => {

@@ -5,6 +5,7 @@ import {
   extractModelIdFromBody,
   extractToolNamesFromRequestBody,
   transformRequestBody,
+  transformRequestBodyWithLookup,
   transformRequestUrl,
 } from "../../src/request/transform";
 import { getUserAgent } from "../../src/model/config";
@@ -266,6 +267,124 @@ describe("transformRequestBody", () => {
       const parsedB = JSON.parse(transformRequestBody(bodyB) as string) as { tools: Array<{ name?: string }> };
 
       expect(parsedA.tools[0]?.name).toBe(parsedB.tools[0]?.name);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("keeps stale masked history aligned with current tool mappings", async () => {
+    const { cleanup } = await setupTestEnv();
+
+    try {
+      const initial = JSON.parse(transformRequestBody(JSON.stringify({
+        tools: [{ name: "search_docs", input_schema: { type: "object" } }],
+        messages: [{ role: "user", content: "hello" }],
+      })) as string) as { tools: Array<{ name?: string }> };
+      const maskedName = initial.tools[0]?.name ?? "";
+
+      const transformed = transformRequestBody(JSON.stringify({
+        tools: [{ name: "search_docs", input_schema: { type: "object" } }],
+        messages: [
+          { role: "user", content: "hello" },
+          { role: "assistant", content: [{ type: "tool_use", name: maskedName }] },
+        ],
+        tool_choice: { type: "tool", name: maskedName },
+      }));
+      const parsed = JSON.parse(transformed as string) as {
+        tools: Array<{ name?: string }>;
+        messages: Array<{ content?: Array<{ name?: string }> }>;
+        tool_choice?: { name?: string };
+      };
+
+      expect(maskedName).toMatch(/^tool_[a-f0-9]+$/);
+      expect(parsed.tools[0]?.name).toBe(maskedName);
+      expect(parsed.messages[1]?.content?.[0]?.name).toBe(maskedName);
+      expect(parsed.tool_choice?.name).toBe(maskedName);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("masks current custom tools whose original names start with tool prefix", async () => {
+    const { cleanup } = await setupTestEnv();
+
+    try {
+      const transformed = transformRequestBody(JSON.stringify({
+        tools: [{ name: "tool_custom", input_schema: { type: "object" } }],
+        messages: [
+          { role: "user", content: "hello" },
+          { role: "assistant", content: [{ type: "tool_use", name: "tool_custom" }] },
+        ],
+      }));
+      const parsed = JSON.parse(transformed as string) as {
+        tools: Array<{ name?: string }>;
+        messages: Array<{ content?: Array<{ name?: string }> }>;
+      };
+
+      expect(parsed.tools[0]?.name).toMatch(/^tool_[a-f0-9]+$/);
+      expect(parsed.tools[0]?.name).not.toBe("tool_custom");
+      expect(parsed.messages[1]?.content?.[0]?.name).toBe(parsed.tools[0]?.name);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("returns reverse lookup for stale masked history without identity overwrite", async () => {
+    const { cleanup } = await setupTestEnv();
+
+    try {
+      const initial = JSON.parse(transformRequestBody(JSON.stringify({
+        tools: [{ name: "search_docs", input_schema: { type: "object" } }],
+        messages: [{ role: "user", content: "hello" }],
+      })) as string) as { tools: Array<{ name?: string }> };
+      const maskedName = initial.tools[0]?.name ?? "";
+      const { reverseLookup } = transformRequestBodyWithLookup(JSON.stringify({
+        tools: [{ name: "search_docs", input_schema: { type: "object" } }],
+        messages: [
+          { role: "user", content: "hello" },
+          { role: "assistant", content: [{ type: "tool_use", name: maskedName }] },
+        ],
+      }));
+
+      expect(reverseLookup.get(maskedName)).toBe("search_docs");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("avoids collisions between generated masks and current tool names", async () => {
+    const { cleanup } = await setupTestEnv();
+
+    try {
+      const initial = JSON.parse(transformRequestBody(JSON.stringify({
+        tools: [{ name: "search_docs", input_schema: { type: "object" } }],
+        messages: [{ role: "user", content: "hello" }],
+      })) as string) as { tools: Array<{ name?: string }> };
+      const reservedName = initial.tools[0]?.name ?? "";
+
+      const { body, reverseLookup } = transformRequestBodyWithLookup(JSON.stringify({
+        tools: [
+          { name: "search_docs", input_schema: { type: "object" } },
+          { name: reservedName, input_schema: { type: "object" } },
+        ],
+        messages: [
+          { role: "user", content: "hello" },
+          { role: "assistant", content: [{ type: "tool_use", name: reservedName }] },
+        ],
+      }));
+      const parsed = JSON.parse(body as string) as {
+        tools: Array<{ name?: string }>;
+        messages: Array<{ content?: Array<{ name?: string }> }>;
+      };
+
+      expect(reservedName).toMatch(/^tool_[a-f0-9]+$/);
+      expect(parsed.tools[0]?.name).not.toBe(reservedName);
+      expect(parsed.tools[1]?.name).not.toBe(reservedName);
+      expect(parsed.tools[0]?.name).not.toBe(parsed.tools[1]?.name);
+      expect(parsed.messages[1]?.content?.[0]?.name).toBe(parsed.tools[1]?.name);
+      expect(reverseLookup.get(parsed.tools[0]?.name ?? "")).toBe("search_docs");
+      expect(reverseLookup.get(parsed.tools[1]?.name ?? "")).toBe(reservedName);
+      expect(reverseLookup.get(reservedName)).toBeUndefined();
     } finally {
       await cleanup();
     }
