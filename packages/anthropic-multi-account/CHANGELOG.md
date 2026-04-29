@@ -1,5 +1,14 @@
 # opencode-anthropic-multi-account
 
+## 0.2.28
+
+### Patch Changes
+
+- Harden Anthropic tool name masking against stale masked history, tool choice re-entry, and masked-name collisions.
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.28
+
 ## 0.2.27
 
 ### Patch Changes
