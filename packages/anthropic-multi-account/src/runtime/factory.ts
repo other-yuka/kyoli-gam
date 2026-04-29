@@ -42,12 +42,18 @@ import { enrich429, sanitizeError } from "../shared/error-utils";
 import { computePacingDelay, resolvePacingConfig } from "./pacing";
 
 type BaseFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+type JsonRecord = Record<string, unknown>;
+type Message = JsonRecord & {
+  role?: string;
+  content?: unknown;
+};
 
 interface AccountRuntime {
   fetch: BaseFetch;
 }
 
 const TOKEN_REFRESH_PERMANENT_FAILURE_STATUS = 401;
+const ASSISTANT_PREFILL_UNSUPPORTED_MESSAGE = "This model does not support assistant message prefill";
 
 function mergeHeaders(target: Record<string, string>, headers: HeadersInit | undefined): void {
   if (!headers) {
@@ -87,6 +93,52 @@ function extractIncomingHeaders(
 
   mergeHeaders(headers, init?.headers);
   return headers;
+}
+
+function isRecord(value: unknown): value is JsonRecord {
+  return typeof value === "object" && value !== null;
+}
+
+function messageHasToolUse(message: Message): boolean {
+  return Array.isArray(message.content)
+    && message.content.some((block) => isRecord(block) && block.type === "tool_use");
+}
+
+function removeTrailingAssistantPrefillBody(body: BodyInit | null | undefined): string | null {
+  if (typeof body !== "string") {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    if (!isRecord(parsed) || !Array.isArray(parsed.messages)) {
+      return null;
+    }
+
+    const messages = parsed.messages as Message[];
+    const originalLength = messages.length;
+
+    while (messages.length > 0) {
+      const lastMessage = messages[messages.length - 1];
+      if (!lastMessage || lastMessage.role !== "assistant" || messageHasToolUse(lastMessage)) {
+        break;
+      }
+
+      messages.pop();
+    }
+
+    return messages.length === originalLength ? null : JSON.stringify(parsed);
+  } catch {
+    return null;
+  }
+}
+
+async function isAssistantPrefillUnsupportedResponse(response: Response): Promise<boolean> {
+  if (response.status !== 400) {
+    return false;
+  }
+
+  return (await response.clone().text()).includes(ASSISTANT_PREFILL_UNSUPPORTED_MESSAGE);
 }
 
 function splitBetaValues(value: string | undefined): string[] {
@@ -373,14 +425,14 @@ export class AccountRuntimeFactory {
       }
     };
 
-    const performFetch = async (requestHeaders: HeadersInit): Promise<Response> => {
+    const performFetch = async (requestHeaders: HeadersInit, requestBody: BodyInit | null | undefined): Promise<Response> => {
       await reservePacingSlot();
 
       try {
         const response = await fetch(transformedInput, {
           ...init,
           headers: requestHeaders,
-          body: transformedRequest.body,
+          body: requestBody,
         });
         return await enrichRateLimitResponse(response);
       } catch (error) {
@@ -391,7 +443,16 @@ export class AccountRuntimeFactory {
       }
     };
 
-    let response = await performFetch(headers);
+    let outboundBody = transformedRequest.body;
+    let response = await performFetch(headers, outboundBody);
+
+    if (await isAssistantPrefillUnsupportedResponse(response)) {
+      const retryBody = removeTrailingAssistantPrefillBody(outboundBody);
+      if (retryBody) {
+        outboundBody = retryBody;
+        response = await performFetch(headers, outboundBody);
+      }
+    }
 
     for (let attempt = 0; attempt < LONG_CONTEXT_BETAS.length; attempt += 1) {
       if (response.status !== 400 && response.status !== 429) {
@@ -429,7 +490,7 @@ export class AccountRuntimeFactory {
         getExcludedBetas(modelId),
       );
 
-      response = await performFetch(retryHeaders);
+      response = await performFetch(retryHeaders, outboundBody);
     }
 
     return applyResponseReverseLookup(response, transformedRequest.reverseLookup);
