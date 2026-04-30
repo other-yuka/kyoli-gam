@@ -35,7 +35,7 @@ const STATIC_HEADER_NAMES = [
 ] as const;
 const SUPPORTED_CC_RANGE = {
   min: "1.0.0",
-  maxTested: "2.1.122",
+  maxTested: "2.1.123",
 } as const;
 
 type TemplateSource = "bundled" | "cached" | "live";
