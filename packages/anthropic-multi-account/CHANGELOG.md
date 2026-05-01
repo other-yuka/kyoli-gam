@@ -1,5 +1,14 @@
 # opencode-anthropic-multi-account
 
+## 0.2.29
+
+### Patch Changes
+
+- [#37](https://github.com/other-yuka/kyoli-gam/pull/37) [`ff6b401`](https://github.com/other-yuka/kyoli-gam/commit/ff6b401f8ed86e104cbf14702620818c150d2678) Thanks [@github-actions](https://github.com/apps/github-actions)! - Update the supported Claude Code compatibility range to 2.1.126.
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.29
+
 ## 0.2.28
 
 ### Patch Changes
