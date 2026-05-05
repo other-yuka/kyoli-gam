@@ -8,7 +8,7 @@ name: Fingerprint drift watch
 
 on:
   schedule:
-    - cron: "0 * * * *"
+    - cron: "0 0-1,3-23 * * *"
     - cron: "0 2 * * *"
   workflow_dispatch:
     inputs:
@@ -161,47 +161,11 @@ jobs:
         if: steps.drift.outputs.exit_code != '0'
         id: autopatch
         run: |
-          node <<'NODE'
-          const fs = require('fs');
-          const path = require('path');
-
-          const report = JSON.parse(fs.readFileSync('drift-report.json', 'utf8'));
-          const items = Array.isArray(report.items) ? report.items : [];
-          const ccVersion = typeof report.ccVersion === 'string' ? report.ccVersion : '';
-          const result = { shouldCreatePr: false, changedFiles: [], reason: '' };
-
-          if (!ccVersion) {
-            result.reason = 'missing ccVersion';
-          } else if (items.length !== 1 || items[0]?.category !== 'compat.range') {
-            result.reason = 'drift is not compat.range-only';
-          } else {
-            const capturePath = 'packages/anthropic-multi-account/src/claude-code/fingerprint/capture.ts';
-            const changesetPath = `.changeset/cc-drift-${ccVersion.replace(/[^0-9A-Za-z.-]/g, '-')}.md`;
-            const capture = fs.readFileSync(capturePath, 'utf8');
-            const nextCapture = capture.replace(/maxTested: "[^"]+"/, `maxTested: "${ccVersion}"`);
-
-            if (nextCapture !== capture) {
-              fs.writeFileSync(capturePath, nextCapture);
-              result.changedFiles.push(capturePath);
-            }
-
-            fs.mkdirSync(path.dirname(changesetPath), { recursive: true });
-            fs.writeFileSync(
-              changesetPath,
-              `---\n"opencode-anthropic-multi-account": patch\n---\n\nUpdate the supported Claude Code compatibility range to ${ccVersion}.\n`,
-            );
-            result.changedFiles.push(changesetPath);
-            result.shouldCreatePr = result.changedFiles.length > 0;
-            result.reason = result.shouldCreatePr ? 'compat.range patched' : 'no file changes';
-          }
-
-          fs.writeFileSync('auto-draft-result.json', `${JSON.stringify(result, null, 2)}\n`);
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `should_create_pr=${result.shouldCreatePr}\n`);
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `changed_files=${JSON.stringify(result.changedFiles)}\n`);
-          NODE
+          node packages/anthropic-multi-account/scripts/auto-draft-static-oauth-drift-fix.mjs
           cat auto-draft-result.json
 
       - name: Open compat range pull request
+        id: compat_pr
         if: steps.autopatch.outputs.should_create_pr == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -238,11 +202,12 @@ jobs:
               --title "chore(anthropic): update Claude Code compatibility range" \
               --body-file pr-body.md)
           fi
+          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
           gh pr merge "$PR_URL" --auto --squash --delete-branch \
             || echo "Auto-merge could not be enabled; PR remains open: $PR_URL"
 
       - name: Ensure fingerprint-drift label exists
-        if: steps.drift.outputs.exit_code != '0'
+        if: steps.drift.outputs.exit_code != '0' && steps.autopatch.outputs.should_create_pr != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -252,7 +217,7 @@ jobs:
             2>/dev/null || true
 
       - name: Open or update drift issue
-        if: steps.drift.outputs.exit_code != '0'
+        if: steps.drift.outputs.exit_code != '0' && steps.autopatch.outputs.should_create_pr != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -304,16 +269,22 @@ jobs:
             gh issue comment "$EXISTING" --body-file issue-body.md
           fi
 
-      - name: Close resolved drift issues
-        if: steps.drift.outputs.exit_code == '0'
+      - name: Close resolved or autopatched drift issues
+        if: steps.drift.outputs.exit_code == '0' || steps.autopatch.outputs.should_create_pr == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMPAT_PR_URL: ${{ steps.compat_pr.outputs.pr_url }}
         run: |
           CC_VERSION="${{ steps.ver.outputs.cc_version }}"
           TITLE_MATCH="Fingerprint drift detected: Claude Code v${CC_VERSION}"
           NUMBERS=$(gh issue list --label fingerprint-drift --state open --search "in:title \"${TITLE_MATCH}\"" --json number --jq '.[].number')
+          if [ -n "$COMPAT_PR_URL" ]; then
+            COMMENT="Handled by automated compatibility PR: $COMPAT_PR_URL"
+          else
+            COMMENT="Resolved — fingerprint-drift-watch static OAuth scan ran clean against Claude Code v${CC_VERSION}."
+          fi
           for n in $NUMBERS; do
-            gh issue close "$n" --comment "Resolved — fingerprint-drift-watch ran clean against Claude Code v${CC_VERSION}. Bundled template now matches."
+            gh issue close "$n" --comment "$COMMENT"
           done
 
       - name: Upload report artifact
