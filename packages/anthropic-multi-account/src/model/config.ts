@@ -1,4 +1,4 @@
-import { loadCCDerivedRequestProfile } from "../claude-code";
+import { claudeCodeIntegration } from "../claude-code";
 import { ANTHROPIC_OAUTH_ADAPTER } from "../shared/constants";
 
 export interface ModelOverride {
@@ -30,11 +30,11 @@ export const config: ModelConfig = {
 };
 
 export function getCliVersion(): string {
-  return loadCCDerivedRequestProfile().cliVersion;
+  return claudeCodeIntegration.loadRequestProfile().cliVersion;
 }
 
 export function getUserAgent(): string {
-  return loadCCDerivedRequestProfile().userAgent;
+  return claudeCodeIntegration.loadRequestProfile().userAgent;
 }
 
 export function getRequiredBetas(): string[] {

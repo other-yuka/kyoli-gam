@@ -17,14 +17,7 @@ import { AccountStore } from "./accounts/store";
 import { AccountRuntimeFactory } from "./runtime/factory";
 import { debugLog, formatWaitTime, getAccountLabel, showToast } from "./shared/utils";
 import { ANTHROPIC_OAUTH_ADAPTER } from "./shared/constants";
-import {
-  checkCCCompat,
-  detectDrift,
-  loadCCDerivedAuthProfile,
-  loadCCDerivedRequestProfile,
-  loadClaudeIdentity,
-  refreshLiveFingerprintAsync,
-} from "./claude-code";
+import { claudeCodeIntegration } from "./claude-code";
 import {
   getBetaHeader,
   getPerRequestHeaders,
@@ -102,9 +95,9 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
 
   await loadConfig();
 
-  const requestProfile = loadCCDerivedRequestProfile();
+  const requestProfile = claudeCodeIntegration.loadRequestProfile();
   const template = requestProfile.template;
-  const claudeIdentity = loadClaudeIdentity();
+  const claudeIdentity = claudeCodeIntegration.loadIdentity();
   const claudeCodeVersion = template.cc_version ?? requestProfile.cliVersion;
   const upstreamAgentIdentity = template.agent_identity;
   const upstreamSystemPrompt = template.system_prompt;
@@ -200,7 +193,7 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
     },
   });
 
-  const startupDrift = detectDrift(template);
+  const startupDrift = claudeCodeIntegration.detectDrift(template);
   if (startupDrift.drifted) {
     client.app.log({
       body: {
@@ -215,7 +208,7 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
     }).catch(() => {});
   }
 
-  const compat = checkCCCompat();
+  const compat = claudeCodeIntegration.checkCompat();
   if (compat.status !== "ok" && compat.status !== "unknown") {
     client.app.log({
       body: {
@@ -230,9 +223,9 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
     }).catch(() => {});
   }
 
-  void refreshLiveFingerprintAsync({ silent: true })
+  void claudeCodeIntegration.refreshLiveFingerprint({ silent: true })
     .then((refreshedTemplate) => {
-      const refreshedDrift = detectDrift(refreshedTemplate ?? template);
+      const refreshedDrift = claudeCodeIntegration.detectDrift(refreshedTemplate ?? template);
       if (!refreshedDrift.drifted) {
         return;
       }
@@ -491,7 +484,7 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
             return { apiKey: "", fetch };
           }
 
-          const authProfile = await loadCCDerivedAuthProfile();
+          const authProfile = await claudeCodeIntegration.loadAuthProfile();
 
           return {
             ...createAuthLoaderResult(manager),
@@ -540,7 +533,7 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
           }
         }
 
-        const authProfile = await loadCCDerivedAuthProfile();
+        const authProfile = await claudeCodeIntegration.loadAuthProfile();
 
         return {
           ...createAuthLoaderResult(initializedManager),

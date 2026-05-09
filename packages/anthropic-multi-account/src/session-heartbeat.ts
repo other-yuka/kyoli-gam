@@ -1,5 +1,5 @@
 import { getUpstreamSessionId } from "./request/upstream-request";
-import { loadCCDerivedRequestProfile } from "./claude-code";
+import { claudeCodeIntegration } from "./claude-code";
 import { getAnthropicVersion } from "./request/headers";
 
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;
@@ -24,7 +24,7 @@ interface HeartbeatTestOverrides {
 let testOverrides: HeartbeatTestOverrides = {};
 
 function presenceUrl(sessionId: string): string {
-  return `${loadCCDerivedRequestProfile().baseApiUrl}/v1/code/sessions/${sessionId}/client/presence`;
+  return `${claudeCodeIntegration.loadRequestProfile().baseApiUrl}/v1/code/sessions/${sessionId}/client/presence`;
 }
 
 function fetchFn(): typeof globalThis.fetch {

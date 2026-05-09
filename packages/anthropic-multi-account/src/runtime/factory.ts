@@ -33,7 +33,7 @@ import {
   getUpstreamSessionId,
   reverseMapResponse,
 } from "../request/upstream-request";
-import { loadClaudeIdentity, loadTemplate, type ClaudeIdentity } from "../claude-code";
+import { claudeCodeIntegration, type ClaudeIdentity } from "../claude-code";
 import type { PluginClient, StoredAccount } from "../shared/types";
 import { recordObservedToolNames } from "../tools/observation";
 import { debugLog } from "../shared/utils";
@@ -171,7 +171,7 @@ function transformBodyToUpstream(
       return { body, reverseLookup: new Map(), validationError: null };
     }
 
-    const template = loadTemplate();
+    const template = claudeCodeIntegration.loadTemplate();
 
     const upstreamRequest = buildUpstreamRequest(
       parsed as Record<string, unknown>,
@@ -257,7 +257,7 @@ export class AccountRuntimeFactory {
   constructor(
     private readonly store: AccountStore,
     private readonly client: PluginClient,
-    private readonly identity: ClaudeIdentity = loadClaudeIdentity(),
+    private readonly identity: ClaudeIdentity = claudeCodeIntegration.loadIdentity(),
   ) {}
 
   setPacingTestOverrides(overrides: PacingTestOverrides): void {

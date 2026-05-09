@@ -1,7 +1,7 @@
 import { exec } from "node:child_process";
 import * as v from "valibot";
 import { TOKEN_REFRESH_TIMEOUT_MS } from "../shared/constants";
-import { detectOAuthConfig, loadCCDerivedAuthProfile } from "../claude-code";
+import { claudeCodeIntegration } from "../claude-code";
 import { startCallbackServer } from "./callback-server";
 import { generatePKCE, generateState } from "./pkce";
 import { runNodeTokenRequest } from "./token-node-request";
@@ -129,7 +129,7 @@ async function postTokenEndpoint(
   timeoutMs = TOKEN_REFRESH_TIMEOUT_MS,
   userAgent?: string,
 ): Promise<TokenResponse> {
-  const derivedProfile = await loadCCDerivedAuthProfile();
+  const derivedProfile = await claudeCodeIntegration.loadAuthProfile();
   const oauthConfig = derivedProfile.oauthConfig;
   const endpoint = oauthConfig.tokenUrl;
   const resolvedUserAgent = userAgent ?? derivedProfile.userAgent;
@@ -172,7 +172,7 @@ async function exchangeCodeForTokens(params: {
   state: string;
   redirectUri: string;
 }): Promise<TokenResponse> {
-  const derivedProfile = await loadCCDerivedAuthProfile();
+  const derivedProfile = await claudeCodeIntegration.loadAuthProfile();
   const oauthConfig = derivedProfile.oauthConfig;
 
   const body = JSON.stringify({
@@ -188,7 +188,7 @@ async function exchangeCodeForTokens(params: {
 }
 
 export async function loginWithOAuth(callbacks: LoginCallbacks): Promise<Partial<StoredAccount>> {
-  const { oauthConfig: cfg } = await loadCCDerivedAuthProfile();
+  const { oauthConfig: cfg } = await claudeCodeIntegration.loadAuthProfile();
   const { verifier: codeVerifier, challenge: codeChallenge } = generatePKCE();
   const state = generateState();
   const { port, waitForCode, stop } = await callbackServerStarter({ expectedState: state });
@@ -250,7 +250,7 @@ export async function loginWithOAuth(callbacks: LoginCallbacks): Promise<Partial
 const REFRESH_TIMEOUT_MS = 15_000;
 
 export async function refreshWithOAuth(currentRefreshToken: string): Promise<CredentialRefreshPatch> {
-  const { oauthConfig } = await loadCCDerivedAuthProfile();
+  const { oauthConfig } = await claudeCodeIntegration.loadAuthProfile();
 
   const body = new URLSearchParams({
     grant_type: "refresh_token",
@@ -284,7 +284,7 @@ export async function refreshWithOAuth(currentRefreshToken: string): Promise<Cre
   return patch;
 }
 
-export { detectOAuthConfig };
+export const detectOAuthConfig = claudeCodeIntegration.detectOAuthConfig;
 
 export const anthropicOAuthTestExports = {
   getOpenBrowserCommand,

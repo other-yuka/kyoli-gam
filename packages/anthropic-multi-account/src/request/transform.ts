@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { ensureOauthBeta, getModelBetas } from "./betas";
-import { loadClaudeIdentity, loadTemplate } from "../claude-code";
+import { claudeCodeIntegration } from "../claude-code";
 import { ANTHROPIC_OAUTH_ADAPTER } from "../shared/constants";
 import {
   createStreamingReverseMapper,
@@ -117,7 +117,7 @@ export function extractRequestToolMaskMap(body: string | undefined): ReverseLook
 
   try {
     const parsed = JSON.parse(body) as RequestPayload;
-    return isRecord(parsed) ? buildRequestScopedToolLookup(parsed, loadTemplate().tool_names) : new Map();
+    return isRecord(parsed) ? buildRequestScopedToolLookup(parsed, claudeCodeIntegration.loadTemplate().tool_names) : new Map();
   } catch {
     return new Map();
   }
@@ -132,7 +132,7 @@ export function applyRequestToolMasking(
 
 export function transformRequestBodyWithLookup(
   body: string | undefined,
-  identity = loadClaudeIdentity(),
+  identity = claudeCodeIntegration.loadIdentity(),
 ): { body: string | undefined; reverseLookup: ReverseLookup } {
   if (!body) {
     return { body, reverseLookup: new Map() };
@@ -144,7 +144,7 @@ export function transformRequestBodyWithLookup(
       return { body, reverseLookup: new Map() };
     }
 
-    const template = loadTemplate();
+    const template = claudeCodeIntegration.loadTemplate();
     const upstreamRequest = buildUpstreamRequest(parsed, identity, template);
     return applyRequestToolMasking(upstreamRequest as RequestPayload, template.tool_names);
   } catch {

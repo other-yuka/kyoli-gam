@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { ClaudeIdentity, TemplateData } from "../claude-code";
+import { claudeCodeIntegration, type ClaudeIdentity, type TemplateData } from "../claude-code";
 import { getRuntimeModelCapability } from "../model/capabilities";
-import { detectCliVersion } from "../claude-code";
 
 const BILLING_SEED = "59cf53e54c78";
 const SESSION_IDLE_ROTATE_MS = 15 * 60 * 1000;
@@ -447,7 +446,7 @@ function buildOutboundTools(
 }
 
 function getCcVersion(template: TemplateData): string {
-  return template.cc_version ?? detectCliVersion();
+  return template.cc_version ?? claudeCodeIntegration.detectCliVersion();
 }
 
 function buildBillingHeader(firstUserMessage: string, template: TemplateData): string {

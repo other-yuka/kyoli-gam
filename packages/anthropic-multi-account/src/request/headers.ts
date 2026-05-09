@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { loadCCDerivedRequestProfile } from "../claude-code";
+import { claudeCodeIntegration } from "../claude-code";
 
 const UPSTREAM_TIMEOUT_MS = 300_000;
 const STAINLESS_PACKAGE_VERSION = "0.81.0";
@@ -14,7 +14,7 @@ function getOsName(): string {
 }
 
 export function getStaticHeaders(): Record<string, string> {
-  const profile = loadCCDerivedRequestProfile();
+  const profile = claudeCodeIntegration.loadRequestProfile();
 
   const headers: Record<string, string> = {
     "accept": "application/json",
@@ -51,18 +51,18 @@ export function getPerRequestHeaders(sessionId: string): Record<string, string> 
 }
 
 export function getAnthropicVersion(): string {
-  return loadCCDerivedRequestProfile().anthropicVersion;
+  return claudeCodeIntegration.loadRequestProfile().anthropicVersion;
 }
 
 export function getBetaHeader(): string {
-  return loadCCDerivedRequestProfile().betaHeader;
+  return claudeCodeIntegration.loadRequestProfile().betaHeader;
 }
 
 export function orderHeadersForOutbound(
   headers: Record<string, string>,
   overrideHeaderOrder?: string[],
 ): Record<string, string> | Array<[string, string]> {
-  const { template } = loadCCDerivedRequestProfile();
+  const { template } = claudeCodeIntegration.loadRequestProfile();
   const order = overrideHeaderOrder ?? template.header_order;
 
   if (!Array.isArray(order) || order.length === 0) {

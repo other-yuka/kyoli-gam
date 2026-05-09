@@ -1,18 +1,18 @@
-export {
+import {
   DEFAULT_CLI_VERSION,
   detectCliVersion,
   resetDetectedVersionForTest,
   setCliVersionDetectionOverridesForTest,
 } from "./cli-version";
-export {
+import {
   loadCCDerivedAuthProfile,
   loadCCDerivedRequestProfile,
 } from "./derived-profile";
-export type {
+import type {
   CCDerivedAuthProfile,
   CCDerivedRequestProfile,
 } from "./derived-profile";
-export {
+import {
   checkCCCompat,
   captureLiveTemplateAsync,
   compareVersions,
@@ -25,19 +25,19 @@ export {
   resetFingerprintCaptureForTest,
   setFingerprintCaptureTestOverridesForTest,
 } from "./fingerprint/capture";
-export type {
+import type {
   CapturedRequest,
   CompatResult,
   DriftResult,
   TemplateData,
 } from "./fingerprint/capture";
-export {
+import {
   loadClaudeIdentity,
   resetClaudeIdentityForTest,
   setClaudeIdentityForTest,
 } from "./identity";
-export type { ClaudeIdentity } from "./identity";
-export {
+import type { ClaudeIdentity } from "./identity";
+import {
   detectOAuthConfig,
   enumerateCCCandidates,
   FALLBACK,
@@ -52,11 +52,87 @@ export {
   scanBinaryForOAuthConfig,
   setOAuthConfigDetectionOverridesForTest,
 } from "./oauth-config/detect";
-export type { DetectedOAuthConfig } from "./oauth-config/detect";
-export {
+import type { DetectedOAuthConfig } from "./oauth-config/detect";
+import {
   findUserPathHits,
   removeHostContextSections,
   scrubObjectStrings,
   scrubTemplate,
   scrubText,
 } from "./scrub-template";
+
+export interface ClaudeCodeIntegration {
+  loadRequestProfile: typeof loadCCDerivedRequestProfile;
+  loadAuthProfile: typeof loadCCDerivedAuthProfile;
+  loadIdentity: typeof loadClaudeIdentity;
+  loadTemplate: typeof loadTemplate;
+  detectCliVersion: typeof detectCliVersion;
+  detectOAuthConfig: typeof detectOAuthConfig;
+  detectDrift: typeof detectDrift;
+  checkCompat: typeof checkCCCompat;
+  refreshLiveFingerprint: typeof refreshLiveFingerprintAsync;
+}
+
+export const claudeCodeIntegration: ClaudeCodeIntegration = {
+  loadRequestProfile: loadCCDerivedRequestProfile,
+  loadAuthProfile: loadCCDerivedAuthProfile,
+  loadIdentity: loadClaudeIdentity,
+  loadTemplate,
+  detectCliVersion,
+  detectOAuthConfig,
+  detectDrift,
+  checkCompat: checkCCCompat,
+  refreshLiveFingerprint: refreshLiveFingerprintAsync,
+};
+
+export {
+  DEFAULT_CLI_VERSION,
+  detectCliVersion,
+  resetDetectedVersionForTest,
+  setCliVersionDetectionOverridesForTest,
+  loadCCDerivedAuthProfile,
+  loadCCDerivedRequestProfile,
+  checkCCCompat,
+  captureLiveTemplateAsync,
+  compareVersions,
+  detectDrift,
+  extractTemplate,
+  loadTemplate,
+  matchesBundledClaudeCodeFingerprint,
+  prepareBundledTemplate,
+  refreshLiveFingerprintAsync,
+  resetFingerprintCaptureForTest,
+  setFingerprintCaptureTestOverridesForTest,
+  loadClaudeIdentity,
+  resetClaudeIdentityForTest,
+  setClaudeIdentityForTest,
+  detectOAuthConfig,
+  enumerateCCCandidates,
+  FALLBACK,
+  FALLBACK_FOR_DRIFT_CHECK,
+  filterScopesByBinaryPresence,
+  findCCBinary,
+  fingerprintBinary,
+  loadCache,
+  normalizeAuthorizeUrl,
+  resetOAuthConfigDetectionForTest,
+  saveCache,
+  scanBinaryForOAuthConfig,
+  setOAuthConfigDetectionOverridesForTest,
+  findUserPathHits,
+  removeHostContextSections,
+  scrubObjectStrings,
+  scrubTemplate,
+  scrubText,
+};
+
+export type {
+  CCDerivedAuthProfile,
+  CCDerivedRequestProfile,
+  CapturedRequest,
+  ClaudeIdentity,
+  CompatResult,
+  DetectedOAuthConfig,
+  DriftResult,
+  TemplateData,
+};
