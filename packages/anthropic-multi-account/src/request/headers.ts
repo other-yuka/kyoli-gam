@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { loadCCDerivedRequestProfile } from "../claude-code/derived-profile";
+import { loadCCDerivedRequestProfile } from "../claude-code";
 
 const UPSTREAM_TIMEOUT_MS = 300_000;
 const STAINLESS_PACKAGE_VERSION = "0.81.0";

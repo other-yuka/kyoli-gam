@@ -1,5 +1,5 @@
 import { getUpstreamSessionId } from "./request/upstream-request";
-import { loadCCDerivedRequestProfile } from "./claude-code/derived-profile";
+import { loadCCDerivedRequestProfile } from "./claude-code";
 import { getAnthropicVersion } from "./request/headers";
 
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;

@@ -17,12 +17,14 @@ import { AccountStore } from "./accounts/store";
 import { AccountRuntimeFactory } from "./runtime/factory";
 import { debugLog, formatWaitTime, getAccountLabel, showToast } from "./shared/utils";
 import { ANTHROPIC_OAUTH_ADAPTER } from "./shared/constants";
-import { loadCCDerivedAuthProfile, loadCCDerivedRequestProfile } from "./claude-code/derived-profile";
 import {
   checkCCCompat,
   detectDrift,
+  loadCCDerivedAuthProfile,
+  loadCCDerivedRequestProfile,
+  loadClaudeIdentity,
   refreshLiveFingerprintAsync,
-} from "./claude-code/fingerprint/capture";
+} from "./claude-code";
 import {
   getBetaHeader,
   getPerRequestHeaders,
@@ -30,7 +32,6 @@ import {
   orderHeadersForOutbound,
 } from "./request/headers";
 import { computeBuildTag, getUpstreamSessionId } from "./request/upstream-request";
-import { loadClaudeIdentity } from "./claude-code/identity";
 import { syncBootstrapAuth } from "./oauth/bootstrap";
 import { sanitizeError } from "./shared/error-utils";
 import { getSessionId, startHeartbeat } from "./session-heartbeat";

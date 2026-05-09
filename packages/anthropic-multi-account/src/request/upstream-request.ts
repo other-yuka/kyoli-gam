@@ -1,8 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { ClaudeIdentity } from "../claude-code/identity";
-import type { TemplateData } from "../claude-code/fingerprint/capture";
+import type { ClaudeIdentity, TemplateData } from "../claude-code";
 import { getRuntimeModelCapability } from "../model/capabilities";
-import { detectCliVersion } from "../claude-code/cli-version";
+import { detectCliVersion } from "../claude-code";
 
 const BILLING_SEED = "59cf53e54c78";
 const SESSION_IDLE_ROTATE_MS = 15 * 60 * 1000;

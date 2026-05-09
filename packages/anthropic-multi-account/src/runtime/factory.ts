@@ -33,8 +33,7 @@ import {
   getUpstreamSessionId,
   reverseMapResponse,
 } from "../request/upstream-request";
-import { loadClaudeIdentity, type ClaudeIdentity } from "../claude-code/identity";
-import { loadTemplate } from "../claude-code/fingerprint/capture";
+import { loadClaudeIdentity, loadTemplate, type ClaudeIdentity } from "../claude-code";
 import type { PluginClient, StoredAccount } from "../shared/types";
 import { recordObservedToolNames } from "../tools/observation";
 import { debugLog } from "../shared/utils";

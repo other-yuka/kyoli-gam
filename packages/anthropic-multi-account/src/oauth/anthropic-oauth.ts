@@ -1,8 +1,7 @@
 import { exec } from "node:child_process";
 import * as v from "valibot";
 import { TOKEN_REFRESH_TIMEOUT_MS } from "../shared/constants";
-import { loadCCDerivedAuthProfile } from "../claude-code/derived-profile";
-import { detectOAuthConfig } from "../claude-code/oauth-config/detect";
+import { detectOAuthConfig, loadCCDerivedAuthProfile } from "../claude-code";
 import { startCallbackServer } from "./callback-server";
 import { generatePKCE, generateState } from "./pkce";
 import { runNodeTokenRequest } from "./token-node-request";

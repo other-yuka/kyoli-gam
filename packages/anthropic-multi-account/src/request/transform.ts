@@ -1,8 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { ensureOauthBeta, getModelBetas } from "./betas";
-import { loadClaudeIdentity } from "../claude-code/identity";
+import { loadClaudeIdentity, loadTemplate } from "../claude-code";
 import { ANTHROPIC_OAUTH_ADAPTER } from "../shared/constants";
-import { loadTemplate } from "../claude-code/fingerprint/capture";
 import {
   createStreamingReverseMapper,
   buildUpstreamRequest,

@@ -1,4 +1,4 @@
-import { loadCCDerivedRequestProfile } from "../claude-code/derived-profile";
+import { loadCCDerivedRequestProfile } from "../claude-code";
 import { ANTHROPIC_OAUTH_ADAPTER } from "../shared/constants";
 
 export interface ModelOverride {
