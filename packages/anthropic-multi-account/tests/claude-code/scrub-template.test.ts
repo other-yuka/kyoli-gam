@@ -95,7 +95,11 @@ describe("removeHostContextSections", () => {
 
   test("normalizes dynamic plain-text git status blocks", () => {
     const result = removeHostContextSections([
-      "Current branch: main",
+      "Current branch: feature/private-name",
+      "",
+      "Main branch (you will usually use this for PRs): master",
+      "",
+      "Git user: Jane Doe",
       "",
       "Status:",
       "M src/index.ts",
@@ -106,7 +110,11 @@ describe("removeHostContextSections", () => {
     ].join("\n"));
 
     expect(result).toBe([
-      "Current branch: main",
+      "Current branch: (dynamic)",
+      "",
+      "Main branch (you will usually use this for PRs): (dynamic)",
+      "",
+      "Git user: (dynamic)",
       "",
       "Status:",
       "(dynamic)",

@@ -46,6 +46,21 @@ const USER_PATH_HIT_PATTERNS = [
   /[A-Za-z]:\\Users\\(?!user(?:\\|$))[A-Za-z0-9._-]+(?:\\[^\s"'`<>)]*)?/g,
 ] as const;
 
+const GIT_METADATA_REPLACEMENTS = [
+  {
+    pattern: /^Current branch: .+$/gm,
+    replacement: "Current branch: (dynamic)",
+  },
+  {
+    pattern: /^Main branch \(you will usually use this for PRs\): .+$/gm,
+    replacement: "Main branch (you will usually use this for PRs): (dynamic)",
+  },
+  {
+    pattern: /^Git user: .+$/gm,
+    replacement: "Git user: (dynamic)",
+  },
+] as const;
+
 function normalizeSectionName(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
@@ -75,6 +90,16 @@ function removeDynamicRecentCommits(text: string): string {
   );
 }
 
+function removeDynamicGitMetadata(text: string): string {
+  let scrubbed = text;
+
+  for (const { pattern, replacement } of GIT_METADATA_REPLACEMENTS) {
+    scrubbed = scrubbed.replace(pattern, replacement);
+  }
+
+  return scrubbed;
+}
+
 export function scrubText(text: string): string {
   let scrubbed = text;
 
@@ -82,7 +107,7 @@ export function scrubText(text: string): string {
     scrubbed = scrubbed.replace(pattern, replacement);
   }
 
-  return scrubbed;
+  return removeDynamicGitMetadata(scrubbed);
 }
 
 export function findUserPathHits(text: string): string[] {
@@ -124,7 +149,7 @@ export function removeHostContextSections(systemPrompt: string): string {
     keptLines.push(line);
   }
 
-  return cleanupRemovedSections(removeDynamicRecentCommits(removeDynamicStatusBlock(keptLines.join("\n"))));
+  return cleanupRemovedSections(removeDynamicGitMetadata(removeDynamicRecentCommits(removeDynamicStatusBlock(keptLines.join("\n")))));
 }
 
 export function scrubObjectStrings(value: unknown): unknown {
