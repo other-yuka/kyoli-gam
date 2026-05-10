@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { createProactiveRefreshQueueForProvider } from "opencode-multi-account-core";
 import { ACCOUNTS_FILENAME } from "../../src/shared/constants";
 import type {

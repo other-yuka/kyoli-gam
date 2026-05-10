@@ -11,15 +11,14 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-
-import { SUPPORTED_CC_RANGE } from "../dist/fingerprint-capture.js";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const PINNED_OAUTH = {
   clientId: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
   authorizeUrl: "https://claude.ai/oauth/authorize",
   tokenUrl: "https://platform.claude.com/v1/oauth/token",
 };
+const SUPPORTED_CC_RANGE = readSupportedCCRange();
 
 const CONFIG_SCAN_WINDOW_CHARS = 4096;
 const CONFIG_SCAN_LOOKBACK_CHARS = 512;
@@ -171,6 +170,29 @@ function scanBinaryForOAuthConfig(buf) {
 
 function projectRoot() {
   return join(dirname(fileURLToPath(import.meta.url)), "..");
+}
+
+function readSupportedCCRange() {
+  const candidates = [
+    join(projectRoot(), "src/claude-code/fingerprint/capture.ts"),
+    join(projectRoot(), "dist/fingerprint-capture.js"),
+  ];
+
+  for (const candidate of candidates) {
+    if (!existsSync(candidate)) {
+      continue;
+    }
+
+    const captureSource = readFileSync(candidate, "utf8");
+    const min = captureSource.match(/min:\s*"([^"]+)"/)?.[1];
+    const maxTested = captureSource.match(/maxTested:\s*"([^"]+)"/)?.[1];
+
+    if (min && maxTested) {
+      return { min, maxTested };
+    }
+  }
+
+  throw new Error("Unable to read SUPPORTED_CC_RANGE from source or dist capture file");
 }
 
 function resolveNpmInvocation() {
@@ -361,30 +383,69 @@ function findWrapperScanTarget(packageDir) {
   };
 }
 
-function addOAuthDriftItems(items, scanned) {
-  if (scanned.clientId !== PINNED_OAUTH.clientId) {
+function addOAuthDriftItems(items, scanned, pinned = PINNED_OAUTH) {
+  if (scanned.clientId !== pinned.clientId) {
     items.push(buildReportItem(
       "oauth.clientId",
       "high",
-      `clientId drifted from ${PINNED_OAUTH.clientId} to ${scanned.clientId}.`,
+      `clientId drifted from ${pinned.clientId} to ${scanned.clientId}.`,
     ));
   }
 
-  if (scanned.authorizeUrl !== PINNED_OAUTH.authorizeUrl) {
+  if (scanned.authorizeUrl !== pinned.authorizeUrl) {
     items.push(buildReportItem(
       "oauth.authorizeUrl",
       "high",
-      `authorizeUrl drifted from ${PINNED_OAUTH.authorizeUrl} to ${scanned.authorizeUrl}.`,
+      `authorizeUrl drifted from ${pinned.authorizeUrl} to ${scanned.authorizeUrl}.`,
     ));
   }
 
-  if (scanned.tokenUrl !== PINNED_OAUTH.tokenUrl) {
+  if (scanned.tokenUrl !== pinned.tokenUrl) {
     items.push(buildReportItem(
       "oauth.tokenUrl",
       "high",
-      `tokenUrl drifted from ${PINNED_OAUTH.tokenUrl} to ${scanned.tokenUrl}.`,
+      `tokenUrl drifted from ${pinned.tokenUrl} to ${scanned.tokenUrl}.`,
     ));
   }
+}
+
+function buildStaticDriftItems({
+  ccVersion,
+  scanned,
+  scannerFailed = false,
+  scannerLayoutMessage = null,
+  scannerLayoutExtra = {},
+  pinned = PINNED_OAUTH,
+  maxTested = SUPPORTED_CC_RANGE.maxTested,
+} = {}) {
+  const items = [];
+
+  if (scannerLayoutMessage) {
+    items.push(buildReportItem(
+      "scanner.layout",
+      "high",
+      scannerLayoutMessage,
+      scannerLayoutExtra,
+    ));
+  } else if (scannerFailed || scanned === null) {
+    items.push(buildReportItem(
+      "scanner",
+      "high",
+      "scanner returned null — CLIENT_ID/TOKEN_URL regexes may need updates.",
+    ));
+  } else if (scanned) {
+    addOAuthDriftItems(items, scanned, pinned);
+  }
+
+  if (ccVersion && compareVersions(ccVersion, maxTested) > 0) {
+    items.push(buildReportItem(
+      "compat.range",
+      "medium",
+      `CC v${ccVersion} is newer than maxTested v${maxTested}.`,
+    ));
+  }
+
+  return items;
 }
 
 function main() {
@@ -420,35 +481,23 @@ function main() {
           platform: nativeResult.preferredPlatform,
         };
       } else {
-        items.push(buildReportItem(
-          "scanner.layout",
-          "high",
-          `No scannable CC binary found in wrapper package or optional dependency ${nativeResult.targetPackage}.`,
-          { platform: nativeResult.preferredPlatform },
-        ));
+        items.push(...buildStaticDriftItems({
+          ccVersion: null,
+          scannerLayoutMessage: `No scannable CC binary found in wrapper package or optional dependency ${nativeResult.targetPackage}.`,
+          scannerLayoutExtra: { platform: nativeResult.preferredPlatform },
+        }));
       }
     }
 
     if (cliPath) {
       scanned = scanBinaryForOAuthConfig(readFileSync(cliPath));
-      if (!scanned) {
-        items.push(buildReportItem(
-          "scanner",
-          "high",
-          "scanner returned null — CLIENT_ID/TOKEN_URL regexes may need updates.",
-        ));
-      } else {
-        addOAuthDriftItems(items, scanned);
-      }
+      items.push(...buildStaticDriftItems({
+        ccVersion: null,
+        scanned,
+      }));
     }
 
-    if (ccVersion && compareVersions(ccVersion, SUPPORTED_CC_RANGE.maxTested) > 0) {
-      items.push(buildReportItem(
-        "compat.range",
-        "medium",
-        `CC v${ccVersion} is newer than maxTested v${SUPPORTED_CC_RANGE.maxTested}.`,
-      ));
-    }
+    items.push(...buildStaticDriftItems({ ccVersion }));
   } finally {
     rmSync(scratchDir, { recursive: true, force: true });
   }
@@ -458,15 +507,27 @@ function main() {
   process.exitCode = items.length > 0 ? 1 : 0;
 }
 
-try {
-  main();
-} catch (error) {
-  const message = error instanceof Error ? error.message : String(error);
-  writeReport(buildReport({
-    items: [buildReportItem("runner", "high", message)],
-    ccVersion: null,
-    scanned: null,
-    scanTarget: null,
-  }));
-  process.exitCode = 1;
+export {
+  buildReport,
+  buildReportItem,
+  buildStaticDriftItems,
+  compareVersions,
+  PINNED_OAUTH,
+  readSupportedCCRange,
+  scanBinaryForOAuthConfig,
+};
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  try {
+    main();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    writeReport(buildReport({
+      items: [buildReportItem("runner", "high", message)],
+      ccVersion: null,
+      scanned: null,
+      scanTarget: null,
+    }));
+    process.exitCode = 1;
+  }
 }

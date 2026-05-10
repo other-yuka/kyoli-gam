@@ -25,6 +25,12 @@ function normalizeModelId(modelId: string): string {
   return slashIndex >= 0 ? trimmed.slice(slashIndex + 1) : trimmed;
 }
 
+export function readProviderModels(provider: Record<string, unknown>): Record<string, unknown> {
+  return isRecord(provider.models) && !Array.isArray(provider.models)
+    ? provider.models
+    : {};
+}
+
 function readLimitOutput(raw: JsonRecord): number | undefined {
   const limit = isRecord(raw.limit) ? raw.limit : undefined;
   const capabilityLimit = isRecord(raw.capabilities) && isRecord(raw.capabilities.limit)
@@ -44,8 +50,12 @@ function readThinkingSupport(raw: JsonRecord): boolean | undefined {
       : undefined);
 }
 
-export function ingestProviderModelsCapabilities(models: Record<string, unknown>): void {
+export function ingestProviderModelsCapabilities(models: unknown): void {
   runtimeModelCapabilities.clear();
+
+  if (!isRecord(models)) {
+    return;
+  }
 
   for (const [key, value] of Object.entries(models)) {
     if (!isRecord(value)) {

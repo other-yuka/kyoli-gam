@@ -62,6 +62,8 @@ export interface DiskCredentials {
   accessToken?: string;
   expiresAt?: number;
   accountId?: string;
+  accountUuid?: string;
+  deviceId?: string;
 }
 
 export class AccountStore {
@@ -93,6 +95,8 @@ export class AccountStore {
       accessToken: account.accessToken,
       expiresAt: account.expiresAt,
       accountId: account.accountId,
+      accountUuid: account.accountUuid,
+      deviceId: account.deviceId,
     };
   }
 

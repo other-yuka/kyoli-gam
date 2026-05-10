@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test, vi } from "bun:test";
+import { beforeEach, describe, expect, test, vi } from "vitest";
 import { CascadeStateManager, PoolManager, type PoolChainConfig } from "opencode-multi-account-core";
 import { executeWithAccountRotation } from "../../src/runtime/executor";
 import { executeWithPoolChainRotation, type PoolChainAccountManager } from "../../src/runtime/pool-chain";

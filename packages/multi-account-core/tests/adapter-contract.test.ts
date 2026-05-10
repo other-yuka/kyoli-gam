@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import { openAIOAuthAdapter } from "../src/adapters/openai";
 import { anthropicOAuthAdapter } from "../src/adapters/anthropic";
 import type { OAuthAdapter } from "../src/adapters/types";
@@ -7,7 +7,6 @@ function assertAdapterContract(adapter: OAuthAdapter) {
   expect(adapter.id.length).toBeGreaterThan(0);
   expect(adapter.authProviderId.length).toBeGreaterThan(0);
   expect(adapter.modelDisplayName.length).toBeGreaterThan(0);
-  expect(adapter.statusToolName.length).toBeGreaterThan(0);
   expect(adapter.authMethodLabel.length).toBeGreaterThan(0);
   expect(adapter.serviceLogName.length).toBeGreaterThan(0);
   expect(adapter.accountStorageFilename.length).toBeGreaterThan(0);

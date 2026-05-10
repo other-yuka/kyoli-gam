@@ -1,0 +1,47 @@
+{
+  "name": "@kyoli-gam/provider-claude-code",
+  "version": "0.0.0",
+  "description": "Claude Code OAuth provider adapter for kyoli-gam v1",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./opencode": {
+      "source": "./src/opencode-shared.ts",
+      "types": "./dist/opencode-shared.d.ts",
+      "import": "./dist/opencode-shared.js",
+      "default": "./dist/opencode-shared.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "prepack": "pnpm run build",
+    "dev": "tsup --watch"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "sideEffects": false,
+  "author": "yuka",
+  "license": "MIT",
+  "dependencies": {
+    "@kyoli-gam/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^25.2.2",
+    "typescript": "^6.0.3"
+  },
+  "files": [
+    "dist",
+    "package.json",
+    "README.md"
+  ]
+}

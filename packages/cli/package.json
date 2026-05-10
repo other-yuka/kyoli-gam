@@ -1,0 +1,58 @@
+{
+  "name": "@kyoli-gam/cli",
+  "version": "0.0.0",
+  "description": "CLI for kyoli-gam v1",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "kyoli": "./dist/index.js"
+  },
+  "exports": {
+    ".": {
+      "source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "accounts": "tsx src/index.ts accounts",
+    "config": "tsx src/index.ts config",
+    "doctor": "tsx src/index.ts doctor",
+    "login": "tsx src/index.ts login",
+    "typecheck": "tsc --noEmit",
+    "serve": "tsx src/index.ts serve",
+    "test": "vitest run",
+    "prepack": "pnpm run build",
+    "dev": "tsup --watch"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "sideEffects": false,
+  "author": "yuka",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/other-yuka/kyoli-gam.git",
+    "directory": "packages/cli"
+  },
+  "dependencies": {
+    "@kyoli-gam/core": "workspace:*",
+    "@kyoli-gam/gateway": "workspace:*",
+    "@kyoli-gam/model-registry": "workspace:*",
+    "@kyoli-gam/provider-claude-code": "workspace:*",
+    "@kyoli-gam/provider-codex-chatgpt": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^25.2.2",
+    "typescript": "^6.0.3"
+  },
+  "files": [
+    "dist",
+    "package.json",
+    "README.md"
+  ]
+}

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import type { TemplateData } from "../../src/claude-code/fingerprint/capture";
 import bundledData from "../../src/claude-code/fingerprint/data.json";
 import {
@@ -9,43 +9,51 @@ import {
   scrubText,
 } from "../../src/claude-code/scrub-template";
 
+const RAW_USER = "example-user";
+const RAW_MAC_HOME = `/Users/${RAW_USER}`;
+const RAW_LINUX_HOME = `/home/${RAW_USER}`;
+const RAW_WINDOWS_HOME = `C:\\Users\\${RAW_USER}`;
+const SCRUBBED_MAC_HOME = "/Users/user";
+const SCRUBBED_LINUX_HOME = "/home/user";
+const SCRUBBED_WINDOWS_HOME = "C:\\Users\\user";
+
 function createTemplate(overrides: Partial<TemplateData> = {}): TemplateData {
   return {
     _version: 1,
     _captured: "2026-04-18T00:00:00.000Z",
     _source: "bundled",
-    agent_identity: "You are Claude Code. Workspace: /Users/other-yuka/project.",
+    agent_identity: `You are Claude Code. Workspace: ${RAW_MAC_HOME}/project.`,
     system_prompt: [
       "# Environment",
       "OS: darwin",
       "# auto memory",
-      "Recent path: /Users/other-yuka/.claude.json",
+      `Recent path: ${RAW_MAC_HOME}/.claude.json`,
       "# Remaining",
-      "Use /Users/other-yuka/project for examples.",
+      `Use ${RAW_MAC_HOME}/project for examples.`,
     ].join("\n"),
     tools: [
       {
         name: "Bash",
-        description: "Run commands inside /Users/other-yuka/project",
+        description: `Run commands inside ${RAW_MAC_HOME}/project`,
         input_schema: {
           type: "object",
           properties: {
             cwd: {
               type: "string",
-              description: "Path like /Users/other-yuka/project",
+              description: `Path like ${RAW_MAC_HOME}/project`,
             },
           },
-          examples: ["/Users/other-yuka/project"],
+          examples: [`${RAW_MAC_HOME}/project`],
         },
       },
       {
         name: "mcp__gmail__send",
-        description: "Uses /Users/other-yuka/secrets.json",
+        description: `Uses ${RAW_MAC_HOME}/secrets.json`,
       },
     ],
     tool_names: ["Bash", "mcp__gmail__send"],
     header_values: {
-      "x-test-path": "/Users/other-yuka/project",
+      "x-test-path": `${RAW_MAC_HOME}/project`,
     },
     ...overrides,
   };
@@ -68,7 +76,7 @@ describe("removeHostContextSections", () => {
       "# Environment",
       "OS: darwin",
       "## Details",
-       "Path: /Users/other-yuka/project",
+      `Path: ${RAW_MAC_HOME}/project`,
       "# Remaining",
       "body",
     ].join("\n"));
@@ -127,22 +135,22 @@ describe("removeHostContextSections", () => {
 
 describe("scrubText", () => {
   test("replaces user-specific home paths across supported platforms", () => {
-    expect(scrubText("/Users/other-yuka/project")).toBe("/Users/user/project");
-    expect(scrubText("/home/other-yuka/project")).toBe("/home/user/project");
-    expect(scrubText("C:\\Users\\other-yuka\\project")).toBe("C:\\Users\\user\\project");
+    expect(scrubText(`${RAW_MAC_HOME}/project`)).toBe(`${SCRUBBED_MAC_HOME}/project`);
+    expect(scrubText(`${RAW_LINUX_HOME}/project`)).toBe(`${SCRUBBED_LINUX_HOME}/project`);
+    expect(scrubText(`${RAW_WINDOWS_HOME}\\project`)).toBe(`${SCRUBBED_WINDOWS_HOME}\\project`);
   });
 });
 
 describe("scrubObjectStrings", () => {
   test("scrubs nested string values inside objects and arrays", () => {
     const result = scrubObjectStrings({
-      path: "/Users/other-yuka/project",
-      nested: ["/Users/other-yuka/.claude.json", "/home/other-yuka/.config/claude.json", "C:\\Users\\other-yuka\\claude.json"],
+      path: `${RAW_MAC_HOME}/project`,
+      nested: [`${RAW_MAC_HOME}/.claude.json`, `${RAW_LINUX_HOME}/.config/claude.json`, `${RAW_WINDOWS_HOME}\\claude.json`],
     });
 
     expect(result).toEqual({
-      path: "/Users/user/project",
-      nested: ["/Users/user/.claude.json", "/home/user/.config/claude.json", "C:\\Users\\user\\claude.json"],
+      path: `${SCRUBBED_MAC_HOME}/project`,
+      nested: [`${SCRUBBED_MAC_HOME}/.claude.json`, `${SCRUBBED_LINUX_HOME}/.config/claude.json`, `${SCRUBBED_WINDOWS_HOME}\\claude.json`],
     });
   });
 });
@@ -151,26 +159,26 @@ describe("scrubTemplate", () => {
   test("drops mcp tools, removes host context sections, and scrubs nested tool strings", () => {
     const scrubbed = scrubTemplate(createTemplate());
 
-    expect(scrubbed.system_prompt).toBe(["# Remaining", "Use /Users/user/project for examples."].join("\n"));
+    expect(scrubbed.system_prompt).toBe(["# Remaining", `Use ${SCRUBBED_MAC_HOME}/project for examples.`].join("\n"));
     expect(scrubbed.tools).toHaveLength(1);
     expect(scrubbed.tools[0]?.name).toBe("Bash");
     expect(scrubbed.tool_names).toEqual(["Bash"]);
     expect(scrubbed.tools[0]).toEqual({
       name: "Bash",
-      description: "Run commands inside /Users/user/project",
+      description: `Run commands inside ${SCRUBBED_MAC_HOME}/project`,
       input_schema: {
         type: "object",
         properties: {
           cwd: {
             type: "string",
-            description: "Path like /Users/user/project",
+            description: `Path like ${SCRUBBED_MAC_HOME}/project`,
           },
         },
-        examples: ["/Users/user/project"],
+        examples: [`${SCRUBBED_MAC_HOME}/project`],
       },
     });
-    expect(scrubbed.agent_identity).toContain("/Users/user/project");
-    expect(scrubbed.header_values).toEqual({ "x-test-path": "/Users/user/project" });
+    expect(scrubbed.agent_identity).toContain(`${SCRUBBED_MAC_HOME}/project`);
+    expect(scrubbed.header_values).toEqual({ "x-test-path": `${SCRUBBED_MAC_HOME}/project` });
   });
 
   test("is idempotent and leaves no residual user paths", () => {
@@ -184,10 +192,10 @@ describe("scrubTemplate", () => {
 
 describe("findUserPathHits", () => {
   test("detects unsanitized user paths and ignores the scrubbed placeholder", () => {
-    expect(findUserPathHits("/Users/other-yuka/project /Users/user/project /home/other-yuka/work C:\\Users\\other-yuka\\repo")).toEqual([
-      "/Users/other-yuka/project",
-      "/home/other-yuka/work",
-      "C:\\Users\\other-yuka\\repo",
+    expect(findUserPathHits(`${RAW_MAC_HOME}/project ${SCRUBBED_MAC_HOME}/project ${RAW_LINUX_HOME}/work ${RAW_WINDOWS_HOME}\\repo`)).toEqual([
+      `${RAW_MAC_HOME}/project`,
+      `${RAW_LINUX_HOME}/work`,
+      `${RAW_WINDOWS_HOME}\\repo`,
     ]);
   });
 });

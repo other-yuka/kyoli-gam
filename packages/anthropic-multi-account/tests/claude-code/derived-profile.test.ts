@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { writeFile } from "node:fs/promises";
 import {
   loadCCDerivedAuthProfile,
   loadCCDerivedRequestProfile,
@@ -39,7 +40,7 @@ test("upgrades auth profile with detected OAuth base API url", async () => {
 
     try {
       const ccPath = `${dir}/claude-derived-profile-bin`;
-      await Bun.write(ccPath, "unique-oauth-profile-test-binary");
+      await writeFile(ccPath, "unique-oauth-profile-test-binary");
 
       setOAuthConfigDetectionOverridesForTest({
         findCCBinary: () => ccPath,
@@ -62,7 +63,7 @@ test("normalizes legacy authorize url in derived auth profile", async () => {
 
   try {
     const ccPath = `${dir}/claude-derived-profile-bin`;
-    await Bun.write(ccPath, "unique-oauth-authorize-url-binary");
+    await writeFile(ccPath, "unique-oauth-authorize-url-binary");
 
     setOAuthConfigDetectionOverridesForTest({
       findCCBinary: () => ccPath,

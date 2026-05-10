@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach, afterEach } from "bun:test";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { buildFakeJwt } from "./helpers";
 
 // ─── Mock fetch before importing module ─────────────────────────

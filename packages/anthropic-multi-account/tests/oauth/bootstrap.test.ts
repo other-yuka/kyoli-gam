@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, afterEach, vi } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { syncBootstrapAuth, __bootstrapAuthTestUtils } from "../../src/oauth/bootstrap";

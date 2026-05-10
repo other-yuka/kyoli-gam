@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { AccountStore } from "../../src/accounts/store";
 import { ACCOUNTS_FILENAME } from "../../src/shared/constants";
 import type { AccountStorage, StoredAccount } from "../../src/shared/types";

@@ -1,0 +1,143 @@
+import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { MemoryAccountStore, SQLiteRequestLogStore, SQLiteStickySessionStore } from "../src";
+
+describe("AccountStore state reset", () => {
+  it("clears transient failure state without changing credentials", async () => {
+    const store = new MemoryAccountStore();
+    const account = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      enabled: false,
+      credentials: { accessToken: "secret" },
+    });
+    await store.recordFailure(account.id, {
+      status: 401,
+      message: "bad token",
+      reauthRequiredReason: "bad token",
+    });
+
+    const reset = await store.resetState(account.id, { enable: true });
+
+    expect(reset).toMatchObject({
+      enabled: true,
+      failureCount: 0,
+      credentials: { accessToken: "secret" },
+    });
+    expect(reset?.lastErrorAt).toBeUndefined();
+    expect(reset?.rateLimitResetAt).toBeUndefined();
+    expect(reset?.reauthRequiredReason).toBeUndefined();
+  });
+});
+
+describe("SQLiteRequestLogStore", () => {
+  it("persists and filters request logs", () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyoli-request-log-"));
+    const dbPath = join(dir, "kyoli.db");
+
+    try {
+      const store = new SQLiteRequestLogStore(dbPath);
+      store.createRequestLog({
+        provider: "codex",
+        route: "/v1/responses",
+        model: "gpt-5.3-codex",
+        sessionKey: "session-a",
+        accountId: "account-a",
+        eventType: "response",
+        attempt: 1,
+        status: 200,
+        retryable: false,
+      });
+      store.createRequestLog({
+        provider: "codex",
+        route: "/v1/responses",
+        model: "gpt-5.3-codex",
+        sessionKey: "session-b",
+        accountId: "account-b",
+        eventType: "response",
+        attempt: 1,
+        status: 429,
+        retryable: true,
+      });
+
+      expect(store.listRequestLogs({ status: 429 })).toEqual([
+        expect.objectContaining({
+          accountId: "account-b",
+          status: 429,
+          retryable: true,
+        }),
+      ]);
+      expect(new SQLiteRequestLogStore(dbPath).listRequestLogs({ accountId: "account-a" })).toEqual([
+        expect.objectContaining({
+          accountId: "account-a",
+          status: 200,
+        }),
+      ]);
+      expect(store.clearRequestLogs()).toBe(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("SQLiteStickySessionStore", () => {
+  it("persists sticky mappings across store instances", () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyoli-sticky-"));
+    const dbPath = join(dir, "kyoli.db");
+
+    try {
+      const first = new SQLiteStickySessionStore(dbPath);
+      first.upsertStickySession({
+        key: "codex:oauth:session-a",
+        provider: "codex",
+        kind: "oauth",
+        sessionKey: "session-a",
+        accountId: "account-a",
+      });
+
+      const second = new SQLiteStickySessionStore(dbPath);
+      expect(second.getStickySession("codex:oauth:session-a")).toMatchObject({
+        key: "codex:oauth:session-a",
+        provider: "codex",
+        kind: "oauth",
+        sessionKey: "session-a",
+        accountId: "account-a",
+      });
+
+      second.upsertStickySession({
+        key: "codex:oauth:session-a",
+        provider: "codex",
+        kind: "oauth",
+        sessionKey: "session-a",
+        accountId: "account-b",
+      });
+      expect(first.getStickySession("codex:oauth:session-a")?.accountId).toBe("account-b");
+      expect(second.clearStickySessions()).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("purges stale sticky mappings by age", () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyoli-sticky-"));
+    const dbPath = join(dir, "kyoli.db");
+
+    try {
+      const store = new SQLiteStickySessionStore(dbPath);
+      store.upsertStickySession({
+        key: "codex:oauth:session-a",
+        provider: "codex",
+        kind: "oauth",
+        sessionKey: "session-a",
+        accountId: "account-a",
+      });
+
+      expect(store.purgeStickySessions({ maxAgeSeconds: 0 })).toBe(1);
+      expect(store.listStickySessions()).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   DEFAULT_CLI_VERSION,
   detectCliVersion,

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 
 describe("getAccountStatus", () => {
   it("returns rate-limited when rateLimitResetAt is in the future", async () => {

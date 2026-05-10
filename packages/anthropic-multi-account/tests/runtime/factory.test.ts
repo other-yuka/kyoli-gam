@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, afterEach, vi } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import * as anthropicOAuth from "../../src/oauth/anthropic-oauth";
 import { AccountRuntimeFactory } from "../../src/runtime/factory";
 import { AccountStore } from "../../src/accounts/store";
@@ -6,6 +6,7 @@ import { TOKEN_EXPIRY_BUFFER_MS } from "../../src/shared/constants";
 import { resetExcludedBetas } from "../../src/request/betas";
 import { clearRefreshMutex } from "../../src/oauth/token";
 import { createMockClient, setupTestEnv } from "../helpers";
+import { createRealisticRequestPayload } from "../fixtures/realistic-request-payload";
 
 function toHeaders(headers: HeadersInit | undefined): Headers {
   return new Headers(headers);
@@ -108,6 +109,41 @@ describe("runtime-factory", () => {
     expect(body.max_tokens).toBe(32_000);
     expect(body.tools).toHaveLength(1);
     expect(body.tools[0]?.name).toMatch(/^tool_[a-f0-9]+$/);
+  });
+
+  test("prefers stored per-account Claude identity over process identity", async () => {
+    const uuid = await seedAccount({
+      accountId: "provider-account",
+      accountUuid: "stored-account",
+      deviceId: "stored-device",
+    });
+    const factory = new AccountRuntimeFactory(store, client, {
+      accountUuid: "process-account",
+      deviceId: "process-device",
+    });
+    const runtime = await factory.getRuntime(uuid);
+
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response("ok"));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await runtime.fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    });
+
+    const [, init] = fetchMock.mock.calls[0] ?? [];
+    const body = JSON.parse(String(init?.body)) as { metadata?: { user_id?: string } };
+    const userId = JSON.parse(body.metadata?.user_id ?? "{}") as {
+      account_uuid?: string;
+      device_id?: string;
+    };
+
+    expect(userId.account_uuid).toBe("stored-account");
+    expect(userId.device_id).toBe("stored-device");
   });
 
   test("reverse maps masked tool names in non-stream JSON responses", async () => {
@@ -232,6 +268,64 @@ describe("runtime-factory", () => {
     ]);
   });
 
+  test("runtime.fetch keeps native OpenCode tool policy through a beta retry", async () => {
+    process.env.ANTHROPIC_ENABLE_1M_CONTEXT = "true";
+    try {
+      const uuid = await seedAccount();
+      const factory = new AccountRuntimeFactory(store, client);
+      const runtime = await factory.getRuntime(uuid);
+
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(new Response(JSON.stringify({
+          error: { message: "Extra usage is required for long context requests" },
+        }), { status: 400 }))
+        .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), {
+          headers: { "content-type": "application/json" },
+        }));
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      const response = await runtime.fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        body: JSON.stringify(createRealisticRequestPayload({ model: "claude-sonnet-4-6" })),
+      });
+
+      expect(response.status).toBe(200);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+
+      const firstBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as {
+        tools: Array<{ name?: string; input_schema?: unknown }>;
+        messages: Array<{ content?: Array<Record<string, unknown>> }>;
+        tool_choice?: { name?: string };
+      };
+      const secondBody = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body)) as typeof firstBody;
+
+      expect(secondBody).toEqual(firstBody);
+      expect(firstBody.tools).toHaveLength(3);
+      expect(firstBody.tools.map((tool) => tool.name)).toEqual(
+        expect.arrayContaining([
+          expect.stringMatching(/^tool_[a-f0-9]+$/),
+          expect.stringMatching(/^tool_[a-f0-9]+$/),
+          expect.stringMatching(/^tool_[a-f0-9]+$/),
+        ]),
+      );
+      expect(firstBody.tools.map((tool) => tool.name)).not.toContain("Bash");
+      expect(firstBody.tools.map((tool) => tool.name)).not.toContain("Read");
+      expect(firstBody.tools.every((tool) => Boolean(tool.input_schema))).toBe(true);
+      expect(firstBody.tool_choice?.name).toBe(firstBody.tools[1]?.name);
+      expect(firstBody.messages[1]?.content?.[0]?.name).toBe(firstBody.tools[0]?.name);
+      expect(JSON.stringify(firstBody.messages)).not.toContain("cache_control");
+      expect(JSON.stringify(firstBody.messages)).not.toContain('"thinking"');
+
+      const firstHeaders = toHeaders(fetchMock.mock.calls[0]?.[1]?.headers);
+      const secondHeaders = toHeaders(fetchMock.mock.calls[1]?.[1]?.headers);
+      expect(firstHeaders.get("anthropic-beta")).toContain("context-1m-2025-08-07");
+      expect(secondHeaders.get("anthropic-beta")).not.toContain("context-1m-2025-08-07");
+    } finally {
+      delete process.env.ANTHROPIC_ENABLE_1M_CONTEXT;
+    }
+  });
+
   test("runtime.fetch returns local 400 without upstream call for dangling tool_use", async () => {
     const uuid = await seedAccount();
     const factory = new AccountRuntimeFactory(store, client);
@@ -258,7 +352,7 @@ describe("runtime-factory", () => {
 
     expect(fetchMock).not.toHaveBeenCalled();
     expect(response.status).toBe(400);
-    expect(response.json()).resolves.toMatchObject({
+    await expect(response.json()).resolves.toMatchObject({
       error: {
         type: "invalid_request_error",
         message: expect.stringContaining("Dangling tool_use"),
@@ -546,7 +640,7 @@ describe("runtime-factory", () => {
     const factory = new AccountRuntimeFactory(store, client);
     const runtime = await factory.getRuntime(uuid);
 
-    expect(
+    await expect(
       runtime.fetch("https://api.anthropic.com/v1/messages", { method: "POST", body: "{}" }),
     ).rejects.toThrow("Token refresh failed");
 
@@ -569,7 +663,7 @@ describe("runtime-factory", () => {
     const factory = new AccountRuntimeFactory(store, client);
     const runtime = await factory.getRuntime(uuid);
 
-    expect(
+    await expect(
       runtime.fetch("https://api.anthropic.com/v1/messages", { method: "POST", body: "{}" }),
     ).rejects.toThrow("Token refresh failed");
 

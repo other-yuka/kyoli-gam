@@ -1,11 +1,23 @@
-import { afterAll, beforeEach, describe, expect, test, vi } from "bun:test";
-import * as fs from "node:fs";
-import * as os from "node:os";
+import { afterAll, beforeEach, describe, expect, test, vi } from "vitest";
 import { join } from "node:path";
 
-const readFileSyncMock = vi.spyOn(fs, "readFileSync");
-const readdirSyncMock = vi.spyOn(fs, "readdirSync");
-const homedirMock = vi.spyOn(os, "homedir");
+type FsModule = typeof import("node:fs");
+type OsModule = typeof import("node:os");
+
+const readFileSyncMock = vi.fn();
+const readdirSyncMock = vi.fn();
+const homedirMock = vi.fn();
+
+vi.doMock("node:fs", async (importOriginal) => ({
+  ...(await importOriginal<FsModule>()),
+  readFileSync: readFileSyncMock,
+  readdirSync: readdirSyncMock,
+}));
+
+vi.doMock("node:os", async (importOriginal) => ({
+  ...(await importOriginal<OsModule>()),
+  homedir: homedirMock,
+}));
 
 const { loadClaudeIdentity } = await import("../../src/claude-code/identity");
 
@@ -17,15 +29,14 @@ beforeEach(() => {
 });
 
 afterAll(() => {
-  readFileSyncMock.mockRestore();
-  readdirSyncMock.mockRestore();
-  homedirMock.mockRestore();
+  vi.doUnmock("node:fs");
+  vi.doUnmock("node:os");
 });
 
 describe("loadClaudeIdentity", () => {
   test("returns identity from the first matching file", () => {
     readdirSyncMock.mockReturnValue([]);
-    readFileSyncMock.mockImplementation(((path: fs.PathOrFileDescriptor) => {
+    readFileSyncMock.mockImplementation(((path: Parameters<FsModule["readFileSync"]>[0]) => {
       expect(path).toBe(join("/mock-home", ".claude.json"));
       return JSON.stringify({
         userID: "dev-123",
@@ -72,7 +83,7 @@ describe("loadClaudeIdentity", () => {
       "ignore-me.json",
     ] as never);
 
-    readFileSyncMock.mockImplementation(((path: fs.PathOrFileDescriptor) => {
+    readFileSyncMock.mockImplementation(((path: Parameters<FsModule["readFileSync"]>[0]) => {
       if (path === join("/mock-home", ".claude.json")) {
         throw new Error("ENOENT");
       }

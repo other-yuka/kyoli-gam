@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
-import { describe, test, expect, beforeEach, afterEach, vi } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import { AccountManager } from "../../src/accounts/manager";
 import { AccountStore } from "../../src/accounts/store";
 import * as anthropicOAuth from "../../src/oauth/anthropic-oauth";

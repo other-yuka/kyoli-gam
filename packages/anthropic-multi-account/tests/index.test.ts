@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test, vi } from "bun:test";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   resetClaudeIdentityForTest,
   setClaudeIdentityForTest,
@@ -17,12 +17,45 @@ import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, resetConfigCache } from "../src/shared/config";
 import { createMockClient, setupTestEnv } from "./helpers";
+import { createRealisticRequestPayload } from "./fixtures/realistic-request-payload";
 
 const startHeartbeatMock = vi.fn();
 
 const {
   ClaudeMultiAuthPlugin,
 } = await import("../src/index");
+
+function toHeaders(headers: HeadersInit | undefined): Headers {
+  return new Headers(headers);
+}
+
+function getBlockTexts(blocks: unknown): string {
+  if (!Array.isArray(blocks)) return "";
+  return blocks
+    .map((block) => {
+      if (typeof block === "string") return block;
+      if (typeof block === "object" && block !== null) {
+        const text = (block as { text?: unknown }).text;
+        return typeof text === "string" ? text : "";
+      }
+      return "";
+    })
+    .join("\n");
+}
+
+function containsProperty(value: unknown, property: string): boolean {
+  if (Array.isArray(value)) {
+    return value.some((entry) => containsProperty(entry, property));
+  }
+
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+
+  return Object.entries(value).some(([key, nested]) => (
+    key === property || containsProperty(nested, property)
+  ));
+}
 
 afterEach(() => {
   startHeartbeatMock.mockClear();
@@ -66,6 +99,39 @@ describe("index", () => {
 
       expect(loaded.apiKey).toBe("");
       expect(loaded.fetch).toBe(fetch);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("exposes oauth-only auth method", async () => {
+    const plugin = await ClaudeMultiAuthPlugin({ client: createMockClient() } as any);
+
+    expect(plugin.auth?.methods).toMatchObject([
+      {
+        label: "Claude Pro/Max (Multi-Auth)",
+        type: "oauth",
+      },
+    ]);
+  });
+
+  test("plugin loads in a temporary OpenCode config dir without user config", async () => {
+    const { dir, cleanup } = await setupTestEnv();
+
+    try {
+      const plugin = await ClaudeMultiAuthPlugin({ client: createMockClient() } as any);
+      const auth = plugin.auth!;
+      const loaded = await auth.loader!(
+        async () => ({ type: "api", key: "" }),
+        { id: "anthropic", name: "Anthropic", env: {}, models: {} } as any,
+      );
+
+      expect(process.env.OPENCODE_CONFIG_DIR).toBe(dir);
+      expect(plugin.tool).toBeUndefined();
+      expect(plugin["experimental.chat.system.transform"]).toBeTypeOf("function");
+      expect(loaded.apiKey).toBe("");
+      expect(loaded.fetch).toBe(fetch);
+      await expect(fs.access(join(dir, "anthropic-multi-account-accounts.json"))).rejects.toThrow();
     } finally {
       await cleanup();
     }
@@ -119,6 +185,89 @@ describe("index", () => {
 
     expect(loaded.apiKey).toBe("");
     expect(loaded.baseURL).toBe("https://api.anthropic.com/v1");
+  });
+
+  test("native plugin loader fetch preserves OpenCode tools through mocked upstream", async () => {
+    const { cleanup } = await setupTestEnv();
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
+      content: [{ type: "text", text: "ok" }],
+    }), {
+      headers: { "content-type": "application/json" },
+    }));
+
+    setClaudeIdentityForTest({ deviceId: "", accountUuid: "account-test" });
+
+    try {
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+      const plugin = await ClaudeMultiAuthPlugin({ client: createMockClient() } as any);
+      const auth = plugin.auth!;
+      const loaded = await auth.loader!(
+        async () => ({
+          type: "oauth",
+          access: "access-smoke",
+          refresh: "refresh-smoke",
+          expires: Date.now() + 600_000,
+        }),
+        { id: "anthropic", name: "Anthropic", env: {}, models: {} } as any,
+      );
+
+      const response = await loaded.fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "anthropic-beta": "custom-beta-2026-01-01",
+          "x-api-key": "should-not-leak",
+        },
+        body: JSON.stringify(createRealisticRequestPayload({
+          model: "claude-haiku-4-5",
+        })),
+      });
+
+      expect(response.status).toBe(200);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      const [input, init] = fetchMock.mock.calls[0] ?? [];
+      const transformedUrl = input instanceof URL ? input.toString() : String(input);
+      const headers = toHeaders(init?.headers);
+      const body = JSON.parse(String(init?.body)) as {
+        system?: unknown;
+        tools?: Array<{ name?: string; input_schema?: unknown }>;
+        tool_choice?: { name?: string };
+        messages?: Array<{ content?: unknown }>;
+      };
+
+      expect(transformedUrl).toContain("/v1/messages?beta=true");
+      expect(headers.get("authorization")).toBe("Bearer access-smoke");
+      expect(headers.get("x-api-key")).toBeNull();
+      expect(headers.get("anthropic-beta")).toContain("custom-beta-2026-01-01");
+
+      const systemText = getBlockTexts(body.system);
+      expect(Array.isArray(body.system)).toBe(true);
+      expect(body.system).toHaveLength(3);
+      expect(systemText).not.toContain("OpenCode");
+      expect(systemText).not.toContain("Remove this orchestration note.");
+
+      expect(body.tools).toHaveLength(3);
+      const toolNames = (body.tools ?? []).map((tool) => tool.name);
+      expect(new Set(toolNames).size).toBe(3);
+      expect(toolNames.every((name) => /^tool_[a-f0-9]+$/.test(name ?? ""))).toBe(true);
+      expect(toolNames).not.toContain("Bash");
+      expect(toolNames).not.toContain("Read");
+      expect(body.tools?.every((tool) => tool.input_schema)).toBe(true);
+      expect(body.tool_choice?.name).toBe(toolNames[1]);
+
+      const messages = body.messages ?? [];
+      const assistantBlocks = messages[1]?.content as Array<{ name?: string; type?: string }> | undefined;
+      const toolUse = assistantBlocks?.find((block) => block.type === "tool_use");
+      expect(toolUse?.name).toBe(toolNames[0]);
+      expect(containsProperty(messages, "cache_control")).toBe(false);
+      expect(JSON.stringify(messages)).not.toContain('"type":"thinking"');
+      expect(JSON.stringify(messages)).not.toContain("OpenCode request");
+    } finally {
+      globalThis.fetch = originalFetch;
+      await cleanup();
+    }
   });
 
   test("auth loader receives provider.models metadata when available", async () => {
@@ -309,41 +458,4 @@ describe("index", () => {
     }
   });
 
-  test("plugin init eagerly loads stored accounts for status tool", async () => {
-    const { dir, cleanup } = await setupTestEnv();
-    try {
-      await fs.writeFile(join(dir, "anthropic-multi-account-accounts.json"), JSON.stringify({
-        version: 1,
-        activeAccountUuid: "account-1",
-        accounts: [
-          {
-            uuid: "account-1",
-            email: "user@example.com",
-            refreshToken: "refresh-1",
-            accessToken: "access-1",
-            expiresAt: Date.now() + 60_000,
-            addedAt: 1,
-            lastUsed: 1,
-            enabled: true,
-            planTier: "max",
-            consecutiveAuthFailures: 0,
-            isAuthDisabled: false,
-          },
-        ],
-      }), "utf-8");
-
-      const plugin = await ClaudeMultiAuthPlugin({ client: createMockClient() } as any);
-      const statusTool = plugin.tool?.claude_multiauth_status;
-      expect(statusTool).toBeDefined();
-      if (!statusTool) {
-        throw new Error("Expected claude_multiauth_status tool to be defined");
-      }
-      const result = await statusTool.execute({}, {} as never);
-
-      expect(result).toContain("Multi-Auth Status (1 accounts)");
-      expect(result).not.toContain("Multi-auth not initialized");
-    } finally {
-      await cleanup();
-    }
-  });
 });

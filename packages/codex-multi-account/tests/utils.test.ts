@@ -1,4 +1,4 @@
-import { afterAll, describe, test, expect, vi, mock } from "bun:test";
+import { afterAll, describe, test, expect, vi } from "vitest";
 import type { ManagedAccount } from "../src/types";
 import { createMockClient } from "./helpers";
 
@@ -6,12 +6,12 @@ const originalConfigModule = await import("../src/config");
 
 const getConfigMock = vi.fn();
 
-mock.module("../src/config", () => ({
+vi.doMock("../src/config", () => ({
   getConfig: getConfigMock,
 }));
 
 afterAll(() => {
-  mock.module("../src/config", () => originalConfigModule);
+  vi.doMock("../src/config", () => originalConfigModule);
 });
 
 const { formatWaitTime, getAccountLabel, showToast } = await import("../src/utils");

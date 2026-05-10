@@ -1,7 +1,8 @@
 import { promises as fs } from "node:fs";
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 import { join } from "node:path";
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import * as v from "valibot";
 import { ACCOUNTS_FILENAME, CLAIMS_FILENAME } from "../src/shared/constants";
 import { AccountStore } from "../src/accounts/store";
@@ -12,6 +13,7 @@ import { setupTestEnv } from "../tests/helpers";
 
 const STORAGE_WORKER_PATH = join(process.cwd(), "tests/workers/storage-worker.ts");
 const CLAIM_WORKER_PATH = join(process.cwd(), "tests/workers/claim-worker.ts");
+const tsxEsmLoaderPath = createRequire(import.meta.url).resolve("tsx/esm");
 
 type TestEnv = Awaited<ReturnType<typeof setupTestEnv>>;
 
@@ -57,7 +59,7 @@ function runWorker(
   env: Record<string, string>,
 ): Promise<WorkerResult> {
   return new Promise((resolve) => {
-    const proc = spawn("bun", ["run", scriptPath, ...args], {
+    const proc = spawn(process.execPath, ["--import", tsxEsmLoaderPath, scriptPath, ...args], {
       env: { ...process.env, ...env },
       stdio: ["ignore", "pipe", "pipe"],
     });

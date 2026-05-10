@@ -24,12 +24,16 @@ export const CredentialRefreshPatchSchema = v.object({
   refreshToken: v.optional(v.string()),
   uuid: v.optional(v.string()),
   accountId: v.optional(v.string()),
+  accountUuid: v.optional(v.string()),
+  deviceId: v.optional(v.string()),
   email: v.optional(v.string()),
 });
 
 export const StoredAccountSchema = v.object({
   uuid: v.optional(v.string()),
   accountId: v.optional(v.string()),
+  accountUuid: v.optional(v.string()),
+  deviceId: v.optional(v.string()),
   label: v.optional(v.string()),
   email: v.optional(v.string()),
   planTier: v.optional(v.string(), ""),
@@ -79,6 +83,11 @@ export type AccountStorage = v.InferOutput<typeof AccountStorageSchema>;
 export type AccountSelectionStrategy = v.InferOutput<typeof AccountSelectionStrategySchema>;
 export type PluginConfig = v.InferOutput<typeof PluginConfigSchema>;
 
+export type AccountMetadataPatch = Partial<Pick<
+  StoredAccount,
+  "accountId" | "accountUuid" | "deviceId" | "email" | "label" | "planTier"
+>>;
+
 export type TokenRefreshResult =
   | { ok: true; patch: CredentialRefreshPatch }
   | { ok: false; permanent: boolean; status?: number };
@@ -112,6 +121,8 @@ export interface ManagedAccount {
   index: number;
   uuid?: string;
   accountId?: string;
+  accountUuid?: string;
+  deviceId?: string;
   label?: string;
   email?: string;
   planTier?: string;

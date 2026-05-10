@@ -1,56 +1,56 @@
-# multi-account-core
+# opencode-multi-account-core
 
-Shared core logic for multi-account OpenCode plugins. This package contains ~70% of the logic used by both [`anthropic-multi-account`](../anthropic-multi-account) and [`codex-multi-account`](../codex-multi-account).
+Shared core for kyoli OpenCode Plugin Mode.
 
-## What's inside
+This package is not a user-facing plugin. It is used by:
 
-| Module | What it does |
-|:-------|:-------------|
-| AccountStore | Single write path. Serializes all disk mutations through file locking. |
-| AccountManager | In-memory account cache and selection strategies (sticky, round-robin, hybrid). Created via `createAccountManagerForProvider`. |
-| Executor | Retry loop with account rotation on auth and rate-limit failures. Created via `createExecutorForProvider`. |
-| Claims | Cross-process coordination via claim files with zombie detection. |
-| Storage | Atomic file read/write with `proper-lockfile`. |
-| RateLimit | Per-account rate-limit tracking with configurable backoff. Created via `createRateLimitTrackerForProvider`. |
-| ProactiveRefreshQueue | Background token refresh before expiry. Created via `createProactiveRefreshForProvider`. |
-| Config | Plugin configuration loading and validation with valibot. Created via `createConfigLoaderForProvider`. |
-| AuthMigration | One-time import of existing single-account OAuth creds from OpenCode's `auth.json`. |
-| Adapters | Provider-specific OAuth adapter definitions (endpoints, client IDs, plan labels). |
-| UI | Terminal UI primitives (ANSI formatting, confirm dialogs, select menus). |
-| Utils | Config directory resolution, formatting helpers. |
+- [`opencode-codex-multi-account`](../codex-multi-account)
+- [`opencode-anthropic-multi-account`](../anthropic-multi-account)
 
-## Usage
+The npm package name remains `opencode-multi-account-core` for compatibility.
 
-This package is not intended to be used directly. It is a dependency of the provider-specific plugin packages. Each module exposes a factory function that accepts provider-specific config (endpoints, client IDs, plan labels) and returns a ready-to-use instance.
+## What lives here
 
-```ts
-import { createAccountManagerForProvider } from "opencode-multi-account-core";
+| Module | Purpose |
+|---|---|
+| `AccountStore` | File-locked account JSON storage |
+| `AccountManager` | Account cache, selection, state mutation |
+| `Executor` | Retry loop and account rotation |
+| `Claims` | Cross-process account claims |
+| `ProactiveRefreshQueue` | Background token refresh |
+| `NativePluginLifecycle` | OpenCode loader/runtime/refresh wiring |
+| `NativePluginAuth` | Shared OAuth method builder |
+| `NativePluginLoader` | Shared `getAuth -> lifecycle.load -> hooks` flow |
+| `NativePluginBootstrapAuth` | Stored-account to OpenCode `auth.json` sync helper |
 
-export const AccountManager = createAccountManagerForProvider({
-  refreshTokenFn: myRefreshToken,
-  isTokenExpiredFn: myIsTokenExpired,
-});
+Provider wire behavior stays in the provider packages. Server Mode behavior stays in
+`@kyoli-gam/core`, `@kyoli-gam/gateway`, and `@kyoli-gam/cli`.
+
+## Safety
+
+- Disk writes go through file locks.
+- Writes are atomic temp-file-and-rename operations.
+- Concurrent refreshes for the same account are deduplicated.
+- Claim-file writes are serialized.
+- Accounts are only auto-disabled when another usable account remains.
+- Dead process claims are released automatically.
+
+## Checks
+
+```bash
+pnpm --filter opencode-multi-account-core test:contract:native
+pnpm --filter opencode-multi-account-core typecheck
+pnpm --filter opencode-multi-account-core test
 ```
 
-## Architecture
+Root no-live plugin gate:
 
-```
-┌─────────────────────────────────────────────────┐
-│  anthropic-multi-account / codex-multi-account  │
-│  (provider-specific: auth, usage, transforms)   │
-├─────────────────────────────────────────────────┤
-│          multi-account-core  ← you are here     │
-│  AccountStore . AccountManager . Executor        │
-│  Claims . Storage . RateLimit . ProactiveRefresh │
-│  AuthMigration . Config . Utils . UI . Adapters  │
-│  (endpoints, client IDs, plan labels)            │
-└─────────────────────────────────────────────────┘
+```bash
+pnpm run test:contract:native
 ```
 
-## Safety guarantees
+## Docs
 
-- All disk mutations go through AccountStore with file locking
-- Atomic writes via temp-file-then-rename
-- Concurrent token refresh requests for the same account are deduplicated
-- Circuit breaker: an account is only auto-disabled when at least one other remains usable
-- Dead process claims are automatically released
+- [OpenCode Plugin Mode](../../docs/opencode-plugin-mode.md)
+- [OpenCode Plugin Usage](../../docs/opencode-plugin-usage.md)
+- [OpenCode Plugin Core Redesign Notes](../../docs/opencode-plugin-core-redesign.md)

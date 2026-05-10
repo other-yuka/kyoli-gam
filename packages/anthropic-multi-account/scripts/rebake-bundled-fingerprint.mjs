@@ -26,7 +26,7 @@ function assertClaudeCodeFingerprint(template, pinnedTemplate) {
 async function main() {
   if (process.env.ALLOW_FINGERPRINT_OVERWRITE !== "1") {
     throw new Error(
-      "Refusing to overwrite bundled fingerprint without ALLOW_FINGERPRINT_OVERWRITE=1. Run bun run check:fingerprint-drift first and only rebake after validating a real Claude Code capture.",
+      "Refusing to overwrite bundled fingerprint without ALLOW_FINGERPRINT_OVERWRITE=1. Run pnpm run check:fingerprint-drift first and only rebake after validating a real Claude Code capture.",
     );
   }
 

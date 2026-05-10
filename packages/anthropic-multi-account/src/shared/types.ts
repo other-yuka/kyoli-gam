@@ -23,11 +23,17 @@ export const CredentialRefreshPatchSchema = v.object({
   expiresAt: v.number(),
   refreshToken: v.optional(v.string()),
   uuid: v.optional(v.string()),
+  accountId: v.optional(v.string()),
+  accountUuid: v.optional(v.string()),
+  deviceId: v.optional(v.string()),
   email: v.optional(v.string()),
 });
 
 export const StoredAccountSchema = v.object({
   uuid: v.optional(v.string()),
+  accountId: v.optional(v.string()),
+  accountUuid: v.optional(v.string()),
+  deviceId: v.optional(v.string()),
   label: v.optional(v.string()),
   email: v.optional(v.string()),
   planTier: v.optional(v.string(), ""),
@@ -120,6 +126,9 @@ export type TokenRefreshResult =
 export interface ManagedAccount {
   index: number;
   uuid?: string;
+  accountId?: string;
+  accountUuid?: string;
+  deviceId?: string;
   label?: string;
   email?: string;
   planTier?: string;

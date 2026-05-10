@@ -10,6 +10,9 @@ export interface NodeTokenRequestOptions {
 }
 
 type NodeTokenRequestRunner = (options: NodeTokenRequestOptions) => Promise<string>;
+type ExecFile = typeof childProcess.execFile;
+
+let execFile: ExecFile = childProcess.execFile;
 
 function buildNodeTokenRequestScript(): string {
   return `
@@ -71,7 +74,7 @@ async function defaultRunNodeTokenRequest(options: NodeTokenRequestOptions): Pro
   const contentType = options.contentType ?? "application/json";
 
   return new Promise<string>((resolve, reject) => {
-    childProcess.execFile(
+    execFile(
       options.executable,
       ["-e", script],
       {
@@ -113,4 +116,8 @@ export async function runNodeTokenRequest(options: NodeTokenRequestOptions): Pro
 
 export function setNodeTokenRequestRunnerForTest(runner: NodeTokenRequestRunner | null): void {
   nodeTokenRequestRunner = runner ?? defaultRunNodeTokenRequest;
+}
+
+export function setNodeTokenRequestExecFileForTest(mockExecFile: ExecFile | null): void {
+  execFile = mockExecFile ?? childProcess.execFile;
 }

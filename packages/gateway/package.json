@@ -1,0 +1,47 @@
+{
+  "name": "@kyoli-gam/gateway",
+  "version": "0.0.0",
+  "description": "HTTP gateway for kyoli-gam v1",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "prepack": "pnpm run build",
+    "dev": "tsup --watch"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "sideEffects": false,
+  "author": "yuka",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/other-yuka/kyoli-gam.git",
+    "directory": "packages/gateway"
+  },
+  "dependencies": {
+    "@kyoli-gam/core": "workspace:*",
+    "@kyoli-gam/model-registry": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^25.2.2",
+    "typescript": "^6.0.3"
+  },
+  "files": [
+    "dist",
+    "package.json",
+    "README.md"
+  ]
+}

@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, mock, test, vi } from "bun:test";
+import { afterAll, beforeEach, describe, expect, test, vi } from "vitest";
 import type { ManagedAccount, UsageLimits } from "../src/types";
 
 const originalUsageModule = await import("../src/usage");
@@ -9,24 +9,24 @@ const fetchUsageMock = vi.fn();
 const getConfigMock = vi.fn();
 const showToastMock = vi.fn(() => Promise.resolve());
 
-mock.module("../src/usage", () => ({
+vi.doMock("../src/usage", () => ({
   fetchUsage: fetchUsageMock,
 }));
 
-mock.module("../src/config", () => ({
+vi.doMock("../src/config", () => ({
   getConfig: getConfigMock,
 }));
 
-mock.module("../src/utils", () => ({
+vi.doMock("../src/utils", () => ({
   formatWaitTime: (ms: number) => `${Math.ceil(ms / 1000)}s`,
   getAccountLabel: () => "Account 1",
   showToast: showToastMock,
 }));
 
 afterAll(() => {
-  mock.module("../src/usage", () => originalUsageModule);
-  mock.module("../src/config", () => originalConfigModule);
-  mock.module("../src/utils", () => originalUtilsModule);
+  vi.doMock("../src/usage", () => originalUsageModule);
+  vi.doMock("../src/config", () => originalConfigModule);
+  vi.doMock("../src/utils", () => originalUtilsModule);
 });
 
 const {

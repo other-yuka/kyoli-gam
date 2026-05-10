@@ -6,7 +6,6 @@ export const openAIOAuthAdapter: OAuthAdapter = {
   id: "openai",
   authProviderId: "openai",
   modelDisplayName: "ChatGPT",
-  statusToolName: "chatgpt_multiauth_status",
   authMethodLabel: "ChatGPT Plus/Pro (Multi-Auth)",
   serviceLogName: "chatgpt-multiauth",
   oauthClientId: "app_EMoamEEZ73f0CkXaXp7hrann",

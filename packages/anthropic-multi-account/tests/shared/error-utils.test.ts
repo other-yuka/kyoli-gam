@@ -1,4 +1,4 @@
-import { describe, expect, test, vi } from "bun:test";
+import { describe, expect, test, vi } from "vitest";
 import { enrich429, sanitizeError } from "../../src/shared/error-utils";
 
 describe("error-utils", () => {

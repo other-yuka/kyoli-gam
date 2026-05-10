@@ -4,13 +4,14 @@ import { getConfig } from "./config";
 import { getClearedOAuthBody } from "./utils";
 import type { AccountStore } from "./account-store";
 import type {
+  AccountMetadataPatch,
   ManagedAccount,
   OAuthCredentials,
-    PluginClient,
-    PluginConfig,
-    StoredAccount,
-    TokenRefreshResult,
-    UsageLimits,
+  PluginClient,
+  PluginConfig,
+  StoredAccount,
+  TokenRefreshResult,
+  UsageLimits,
 } from "./types";
 
 const STARTUP_REFRESH_CONCURRENCY = 3;
@@ -70,9 +71,9 @@ export interface AccountManagerInstance {
   validateNonActiveTokens(client: PluginClient): Promise<void>;
   removeAccount(index: number): Promise<boolean>;
   clearAllAccounts(): Promise<void>;
-  addAccount(auth: OAuthCredentials, email?: string): Promise<void>;
+  addAccount(auth: OAuthCredentials, email?: string, metadata?: AccountMetadataPatch): Promise<void>;
   toggleEnabled(uuid: string): Promise<void>;
-  replaceAccountCredentials(uuid: string, auth: OAuthCredentials): Promise<void>;
+  replaceAccountCredentials(uuid: string, auth: OAuthCredentials, metadata?: AccountMetadataPatch): Promise<void>;
   retryAuth(uuid: string, client: PluginClient): Promise<TokenRefreshResult>;
 }
 
@@ -148,6 +149,8 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
         index,
         uuid: storedAccount.uuid,
         accountId: storedAccount.accountId,
+        accountUuid: storedAccount.accountUuid,
+        deviceId: storedAccount.deviceId,
         label: storedAccount.label,
         email: storedAccount.email,
         planTier: storedAccount.planTier,
@@ -167,8 +170,29 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       };
     }
 
-    private createNewAccount(auth: OAuthCredentials, now: number): StoredAccount {
-      return {
+    private applyAccountMetadata(account: StoredAccount, metadata?: AccountMetadataPatch): void {
+      if (!metadata) return;
+
+      if (metadata.accountId) account.accountId = metadata.accountId;
+      if (metadata.accountUuid) account.accountUuid = metadata.accountUuid;
+      if (metadata.deviceId) account.deviceId = metadata.deviceId;
+      if (metadata.email) account.email = metadata.email;
+      if (metadata.label) account.label = metadata.label;
+      if (metadata.planTier !== undefined) account.planTier = metadata.planTier;
+    }
+
+    private applyRefreshIdentityPatch(account: StoredAccount, result: TokenRefreshResult & { ok: true }): void {
+      if (result.patch.accountId) account.accountId = result.patch.accountId;
+      if (result.patch.accountUuid && !account.accountUuid) account.accountUuid = result.patch.accountUuid;
+      if (result.patch.deviceId && !account.deviceId) account.deviceId = result.patch.deviceId;
+    }
+
+    private createNewAccount(
+      auth: OAuthCredentials,
+      now: number,
+      metadata?: AccountMetadataPatch,
+    ): StoredAccount {
+      const account: StoredAccount = {
         uuid: randomUUID(),
         refreshToken: auth.refresh,
         accessToken: auth.access,
@@ -180,6 +204,8 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
         consecutiveAuthFailures: 0,
         isAuthDisabled: false,
       };
+      this.applyAccountMetadata(account, metadata);
+      return account;
     }
 
     getAccountCount(): number {
@@ -698,7 +724,7 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
         account.expiresAt = result.patch.expiresAt;
         if (result.patch.refreshToken) account.refreshToken = result.patch.refreshToken;
         if (result.patch.uuid && result.patch.uuid !== uuid) account.uuid = result.patch.uuid;
-        if (result.patch.accountId) account.accountId = result.patch.accountId;
+        this.applyRefreshIdentityPatch(account, result);
         if (result.patch.email) account.email = result.patch.email;
         account.consecutiveAuthFailures = 0;
         account.isAuthDisabled = false;
@@ -763,7 +789,7 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       this.stickyBindings.clear();
     }
 
-    async addAccount(auth: OAuthCredentials, email?: string): Promise<void> {
+    async addAccount(auth: OAuthCredentials, email?: string, metadata?: AccountMetadataPatch): Promise<void> {
       if (!auth.refresh) return;
 
       const existingByToken = this.cached.find((account) => account.refreshToken === auth.refresh);
@@ -774,12 +800,12 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
           (account) => account.email && account.email === email,
         );
         if (existingByEmail?.uuid) {
-          await this.replaceAccountCredentials(existingByEmail.uuid, auth);
+          await this.replaceAccountCredentials(existingByEmail.uuid, auth, metadata);
           return;
         }
       }
 
-      const newAccount = this.createNewAccount(auth, Date.now());
+      const newAccount = this.createNewAccount(auth, Date.now(), metadata);
       if (email) newAccount.email = email;
       await this.store.addAccount(newAccount);
       this.activeAccountUuid = newAccount.uuid;
@@ -798,11 +824,16 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       });
     }
 
-    async replaceAccountCredentials(uuid: string, auth: OAuthCredentials): Promise<void> {
+    async replaceAccountCredentials(
+      uuid: string,
+      auth: OAuthCredentials,
+      metadata?: AccountMetadataPatch,
+    ): Promise<void> {
       const updated = await this.store.mutateAccount(uuid, (account) => {
         account.refreshToken = auth.refresh;
         account.accessToken = auth.access;
         account.expiresAt = auth.expires;
+        this.applyAccountMetadata(account, metadata);
         account.lastUsed = Date.now();
         account.enabled = true;
         account.isAuthDisabled = false;
@@ -835,7 +866,7 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
           account.expiresAt = result.patch.expiresAt;
           if (result.patch.refreshToken) account.refreshToken = result.patch.refreshToken;
           if (result.patch.uuid) account.uuid = result.patch.uuid;
-          if (result.patch.accountId) account.accountId = result.patch.accountId;
+          this.applyRefreshIdentityPatch(account, result);
           if (result.patch.email) account.email = result.patch.email;
           account.enabled = true;
           account.consecutiveAuthFailures = 0;

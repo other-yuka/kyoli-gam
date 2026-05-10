@@ -1,10 +1,15 @@
 # opencode-codex-multi-account
 
-OpenCode plugin for multi-account OpenAI (ChatGPT Codex) OAuth management with automatic rate limit switching.
+OpenCode plugin for multi-account ChatGPT/Codex OAuth. It runs inside OpenCode and does
+not launch `kyoli serve`.
+
+Use this package for OpenCode Plugin Mode. Use Server Mode (`kyoli serve` +
+`kyoli install opencode`) when the same account pool should also serve Codex CLI, SDK
+clients, or a dashboard.
 
 ## Install
 
-Add to `opencode.json`:
+Add the plugin to `~/.config/opencode/opencode.json`:
 
 ```jsonc
 {
@@ -12,20 +17,54 @@ Add to `opencode.json`:
 }
 ```
 
-## Features
+If `plugin` already exists, append this package to the existing array.
 
-- Automatic account rotation on 429 responses
-- Three selection strategies: sticky, round-robin, and hybrid
-- Cross-process coordination for parallel sessions
-- Background token refresh before expiry
-- Browser OAuth (PKCE) and Device Code authentication flows
+Then use OpenCode's normal auth flow:
 
-## Architecture
-
-```
-opencode-codex-multi-account  ← you are here
-        │
-opencode-multi-account-core
+```bash
+opencode auth login
 ```
 
-See the [root README](../../README.md) for full documentation.
+Choose the ChatGPT/Codex multi-auth OAuth method. Run the same command again to add more
+Codex accounts or open the account management menu.
+
+## What it does
+
+- Uses OpenCode's built-in `openai` provider.
+- Stores accounts under OpenCode's config directory.
+- Rotates accounts on auth/rate-limit failures.
+- Refreshes tokens before expiry.
+- Supports browser OAuth and device-code authentication.
+
+## Server Mode migration
+
+```bash
+kyoli accounts import opencode --dry-run --provider codex
+kyoli accounts import opencode --provider codex
+kyoli install opencode
+```
+
+Do not keep this plugin enabled for OpenAI while also routing OpenAI through
+`kyoli install opencode`, unless you are intentionally comparing both paths.
+
+## Checks
+
+No-live contract:
+
+```bash
+pnpm --filter opencode-codex-multi-account test:contract:native
+```
+
+Full package checks:
+
+```bash
+pnpm --filter opencode-codex-multi-account typecheck
+pnpm --filter opencode-codex-multi-account test
+pnpm --filter opencode-codex-multi-account build
+```
+
+## Docs
+
+- [Root README](../../README.md)
+- [OpenCode Plugin Usage](../../docs/opencode-plugin-usage.md)
+- [Codex compatibility matrix](../../docs/codex-compatibility.md)

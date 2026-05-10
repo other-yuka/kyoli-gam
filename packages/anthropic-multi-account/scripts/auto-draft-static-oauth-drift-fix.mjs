@@ -9,7 +9,7 @@ const repoRoot = process.env.KYOLI_GAM_REPO_ROOT
   : resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const capturePath = "packages/anthropic-multi-account/src/claude-code/fingerprint/capture.ts";
 const packageName = "opencode-anthropic-multi-account";
-const workflowName = "fingerprint-drift-watch.yml";
+const workflowName = "claude-code-drift-watch.yml";
 
 function sanitizeVersionForPath(version) {
   return version.replace(/[^0-9A-Za-z.-]/g, "-");
@@ -41,23 +41,28 @@ function updateCaptureMaxTested(ccVersion) {
   const absoluteCapturePath = join(repoRoot, capturePath);
   const capture = readFileSync(absoluteCapturePath, "utf8");
   const current = capture.match(/maxTested: "([^"]+)"/)?.[1] ?? null;
+
+  if (!current) {
+    return { changed: false, previousVersion: null, found: false };
+  }
+
   const nextCapture = capture.replace(/maxTested: "[^"]+"/, `maxTested: "${ccVersion}"`);
 
   if (nextCapture === capture) {
-    return { changed: false, previousVersion: current };
+    return { changed: false, previousVersion: current, found: true };
   }
 
   writeFileSync(absoluteCapturePath, nextCapture);
-  return { changed: true, previousVersion: current };
+  return { changed: true, previousVersion: current, found: true };
 }
 
 function writeChangeset(ccVersion) {
-  const changesetPath = `.changeset/cc-drift-${sanitizeVersionForPath(ccVersion)}.md`;
+  const changesetPath = `.changeset/claude-code-drift-${sanitizeVersionForPath(ccVersion)}.md`;
   const absoluteChangesetPath = join(repoRoot, changesetPath);
   mkdirSync(dirname(absoluteChangesetPath), { recursive: true });
   writeFileSync(
     absoluteChangesetPath,
-    `---\n"${packageName}": patch\n---\n\nUpdate the supported Claude Code compatibility range to ${ccVersion}.\n`,
+    `---\n"${packageName}": patch\n---\n\nUpdate the tested Claude Code compatibility range to ${ccVersion}.\n`,
   );
   return changesetPath;
 }
@@ -81,21 +86,23 @@ function writePrBody(report, ccVersion, previousVersion, changesetPath) {
   writeFileSync(
     absoluteBodyPath,
     `## Auto-drafted by ${workflowName}\n\n`
-      + `The drift watcher flagged Claude Code v${ccVersion} as outside the current supported range. This PR:\n\n`
+      + `The drift watcher found Claude Code v${ccVersion} beyond kyoli's tested compatibility range. This PR:\n\n`
       + `1. Bumps \`SUPPORTED_CC_RANGE.maxTested\` from ${previousText} → \`v${ccVersion}\` in \`${capturePath}\`\n`
       + `2. Adds a patch changeset at \`${changesetPath}\` for \`${packageName}\`\n\n`
       + `### Items in the drift report\n\n`
       + `${itemList}\n\n`
       + `### What happens when you merge this\n\n`
-      + `The repository release workflow uses Changesets. Merging this PR adds the release intent; the next release workflow run opens or updates the version-packages PR, and publishing happens after that version PR is merged.\n\n`
+      + `Kyoli uses Changesets, so this PR does not bump package versions directly. Merging it records release intent; the release workflow opens or updates the version-packages PR, and publishing happens after that version PR is merged.\n\n`
       + `### Maintainer checklist before merging\n\n`
       + `- [ ] Install the new Claude Code locally: \`npm install -g @anthropic-ai/claude-code@${ccVersion}\`\n`
-      + `- [ ] Run the Anthropic package test suite against the new Claude Code version.\n`
-      + `- [ ] If any fingerprint-sensitive fields changed, re-capture the bundled template locally: \`bun run --cwd packages/anthropic-multi-account bake:fingerprint\`\n`
-      + `- [ ] Confirm \`bun run --cwd packages/anthropic-multi-account check:fingerprint-drift\` and the static drift check both report clean results after any manual template update.\n`
+      + `- [ ] Run \`pnpm --dir packages/cli doctor claude --binary\`.\n`
+      + `- [ ] Run \`pnpm --dir packages/cli doctor claude --template\` and \`pnpm --dir packages/cli doctor claude --wire\`.\n`
+      + `- [ ] Run \`pnpm --filter opencode-anthropic-multi-account test:contract:native\`.\n`
+      + `- [ ] If fingerprint-sensitive fields changed, re-capture the bundled template locally: \`pnpm --dir packages/anthropic-multi-account bake:fingerprint\`.\n`
+      + `- [ ] Confirm \`pnpm --dir packages/anthropic-multi-account check:fingerprint-drift\` and the static drift check both report clean results after any manual template update.\n`
       + `- [ ] Merge this PR when the compatibility update is verified.\n\n`
       + `### About this auto-draft\n\n`
-      + `Only \`compat.range\`-only drift reports are auto-patched. Template re-capture, OAuth scope/client/URL drift, and other fingerprint-sensitive changes still require maintainer judgment and stay manual.\n\n`
+      + `Only \`compat.range\`-only drift reports are auto-patched. OAuth URL/client drift, scanner layout drift, template re-capture, and other fingerprint-sensitive changes stay manual because they can affect Server Mode and OpenCode Plugin Mode traffic.\n\n`
       + `---\n\n`
       + `_Generated by \`packages/anthropic-multi-account/scripts/auto-draft-static-oauth-drift-fix.mjs\`._\n`,
   );
@@ -117,6 +124,14 @@ function createCompatRangePatch(report) {
 
   const changedFiles = [];
   const captureUpdate = updateCaptureMaxTested(ccVersion);
+  if (!captureUpdate.found) {
+    return createSkippedResult("maxTested field not found");
+  }
+
+  if (!captureUpdate.changed) {
+    return createSkippedResult("maxTested already up to date");
+  }
+
   if (captureUpdate.changed) {
     changedFiles.push(capturePath);
   }
@@ -128,9 +143,9 @@ function createCompatRangePatch(report) {
   return {
     shouldCreatePr: changedFiles.length > 0,
     changedFiles,
-    branchName: `bot/cc-drift-v${sanitizeVersionForPath(ccVersion)}`,
-    commitMessage: `chore(cc-drift): ${packageName} maxTested → v${ccVersion}`,
-    prTitle: `chore(cc-drift): ${packageName} maxTested → v${ccVersion}`,
+    branchName: `bot/claude-code-drift-v${sanitizeVersionForPath(ccVersion)}`,
+    commitMessage: `chore(claude-code): maxTested → v${ccVersion}`,
+    prTitle: `chore(claude-code): maxTested → v${ccVersion}`,
     prBodyPath,
     reason: changedFiles.length > 0 ? "compat.range patched" : "no file changes",
   };
@@ -141,7 +156,7 @@ export {
   sanitizeVersionForPath,
 };
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const report = JSON.parse(readFileSync(reportPath, "utf8"));
   const result = createCompatRangePatch(report);
   writeResult(result);

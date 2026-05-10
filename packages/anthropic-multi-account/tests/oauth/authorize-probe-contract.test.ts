@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import { classifyAuthorizeResponse, REJECT_MARKER } from "../../scripts/_authorize-probe-classifier.mjs";
 import {
   AUTHORIZE_PROBE_BASE_SCOPES,

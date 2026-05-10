@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "vitest";
+import { writeFile } from "node:fs/promises";
 import { loadCache, resetOAuthConfigDetectionForTest } from "../../src/claude-code/oauth-config/detect";
 import { setupTestEnv } from "../helpers";
 
@@ -17,7 +18,7 @@ describe("oauth cache migration", () => {
     const { dir, cleanup } = await setupTestEnv();
 
     try {
-      await Bun.write(`${dir}/anthropic-oauth-config-cache.json`, JSON.stringify({
+      await writeFile(`${dir}/anthropic-oauth-config-cache.json`, JSON.stringify({
         entries: {
           legacy: {
             clientId: "11111111-1111-4111-8111-111111111111",
@@ -50,7 +51,7 @@ describe("oauth cache migration", () => {
     const { dir, cleanup } = await setupTestEnv();
 
     try {
-      await Bun.write(`${dir}/anthropic-oauth-config-cache.json`, JSON.stringify({
+      await writeFile(`${dir}/anthropic-oauth-config-cache.json`, JSON.stringify({
         entries: {
           polluted: {
             clientId: "11111111-1111-4111-8111-111111111111",
@@ -75,7 +76,7 @@ describe("oauth cache migration", () => {
     const { dir, cleanup } = await setupTestEnv();
 
     try {
-      await Bun.write(`${dir}/anthropic-oauth-config-cache.json`, JSON.stringify({
+      await writeFile(`${dir}/anthropic-oauth-config-cache.json`, JSON.stringify({
         entries: {
           missingScope: {
             clientId: "11111111-1111-4111-8111-111111111111",

@@ -15,9 +15,10 @@
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit",
-    "test": "for f in tests/*.test.ts; do bun test \"$f\" || exit 1; done",
-    "prepack": "bun run build",
-    "dev": "bun run build --watch"
+    "test": "vitest run tests",
+    "test:contract:native": "vitest run tests/unsupported-loader.test.ts tests/request-transform.test.ts tests/runtime-factory.test.ts tests/executor.test.ts tests/contract/native-contract.test.ts",
+    "prepack": "pnpm run build",
+    "dev": "tsup --watch"
   },
   "engines": {
     "node": ">=20.0.0"
@@ -41,7 +42,7 @@
   },
   "dependencies": {
     "@opencode-ai/plugin": "^1.14.24",
-    "opencode-multi-account-core": "^0.2.32",
+    "opencode-multi-account-core": "workspace:*",
     "valibot": "^1.2.0"
   },
   "devDependencies": {

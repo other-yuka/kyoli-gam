@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   resetUpstreamRequestForTest,
   setUpstreamRequestTestOverridesForTest,
@@ -23,7 +23,7 @@ describe("session-heartbeat", () => {
   test("heartbeat sends POST with correct URL, headers, and body", async () => {
     const calls: { url: string; init: RequestInit }[] = [];
 
-    const mockFetch = mock(async (url: string | URL | Request, init?: RequestInit) => {
+    const mockFetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       calls.push({ url: String(url), init: init ?? {} });
       return new Response(null, { status: 200 });
     }) as unknown as typeof globalThis.fetch;
@@ -66,7 +66,7 @@ describe("session-heartbeat", () => {
   test("stop clears interval and prevents further fetch calls", async () => {
     let callCount = 0;
 
-    const mockFetch = mock(async () => {
+    const mockFetch = vi.fn(async () => {
       callCount++;
       return new Response(null, { status: 200 });
     }) as unknown as typeof globalThis.fetch;
@@ -91,7 +91,7 @@ describe("session-heartbeat", () => {
   });
 
   test("stop is idempotent", async () => {
-    const mockFetch = mock(
+    const mockFetch = vi.fn(
       async () => new Response(null, { status: 200 }),
     ) as unknown as typeof globalThis.fetch;
 
@@ -111,7 +111,7 @@ describe("session-heartbeat", () => {
   test("stop aborts in-flight fetch", async () => {
     const signals: AbortSignal[] = [];
 
-    const mockFetch = mock(async (_url: string | URL | Request, init?: RequestInit) => {
+    const mockFetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       if (init?.signal) signals.push(init.signal);
       await new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(resolve, 5_000);
@@ -144,7 +144,7 @@ describe("session-heartbeat", () => {
   test("fetch failure is silent and non-fatal", async () => {
     let callCount = 0;
 
-    const mockFetch = mock(async () => {
+    const mockFetch = vi.fn(async () => {
       callCount++;
       throw new Error("Network failure");
     }) as unknown as typeof globalThis.fetch;

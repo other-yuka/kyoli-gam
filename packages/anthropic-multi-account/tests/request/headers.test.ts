@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { beforeEach, describe, expect, mock, test, vi } from "bun:test";
+import { beforeEach, describe, expect, test, vi } from "vitest";
 
 const bundledTemplateJson = JSON.parse(
   readFileSync(new URL("../../src/claude-code/fingerprint/data.json", import.meta.url), "utf8"),
@@ -8,11 +8,12 @@ const bundledTemplateJson = JSON.parse(
 const detectCliVersionMock = vi.fn(() => "2.3.5");
 const loadTemplateMock = vi.fn();
 
-mock.module("../../src/claude-code/cli-version", () => ({
+vi.doMock("../../src/claude-code/cli-version", () => ({
   detectCliVersion: detectCliVersionMock,
 }));
 
-mock.module("../../src/claude-code/fingerprint/capture", () => ({
+vi.doMock("../../src/claude-code/fingerprint/capture", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../src/claude-code/fingerprint/capture")>()),
   compareVersions: vi.fn(() => 0),
   loadTemplate: loadTemplateMock,
 }));

@@ -4,7 +4,6 @@ export const anthropicOAuthAdapter: OAuthAdapter = {
   id: "anthropic",
   authProviderId: "anthropic",
   modelDisplayName: "Claude",
-  statusToolName: "claude_multiauth_status",
   authMethodLabel: "Claude Pro/Max (Multi-Auth)",
   serviceLogName: "claude-multiauth",
   oauthClientId: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",

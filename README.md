@@ -3,181 +3,330 @@
 
 # kyoli-gam
 
-Multi-account OAuth plugins for OpenCode
+<p><strong>Use multiple ChatGPT/Codex and Claude Code OAuth accounts from OpenCode, Codex CLI, and OpenAI/Anthropic-compatible clients.</strong></p>
+
+<p>
+  A local OAuth account router for coding agents. Kyoli keeps provider names familiar:
+  <code>openai/...</code> for Codex and <code>anthropic/...</code> for Claude.
+  When one account hits a limit, requests move to the next usable account.
+</p>
 
 [![CI](https://img.shields.io/github/actions/workflow/status/other-yuka/kyoli-gam/ci.yml?style=flat-square&label=CI)](https://github.com/other-yuka/kyoli-gam/actions)
 ![Node](https://img.shields.io/badge/Node.js->=20-3c873a?style=flat-square)
 [![TypeScript](https://img.shields.io/badge/TypeScript-blue?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org)
 [![License](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](LICENSE)
 
-[Features](#features) • [Packages](#packages) • [Getting started](#getting-started) • [Configuration](#configuration) • [Architecture](#architecture)
+[30 seconds](#30-seconds) · [Modes](#modes) · [Workflows](./docs/workflows.md) · [What it does](#what-it-does) · [Docs](#docs)
 
 </div>
 
-Use multiple OAuth accounts in a single OpenCode session. When one account gets rate-limited, the plugin switches to the next available one automatically.
+> Kyoli is OAuth-only. It is built for personal/internal development workflows where you
+> already have provider subscription accounts and want one local account pool for agent
+> traffic. It is independent, unofficial, and not affiliated with OpenAI, Anthropic, or
+> OpenCode.
 
-## Features
+---
 
-- Automatic account rotation on 429 responses
-- Three selection strategies: sticky, round-robin, and hybrid
-- Cross-process coordination for parallel sessions (subagents) via claim files with zombie detection
-- Background token refresh before expiry
-- Atomic file writes with locking to prevent corruption
-- Circuit breaker that auto-disables failing accounts while keeping at least one active
-- TUI menu for managing accounts through `opencode auth login`
+## 30 seconds
 
-## Packages
+### Server Mode
 
-| Package | Description |
-|:--------|:------------|
-| [`opencode-anthropic-multi-account`](./packages/opencode-anthropic-multi-account) | OpenCode plugin for multi-account Anthropic (Claude) OAuth |
-| [`opencode-codex-multi-account`](./packages/opencode-codex-multi-account) | OpenCode plugin for multi-account OpenAI (ChatGPT Codex) OAuth |
-| [`multi-account-core`](./packages/multi-account-core) | Shared core logic: account management, storage, claims, rate limiting, executor, provider-specific OAuth adapter definitions |
+Use this when OpenCode, Codex CLI, SDK clients, or a dashboard should share the same
+SQLite-backed account pool.
 
-## Getting started
+```bash
+# 1. Install dependencies for local development
+pnpm install
 
-### Prerequisites
+# 2. Add OAuth accounts
+pnpm --dir packages/cli login codex
+pnpm --dir packages/cli login claude
 
-- [Node.js](https://nodejs.org) >= 20
-- [Bun](https://bun.sh) (build toolchain)
-- OpenCode CLI
+# 3. Start the local gateway
+pnpm --dir packages/cli serve
 
-### Install
+# 4. Point OpenCode at kyoli
+pnpm --dir packages/cli install opencode --dry-run
+pnpm --dir packages/cli install opencode
 
-Add the plugin to `opencode.json`:
+# 5. Check the OpenCode path without touching your real config
+pnpm --dir packages/cli doctor opencode --run
+```
+
+The gateway listens on `http://127.0.0.1:2021` by default. OpenCode keeps using its
+built-in provider names: `openai/<codex-model>` and `anthropic/<claude-model>`.
+
+### OpenCode Plugin Mode
+
+Use this when you only need OpenCode and do not want a kyoli server or background
+process. Add the plugins to `~/.config/opencode/opencode.json`:
 
 ```jsonc
 {
   "plugin": [
-    "opencode-anthropic-multi-account@latest",
-    // and/or
-    "opencode-codex-multi-account@latest"
+    "opencode-codex-multi-account@latest",
+    "opencode-anthropic-multi-account@latest"
   ]
 }
 ```
 
-### Add accounts
+Then use OpenCode normally:
 
-Run `opencode auth login` to open the account management menu. Select **Add new account** to start an OAuth flow. Repeat for each account you want in the pool.
+```bash
+opencode auth login
+```
 
-## Configuration
+OpenCode plugins run inside OpenCode, store accounts under OpenCode's config directory, and
+do not launch `kyoli serve`.
 
-Create `~/.config/opencode/claude-multiauth.json` (Anthropic) or the equivalent for Codex:
+---
+
+## Modes
+
+| Mode | Entry point | Account store | Best for |
+|---|---|---|---|
+| **Server Mode** | `kyoli serve` + `kyoli install opencode` | SQLite under kyoli config | OpenCode, Codex CLI, SDK clients, dashboard |
+| **OpenCode Plugin Mode** | `opencode-*-multi-account` plugins | OpenCode plugin JSON files | OpenCode-only, no server/process |
+
+Do not enable both modes for the same provider unless you are intentionally comparing
+them. For example, avoid using the Anthropic OpenCode plugin while also routing Anthropic
+through `kyoli install opencode`.
+
+---
+
+## What it does
+
+Kyoli sits between coding tools and provider OAuth sessions.
+
+| Client path | Model/provider shape | Kyoli route | Notes |
+|---|---|---|---|
+| OpenCode built-in OpenAI provider | `openai/gpt-5.3-codex` | `/v1/responses` | Preferred OpenCode server-mode path for Codex |
+| Codex CLI | native Codex backend | `/backend-api/codex/responses` | Codex CLI can point `chatgpt_base_url` at kyoli |
+| OpenAI-compatible clients | `/v1/responses`, `/v1/chat/completions` | Codex OAuth pool | Chat Completions is a compatibility bridge |
+| Anthropic-compatible clients | `/v1/messages`, `/v1/messages/count_tokens` | Claude Code OAuth pool | Live generation is opt-in in server mode |
+| OpenCode plugins | OpenCode auth/fetch hooks | Provider APIs directly | No kyoli HTTP server |
+
+Routing is sticky by default so prompt-cache-heavy sessions stay on the same account.
+When an account is rate-limited, disabled, or needs re-authentication, kyoli can rotate to
+another usable account and records the account state for later inspection.
+
+Model metadata is loaded from `models.dev` with local fallbacks, so OpenCode can keep a
+fresh model list without a separate kyoli provider namespace.
+
+---
+
+## Why use it
+
+- **Keep OpenCode familiar.** Codex still looks like `openai/...`; Claude still looks like
+  `anthropic/...`.
+- **Pool subscription OAuth accounts.** Add multiple ChatGPT/Codex or Claude Code OAuth
+  accounts and let kyoli select the usable one.
+- **Avoid a server when you only need OpenCode.** OpenCode Plugin Mode keeps the old plugin
+  ergonomics: OpenCode loads the plugin, `opencode auth login` adds accounts, no daemon.
+- **Use a shared local gateway when you need more clients.** Server Mode lets OpenCode,
+  Codex CLI, SDK clients, and future dashboard surfaces share one account pool.
+- **Inspect account health locally.** `accounts status` shows ready, rate-limited,
+  disabled, reauth-required, and recently failed accounts.
+- **Keep Claude Code wire fidelity explicit.** Claude support uses captured Claude Code
+  template/header/body behavior and separates local doctor checks from opt-in live
+  generation.
+
+---
+
+## Common commands
+
+```bash
+# Server
+pnpm --dir packages/cli serve
+pnpm --dir packages/cli config init
+
+# Add accounts
+pnpm --dir packages/cli login codex
+pnpm --dir packages/cli login claude
+pnpm --dir packages/cli accounts import opencode --dry-run
+pnpm --dir packages/cli accounts import opencode
+
+# Inspect and recover account state
+pnpm --dir packages/cli accounts list
+pnpm --dir packages/cli accounts status codex
+pnpm --dir packages/cli accounts status claude-code
+pnpm --dir packages/cli accounts reset-expired codex
+
+# OpenCode server-mode integration
+pnpm --dir packages/cli install opencode --dry-run
+pnpm --dir packages/cli install opencode
+pnpm --dir packages/cli restore opencode --dry-run
+
+# Doctors
+pnpm --dir packages/cli doctor
+pnpm --dir packages/cli doctor codex
+pnpm --dir packages/cli doctor codex --file
+pnpm --dir packages/cli doctor codex --e2e --opencode
+pnpm --dir packages/cli doctor codex --e2e --codex-cli
+pnpm --dir packages/cli doctor codex --load --requests 8 --concurrency 2
+pnpm --dir packages/cli doctor claude --binary
+pnpm --dir packages/cli doctor claude --template
+pnpm --dir packages/cli doctor claude --wire
+pnpm --dir packages/cli doctor claude --smoke
+pnpm --dir packages/cli doctor opencode --run
+```
+
+Claude full `/v1/messages` generation is disabled by default in Server Mode. The default
+smoke check uses the safer `/v1/messages/count_tokens` path:
+
+```bash
+pnpm --dir packages/cli doctor claude --smoke
+```
+
+OpenCode plugin Claude live generation has a separate opt-in acceptance gate:
+
+```bash
+KYOLI_ENABLE_LIVE_OPENCODE_CLAUDE_NATIVE=1 \
+KYOLI_CLAUDE_ALLOW_LIVE_MESSAGES=1 \
+pnpm --filter opencode-anthropic-multi-account test:live:opencode-claude-native
+```
+
+---
+
+## Server Mode
+
+Server Mode is a local HTTP gateway.
+
+```bash
+pnpm --dir packages/cli serve
+```
+
+Default config:
 
 ```json
 {
-  "account_selection_strategy": "sticky",
-  "cross_process_claims": true,
-  "quiet_mode": false,
-  "debug": false
+  "host": "127.0.0.1",
+  "port": 2021,
+  "databasePath": "~/.local/share/kyoli-gam/kyoli.db",
+  "accountSelectionStrategy": "weighted",
+  "softQuotaThresholdPercent": 90,
+  "planWeights": {
+    "max": 3,
+    "pro": 2,
+    "free": 1
+  },
+  "usageRefreshIntervalMs": 300000,
+  "maxConcurrentRequests": 0,
+  "adminToken": "",
+  "logLevel": "info"
 }
 ```
 
-All fields are optional. The values above are the defaults.
+Useful checks:
 
-### Account selection strategies
-
-| Strategy | How it works | Good for |
-|:---------|:-------------|:---------|
-| `sticky` (default) | Stays on one account until it gets rate-limited | Prompt cache reuse, single-account setups |
-| `round-robin` | Rotates to a different account on every request | 4+ accounts, maximizing throughput |
-| `hybrid` | Picks accounts by composite score (see below) | 2-3 accounts, balanced load |
-
-The `hybrid` strategy scores each account on three factors:
-
-- **Usage** -- accounts with lower recent usage (5-hour and 7-day windows) score higher, so the plugin naturally gravitates toward accounts with more remaining quota
-- **Health** -- accounts with no recent errors, auth failures, or rate limits score higher. An account that just recovered from a 429 gets a lower health score for a while.
-- **Freshness** -- accounts that haven't been used recently score higher. This spreads requests across the pool instead of hammering one account until it breaks.
-
-The account with the highest combined score gets selected for each request.
-
-> [!TIP]
-> `sticky` works best if you rely on prompt caching, since switching accounts invalidates the cache. `round-robin` gives higher aggregate throughput but loses cache on every switch.
-
-### Status tool
-
-The Anthropic plugin registers a `claude_multiauth_status` tool you can call mid-session. It shows all accounts with their usage percentages, rate-limit state, and reset times.
-
-```
-> claude_multiauth_status
+```bash
+curl http://127.0.0.1:2021/health
+curl http://127.0.0.1:2021/v1/models
+curl http://127.0.0.1:2021/v1/responses \
+  -H 'content-type: application/json' \
+  -d '{"model":"openai/gpt-5.3-codex","input":"Say smoke-ok","store":false}'
+curl http://127.0.0.1:2021/backend-api/files \
+  -H 'content-type: application/json' \
+  -d '{"file_name":"prompt.txt","file_size":12,"use_case":"codex"}'
 ```
 
-## Architecture
+If binding outside localhost, set `KYOLI_ADMIN_TOKEN` so `/admin/*` routes require
+`Authorization: Bearer <token>`.
 
-```
-opencode fetch
-  └── Plugin (anthropic / codex)
-        ├── migrateFromAuthJson ── imports existing single-account OAuth creds on first use
-        ├── AccountManager.create
-        │     └── AccountStore.load ── file-locked JSON storage
-        └── executeWithAccountRotation (executor)
-              ├── selectAccount (AccountManager)
-              ├── getRuntime (AccountRuntimeFactory)
-              │     └── buildRequestHeaders + transformRequestBody
-              ├── fetch → Provider API
-              └── on 401/403/429 → rotate account and retry
-```
+---
 
-### Package layers
+## OpenCode Plugin Mode
 
-```
-┌─────────────────────────────────────────────────┐
-│  opencode-anthropic-multi-account / opencode-codex-multi-account  │  Plugin entry points
-│  (provider-specific: auth, usage, transforms)   │  ← thin shims + provider logic
-├─────────────────────────────────────────────────┤
-│            multi-account-core                   │  Shared core (~70% of logic)
-│  AccountStore · AccountManager · Executor       │
-│  Claims · Storage · RateLimit · ProactiveRefresh│
-│  AuthMigration · Config · Utils · UI · Adapters │
-│  (endpoints, client IDs, plan labels)           │
-└─────────────────────────────────────────────────┘
+OpenCode Plugin Mode is a pure OpenCode plugin path. It is documented in
+[OpenCode Plugin Usage](./docs/opencode-plugin-usage.md).
+
+To move OpenCode plugin accounts into Server Mode:
+
+```bash
+pnpm --dir packages/cli accounts import opencode --dry-run
+pnpm --dir packages/cli accounts import opencode
+pnpm --dir packages/cli install opencode
 ```
 
-### Core components
+---
 
-| Component | Package | What it does |
-|:----------|:--------|:-------------|
-| AccountStore | core | Single write path. Serializes all disk mutations through file locking. |
-| AccountManager | core | In-memory account cache and selection strategies. Delegates writes to AccountStore. |
-| Executor | core | Retry loop with account rotation on auth and rate-limit failures. |
-| Claims | core | Cross-process coordination via claim files with zombie detection. |
-| ProactiveRefreshQueue | core | Refreshes tokens in the background before they expire. |
-| AuthMigration | core | One-time import of existing single-account OAuth creds from `auth.json`. |
-| Adapters | core | Provider-specific OAuth adapter definitions (endpoints, client IDs, plan labels). |
-| AccountRuntimeFactory | plugin | Creates per-account fetch runtimes with provider-specific auth headers and request transforms. |
+## Packages
+
+| Package | Description |
+|---|---|
+| [`@kyoli-gam/cli`](./packages/cli) | CLI for login, serve, account management, OpenCode install/restore, doctors |
+| [`@kyoli-gam/gateway`](./packages/gateway) | Local HTTP gateway and provider route surface |
+| [`@kyoli-gam/core`](./packages/core) | SQLite account store, sticky sessions, request logs, account pool |
+| [`@kyoli-gam/model-registry`](./packages/model-registry) | `models.dev` model registry with local fallbacks |
+| [`@kyoli-gam/provider-codex-chatgpt`](./packages/providers/codex-chatgpt) | ChatGPT/Codex OAuth provider adapter |
+| [`@kyoli-gam/provider-claude-code`](./packages/providers/claude-code) | Claude Code OAuth provider adapter |
+| [`opencode-codex-multi-account`](./packages/codex-multi-account) | OpenCode plugin for ChatGPT/Codex OAuth |
+| [`opencode-anthropic-multi-account`](./packages/anthropic-multi-account) | OpenCode plugin for Claude OAuth |
+| [`opencode-multi-account-core`](./packages/multi-account-core) | Shared OpenCode plugin core |
+
+---
+
+## Docs
+
+- [Workflows](./docs/workflows.md)
+- [Server mode operations](./docs/server-mode-operations.md)
+- [OpenCode Plugin Usage](./docs/opencode-plugin-usage.md)
+- [OpenCode Plugin Mode](./docs/opencode-plugin-mode.md)
+- [Codex compatibility matrix](./docs/codex-compatibility.md)
+- [Claude Code compatibility](./docs/claude-code-compatibility.md)
+- [Claude identity storage](./docs/claude-identity-storage.md)
+- [Claude live acceptance](./docs/claude-live-acceptance.md)
+- [Backpressure policy](./docs/backpressure-policy.md)
+- [Dashboard reference analysis](./docs/dashboard-reference-analysis.md)
+- [ADR 0001: v1 Gateway-First Architecture](./docs/decisions/0001-v1-gateway-first-architecture.md)
+- [ADR 0002: Protocol Translator Boundaries](./docs/decisions/0002-protocol-translator-boundaries.md)
+
+---
 
 ## Development
 
 ```bash
-bun install
-bun run typecheck
-bun run test
-bun run build
+pnpm install
+pnpm run typecheck
+pnpm run test
+pnpm run test:contract:native
+pnpm run build
 ```
 
-> [!NOTE]
-> The monorepo uses Bun workspaces with [Turborepo](https://turbo.build) for task orchestration. `turbo.json` defines the dependency graph so builds and typechecks run in topological order. Each package uses [conditional exports](https://nodejs.org/api/packages.html#conditional-exports): `exports["."].import` points to compiled output (`./dist/index.js`) for npm consumers, and `exports["."].types` points to generated declarations (`./dist/index.d.ts`). During development, `tsconfig.json` path mappings resolve cross-package imports to source for fast typechecking.
+The OpenCode plugin contract gate is no-live:
 
-## Release Process
+```bash
+pnpm run test:contract:native
+```
 
-This project uses Changesets for versioning and release automation.
+It covers shared OpenCode plugin helpers plus Codex and Claude OpenCode plugin entry points
+without calling ChatGPT/OpenAI or Anthropic.
 
-1. After making changes, run `bunx changeset` to add a changeset file.
-   - Select the bump type: `patch`, `minor`, or `major`
-   - Add a short description of the change (used in `CHANGELOG`)
-2. Create a PR that includes the changeset file, then merge it.
-3. After merge, the release workflow opens or updates a `Version Packages` PR.
-4. Merge the `Version Packages` PR to publish packages to npm and create GitHub Releases.
+---
+
+## Trust and limits
+
+| Area | Kyoli behavior |
+|---|---|
+| Credentials | Stored locally. Tokens are not logged. |
+| Network scope | Server binds to `127.0.0.1` by default. |
+| Auth model | OAuth-only. No API-key pooling. |
+| Server Mode storage | SQLite under kyoli config/data paths. |
+| OpenCode Plugin Mode storage | OpenCode plugin account JSON files. |
+| Telemetry | None implemented. |
+| Live Claude generation | Disabled by default in Server Mode. |
 
 ## Legal
 
-These plugins are for personal and internal development use. Respect provider quotas and data handling policies.
+These tools are for personal and internal development use. Respect provider quotas and
+data handling policies.
 
-By using these plugins, you acknowledge that this may violate provider Terms of Service, that providers may suspend or ban accounts, that APIs may change without notice, and that you assume all associated risks.
+By using kyoli-gam, you acknowledge that OAuth account routing may violate provider Terms
+of Service, that providers may suspend or ban accounts, that APIs may change without
+notice, and that you assume all associated risks.
 
-## Disclaimer
+Not affiliated with Anthropic, OpenAI, or OpenCode.
 
-Not affiliated with Anthropic or OpenAI. This is an independent open-source project.
-
-"Claude" and "Anthropic" are trademarks of Anthropic PBC. "ChatGPT" and "OpenAI" are trademarks of OpenAI, Inc.
+"Claude" and "Anthropic" are trademarks of Anthropic PBC. "ChatGPT", "Codex", and
+"OpenAI" are trademarks of OpenAI, Inc.
 

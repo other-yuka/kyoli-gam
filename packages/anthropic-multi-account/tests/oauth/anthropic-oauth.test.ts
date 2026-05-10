@@ -1,6 +1,7 @@
-import * as childProcess from "node:child_process";
 import { createHash } from "node:crypto";
-import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
+import { readFile, writeFile } from "node:fs/promises";
+import type * as childProcess from "node:child_process";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   FALLBACK,
   loadCache,
@@ -21,7 +22,8 @@ import {
   type LoginResult,
 } from "../../src/oauth/anthropic-oauth";
 import { getUserAgent } from "../../src/model/config";
-import { runNodeTokenRequest, setNodeTokenRequestRunnerForTest } from "../../src/oauth/token-node-request";
+import { runNodeTokenRequest, setNodeTokenRequestExecFileForTest, setNodeTokenRequestRunnerForTest } from "../../src/oauth/token-node-request";
+import { resetClaudeIdentityForTest, setClaudeIdentityForTest } from "../../src/claude-code";
 import { setupTestEnv } from "../helpers";
 
 const DETECTED_CLIENT_ID = "11111111-1111-4111-8111-111111111111";
@@ -47,7 +49,9 @@ describe("anthropic-oauth", () => {
     anthropicOAuthTestExports.setBrowserExecForTest(null);
     anthropicOAuthTestExports.setProfileFetcherForTest(null);
     anthropicOAuthTestExports.setUsageFetcherForTest(null);
+    resetClaudeIdentityForTest();
     setNodeTokenRequestRunnerForTest(null);
+    setNodeTokenRequestExecFileForTest(null);
     vi.restoreAllMocks();
   });
 
@@ -67,7 +71,7 @@ describe("anthropic-oauth", () => {
 
   async function writeTempFile(dir: string, fileName: string, contents: string): Promise<string> {
     const filePath = `${dir}/${fileName}`;
-    await Bun.write(filePath, contents);
+    await writeFile(filePath, contents);
     return filePath;
   }
 
@@ -79,12 +83,13 @@ describe("anthropic-oauth", () => {
           | undefined;
 
         callback?.(null, JSON.stringify({ ok: true, body: "{}" }), "");
-        return {} as childProcess.ChildProcess;
-      }) as unknown as typeof childProcess.execFile;
-    }
+      return {} as childProcess.ChildProcess;
+    }) as unknown as typeof childProcess.execFile;
+  }
 
-    test("defaults Content-Type to application/json in subprocess env and script", async () => {
-      const execFileSpy = vi.spyOn(childProcess, "execFile").mockImplementation(createExecFileMock());
+  test("defaults Content-Type to application/json in subprocess env and script", async () => {
+      const execFileSpy = vi.fn(createExecFileMock());
+      setNodeTokenRequestExecFileForTest(execFileSpy as unknown as typeof childProcess.execFile);
 
       await runNodeTokenRequest({
         body: JSON.stringify({ grant_type: "authorization_code" }),
@@ -105,8 +110,9 @@ describe("anthropic-oauth", () => {
       expect(env?.ANTHROPIC_REFRESH_CONTENT_TYPE).toBe("application/json");
     });
 
-    test("passes application/x-www-form-urlencoded Content-Type to subprocess env", async () => {
-      const execFileSpy = vi.spyOn(childProcess, "execFile").mockImplementation(createExecFileMock());
+  test("passes application/x-www-form-urlencoded Content-Type to subprocess env", async () => {
+      const execFileSpy = vi.fn(createExecFileMock());
+      setNodeTokenRequestExecFileForTest(execFileSpy as unknown as typeof childProcess.execFile);
 
       await runNodeTokenRequest({
         body: "grant_type=refresh_token&refresh_token=current-refresh",
@@ -122,8 +128,9 @@ describe("anthropic-oauth", () => {
       expect(options?.env?.ANTHROPIC_REFRESH_CONTENT_TYPE).toBe("application/x-www-form-urlencoded");
     });
 
-    test("passes User-Agent through to subprocess env and script when provided", async () => {
-      const execFileSpy = vi.spyOn(childProcess, "execFile").mockImplementation(createExecFileMock());
+  test("passes User-Agent through to subprocess env and script when provided", async () => {
+      const execFileSpy = vi.fn(createExecFileMock());
+      setNodeTokenRequestExecFileForTest(execFileSpy as unknown as typeof childProcess.execFile);
 
       await runNodeTokenRequest({
         body: JSON.stringify({ grant_type: "authorization_code" }),
@@ -161,7 +168,7 @@ describe("anthropic-oauth", () => {
     test("generatePKCE returns a verifier and matching challenge", () => {
       const pkce = generatePKCE();
 
-      expect(pkce.verifier).toBeString();
+      expect(typeof pkce.verifier).toBe("string");
       expect(pkce.verifier.length).toBeGreaterThan(0);
       expect(pkce.verifier).toMatch(/^[A-Za-z0-9_-]+$/);
       expect(pkce.challenge).toBe(base64url(createHash("sha256").update(pkce.verifier).digest()));
@@ -171,9 +178,9 @@ describe("anthropic-oauth", () => {
       const a = generateState();
       const b = generateState();
 
-      expect(a).toBeString();
+      expect(typeof a).toBe("string");
       expect(a.length).toBeGreaterThan(0);
-      expect(b).toBeString();
+      expect(typeof b).toBe("string");
       expect(b.length).toBeGreaterThan(0);
       expect(a).not.toBe(b);
     });
@@ -529,7 +536,7 @@ describe("anthropic-oauth", () => {
           baseApiUrl: DEFAULT_BASE_API_URL,
         });
 
-        const saved = await Bun.file(cachePath).json() as {
+        const saved = JSON.parse(await readFile(cachePath, "utf8")) as {
           entries?: Record<string, { authorizeUrl?: string }>;
         };
 
@@ -823,11 +830,13 @@ describe("anthropic-oauth", () => {
       const params = new URLSearchParams(capturedBody!);
       expect(params.get("grant_type")).toBe("refresh_token");
       expect(params.get("refresh_token")).toBe("old-refresh");
-      expect(params.get("client_id")).toBeString();
+      expect(typeof params.get("client_id")).toBe("string");
 
       expect(result.accessToken).toBe("new-a");
       expect(result.refreshToken).toBe("new-r");
-      expect(result.uuid).toBe("u-1");
+      expect(result.accountId).toBe("u-1");
+      expect(result.accountUuid).toBe("u-1");
+      expect(result.uuid).toBeUndefined();
       expect(result.email).toBe("e@x");
       expect(result.expiresAt).toBeGreaterThan(Date.now());
     });
@@ -836,6 +845,7 @@ describe("anthropic-oauth", () => {
       setOAuthConfigDetectionOverridesForTest({
         findCCBinary: () => null,
       });
+      setClaudeIdentityForTest({ deviceId: "device-local", accountUuid: "account-local" });
 
       setNodeTokenRequestRunnerForTest(async () => JSON.stringify({
         ok: true,
@@ -988,6 +998,10 @@ describe("anthropic-oauth", () => {
             access_token: "access-123",
             refresh_token: "refresh-456",
             expires_in: 3600,
+            account: {
+              uuid: "account-token",
+              email_address: "token-email@example.com",
+            },
           }),
         });
       });
@@ -1025,11 +1039,11 @@ describe("anthropic-oauth", () => {
       expect(authorizeUrl.searchParams.get("code")).toBe("true");
       expect(authorizeUrl.searchParams.get("client_id")).toBe("9d1c250a-e61b-44d9-88ed-5944d1962f5e");
       expect(authorizeUrl.searchParams.get("response_type")).toBe("code");
-      expect(authorizeUrl.searchParams.get("scope")).toBeString();
+      expect(typeof authorizeUrl.searchParams.get("scope")).toBe("string");
       expect(authorizeUrl.searchParams.get("scope")).toContain("org:create_api_key");
-      expect(authorizeUrl.searchParams.get("code_challenge")).toBeString();
+      expect(typeof authorizeUrl.searchParams.get("code_challenge")).toBe("string");
       expect(authorizeUrl.searchParams.get("code_challenge_method")).toBe("S256");
-      expect(authorizeUrl.searchParams.get("state")).toBeString();
+      expect(typeof authorizeUrl.searchParams.get("state")).toBe("string");
       expect(authorizeUrl.searchParams.get("redirect_uri")).toMatch(/^http:\/\/localhost:\d+\/callback$/);
       expect(openedUrl).toBe(
         anthropicOAuthTestExports.getOpenBrowserCommand(authInfo.url, process.platform),
@@ -1044,15 +1058,19 @@ describe("anthropic-oauth", () => {
       expect(parsedTokenRequestBody.code).toBe("oauth-code-123");
       expect(parsedTokenRequestBody.state).toBe(authorizeUrl.searchParams.get("state"));
       expect(parsedTokenRequestBody.redirect_uri).toBe(authorizeUrl.searchParams.get("redirect_uri"));
-      expect(parsedTokenRequestBody.code_verifier).toBeString();
+      expect(typeof parsedTokenRequestBody.code_verifier).toBe("string");
 
       expect(result.accessToken).toBe("access-123");
       expect(result.refreshToken).toBe("refresh-456");
       expect(result.expiresAt).toBeGreaterThan(Date.now());
       expect(result.email).toBe("a@b");
       expect(result.planTier).toBe("max");
-      expect(result.addedAt).toBeNumber();
-      expect(result.lastUsed).toBeNumber();
+      expect(result.accountId).toBe("account-token");
+      expect(result.accountUuid).toBe("account-token");
+      expect(typeof result.deviceId).toBe("string");
+      expect(result.deviceId?.length).toBeGreaterThan(0);
+      expect(typeof result.addedAt).toBe("number");
+      expect(typeof result.lastUsed).toBe("number");
       expect(usageTokens).toEqual(["access-123"]);
     });
 

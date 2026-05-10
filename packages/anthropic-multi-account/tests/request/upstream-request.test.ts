@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "vitest";
 import { createHash } from "node:crypto";
 import bundledFingerprintData from "../../src/claude-code/fingerprint/data.json";
 import type { ClaudeIdentity } from "../../src/claude-code/identity";
@@ -110,10 +110,10 @@ describe("upstream-request", () => {
   });
 
   test("scrubFrameworkIdentifiers removes prose mentions while preserving path-like occurrences", () => {
-    const input = "/Users/foo/.opencode/file.ts mentions opencode and openai in prose";
+    const input = "/tmp/kyoli/opencode-file.ts mentions opencode and openai in prose";
     const output = scrubFrameworkIdentifiers(input);
 
-    expect(output).toContain("/Users/foo/.opencode/file.ts");
+    expect(output).toContain("/tmp/kyoli/opencode-file.ts");
     expect(output).not.toContain(" mentions opencode");
     expect(output).not.toContain("openai");
   });
@@ -147,7 +147,7 @@ describe("upstream-request", () => {
           content: [
             {
               type: "text",
-              text: "Use /Users/foo/.opencode/file.ts but do not mention opencode in prose",
+              text: "Use /tmp/kyoli/opencode-file.ts but do not mention opencode in prose",
               cache_control: { type: "ephemeral" },
             },
           ],

@@ -126,6 +126,8 @@ export function createProactiveRefreshQueueForProvider(dependencies: ProactiveRe
               if (result.patch.uuid) target.uuid = result.patch.uuid;
               if (result.patch.email) target.email = result.patch.email;
               if (result.patch.accountId) target.accountId = result.patch.accountId;
+              if (result.patch.accountUuid && !target.accountUuid) target.accountUuid = result.patch.accountUuid;
+              if (result.patch.deviceId && !target.deviceId) target.deviceId = result.patch.deviceId;
               target.consecutiveAuthFailures = 0;
               target.isAuthDisabled = false;
               target.authDisabledReason = undefined;

@@ -1,8 +1,7 @@
-import { describe, test, expect, beforeEach, afterEach, vi } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import * as anthropicOAuth from "../../src/oauth/anthropic-oauth";
 import * as ansiModule from "../../src/auth-ux/menu/ansi";
 import * as authMenuModule from "../../src/auth-ux/menu/menu";
-import * as childProcess from "node:child_process";
 import { handleAuthorize } from "../../src/auth-ux/handler";
 import { AccountStore } from "../../src/accounts/store";
 import { createMockClient, setupTestEnv } from "../helpers";
@@ -14,7 +13,6 @@ describe("auth-handler", () => {
   beforeEach(() => {
     ttySpy = vi.spyOn(ansiModule, "isTTY").mockReturnValue(false);
     consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-    vi.spyOn(childProcess, "exec").mockImplementation((() => {}) as unknown as typeof childProcess.exec);
   });
 
   afterEach(() => {

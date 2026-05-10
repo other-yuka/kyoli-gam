@@ -1,0 +1,1 @@
+{"host":"0.0.0.0","port":3030,"accountSelectionStrategy":"sticky","planWeights":{"max":3}}

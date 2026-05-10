@@ -11,7 +11,6 @@ export interface OAuthAdapter {
   id: string;
   authProviderId: string;
   modelDisplayName: string;
-  statusToolName: string;
   authMethodLabel: string;
   serviceLogName: string;
   oauthClientId: string;

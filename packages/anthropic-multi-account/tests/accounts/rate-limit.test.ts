@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test, vi } from "bun:test";
+import { beforeEach, describe, expect, test, vi } from "vitest";
 import { createRateLimitHandlers } from "opencode-multi-account-core";
 import type { ManagedAccount, UsageLimits } from "../../src/shared/types";
 

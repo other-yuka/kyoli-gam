@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
-import { afterAll, afterEach, beforeEach, describe, expect, mock, test, vi } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { ACCOUNTS_FILENAME } from "../src/constants";
 import type { AccountStorage, PluginClient, PluginConfig, StoredAccount, TokenRefreshResult } from "../src/types";
 import { createMockClient, setupTestEnv } from "./helpers";
@@ -12,18 +12,18 @@ const refreshTokenMock = vi.fn();
 const isTokenExpiredMock = vi.fn();
 const getConfigMock = vi.fn();
 
-mock.module("../src/token", () => ({
+vi.doMock("../src/token", () => ({
   refreshToken: refreshTokenMock,
   isTokenExpired: isTokenExpiredMock,
 }));
 
-mock.module("../src/config", () => ({
+vi.doMock("../src/config", () => ({
   getConfig: getConfigMock,
 }));
 
 afterAll(() => {
-  mock.module("../src/token", () => originalTokenModule);
-  mock.module("../src/config", () => originalConfigModule);
+  vi.doMock("../src/token", () => originalTokenModule);
+  vi.doMock("../src/config", () => originalConfigModule);
 });
 
 const { AccountStore } = await import("../src/account-store");

@@ -20,6 +20,7 @@ export interface OAuthFlowResult {
   method: "auto";
   callback(code?: string): Promise<OAuthCallbackResponse>;
   _email?: string;
+  _account?: Partial<StoredAccount>;
 }
 
 function makeFailedFlowResult(message: string): OAuthFlowResult {
@@ -48,6 +49,18 @@ function asOAuthCallbackResponse(account: Partial<StoredAccount>): OAuthCallback
   };
 }
 
+function extractAccountMetadata(account: Partial<StoredAccount> | undefined): Partial<StoredAccount> | undefined {
+  if (!account) return undefined;
+
+  return {
+    accountId: account.accountId,
+    accountUuid: account.accountUuid,
+    deviceId: account.deviceId,
+    email: account.email,
+    planTier: account.planTier,
+  };
+}
+
 async function startOAuthFlow(): Promise<OAuthFlowResult> {
   try {
     const completedAccount = await loginWithOAuth({
@@ -67,6 +80,7 @@ async function startOAuthFlow(): Promise<OAuthFlowResult> {
       method: "auto",
       callback: async () => completedResult,
       _email: accountEmail,
+      _account: completedAccount,
     };
   } catch {
     return makeFailedFlowResult("Failed to start OAuth flow");
@@ -86,7 +100,11 @@ function wrapCallbackWithAccountReplace(
 
       if (callbackResult.type === "success") {
         if (targetAccount.uuid) {
-          await manager.replaceAccountCredentials(targetAccount.uuid, toOAuthCredentials(callbackResult));
+          await manager.replaceAccountCredentials(
+            targetAccount.uuid,
+            toOAuthCredentials(callbackResult),
+            extractAccountMetadata(result._account),
+          );
         }
         console.log(`\n✅ ${getAccountLabel(targetAccount)} re-authenticated successfully.\n`);
       }
@@ -97,7 +115,7 @@ function wrapCallbackWithAccountReplace(
 }
 
 function wrapCallbackWithManagerSync(
-  result: OAuthFlowResult & { _email?: string },
+  result: OAuthFlowResult & { _email?: string; _account?: Partial<StoredAccount> },
   manager: AccountManager | null,
 ): OAuthFlowResult {
   const originalCallback = result.callback;
@@ -109,17 +127,18 @@ function wrapCallbackWithManagerSync(
 
       if (callbackResult.type === "success") {
         const auth = toOAuthCredentials(callbackResult);
+        const metadata = extractAccountMetadata(result._account);
 
         if (manager) {
           const countBefore = manager.getAccounts().length;
-          await manager.addAccount(auth, email);
+          await manager.addAccount(auth, email, metadata);
           const countAfter = manager.getAccounts().length;
           const added = countAfter > countBefore;
           console.log(added
             ? `\n✅ Account added to multi-auth pool (${countAfter} total).\n`
             : `\nℹ️  Account already exists in multi-auth pool (${countAfter} total).\n`);
         } else {
-          await persistFallback(auth, email);
+          await persistFallback(auth, email, metadata);
           console.log("\n✅ Account saved.\n");
         }
       }
@@ -129,7 +148,11 @@ function wrapCallbackWithManagerSync(
   };
 }
 
-async function persistFallback(auth: OAuthCredentials, email?: string): Promise<void> {
+async function persistFallback(
+  auth: OAuthCredentials,
+  email?: string,
+  metadata?: Partial<StoredAccount>,
+): Promise<void> {
   try {
     const store = new AccountStore();
     const now = Date.now();
@@ -145,7 +168,11 @@ async function persistFallback(auth: OAuthCredentials, email?: string): Promise<
       planTier: "",
       consecutiveAuthFailures: 0,
       isAuthDisabled: false,
+      accountId: metadata?.accountId,
+      accountUuid: metadata?.accountUuid,
+      deviceId: metadata?.deviceId,
     };
+    if (metadata?.planTier !== undefined) account.planTier = metadata.planTier;
     await store.addAccount(account);
     await store.setActiveUuid(account.uuid);
   } catch {

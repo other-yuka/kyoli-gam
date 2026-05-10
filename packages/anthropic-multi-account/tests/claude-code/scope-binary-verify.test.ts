@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import { filterScopesByBinaryPresence } from "../../src/claude-code/oauth-config/detect";
 
 const EXPECTED = [

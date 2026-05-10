@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { createAccountManagerForProvider } from "../src/account-manager";
 import { AccountStore } from "../src/account-store";
 import { ACCOUNTS_FILENAME, setAccountsFilename } from "../src/constants";
@@ -72,6 +72,37 @@ describe("core/account-manager", () => {
     const selected = await manager.selectAccount();
     expect(selected?.uuid).toBe(manager.getActiveAccount()?.uuid);
     expect(refreshToken).not.toHaveBeenCalled();
+  });
+
+  test("persists provider identity metadata when adding an account", async () => {
+    const AccountManager = createAccountManagerForProvider({
+      providerAuthId: "anthropic",
+      isTokenExpired: () => false,
+      refreshToken: async () => ({ ok: false, permanent: false }),
+    });
+
+    const store = new AccountStore();
+    const manager = await AccountManager.create(store, createAuth("a1"));
+    await manager.addAccount(createAuth("a2"), "a2@example.com", {
+      accountId: "provider-account-2",
+      accountUuid: "claude-account-2",
+      deviceId: "claude-device-2",
+    });
+
+    const added = manager.getAccounts().find((account) => account.email === "a2@example.com");
+    expect(added).toMatchObject({
+      accountId: "provider-account-2",
+      accountUuid: "claude-account-2",
+      deviceId: "claude-device-2",
+    });
+
+    const storage = await store.load();
+    const stored = storage.accounts.find((account) => account.email === "a2@example.com");
+    expect(stored).toMatchObject({
+      accountId: "provider-account-2",
+      accountUuid: "claude-account-2",
+      deviceId: "claude-device-2",
+    });
   });
 
   test("keeps sticky bindings per session key", async () => {

@@ -1,4 +1,5 @@
 import { exec } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import * as v from "valibot";
 import { TOKEN_REFRESH_TIMEOUT_MS } from "../shared/constants";
 import { claudeCodeIntegration } from "../claude-code";
@@ -101,6 +102,18 @@ function openBrowser(url: string): void {
   } catch {
     // best-effort
   }
+}
+
+function resolveStoredClaudeIdentity(tokens: TokenResponse): Pick<StoredAccount, "accountId" | "accountUuid" | "deviceId"> {
+  const localIdentity = claudeCodeIntegration.loadIdentity();
+  const accountUuid = tokens.account?.uuid || localIdentity.accountUuid || randomUUID();
+  const deviceId = localIdentity.deviceId || randomUUID();
+
+  return {
+    accountId: accountUuid,
+    accountUuid,
+    deviceId,
+  };
 }
 
 function buildAuthorizeUrl(params: {
@@ -236,10 +249,11 @@ export async function loginWithOAuth(callbacks: LoginCallbacks): Promise<Partial
       accessToken: tokens.access_token,
       refreshToken: tokens.refresh_token,
       expiresAt: now + tokens.expires_in * 1000,
-      email: profileData?.email,
+      email: profileData?.email ?? tokens.account?.email_address,
       planTier: profileData?.planTier ?? "",
       addedAt: now,
       lastUsed: now,
+      ...resolveStoredClaudeIdentity(tokens),
     };
   } catch (error) {
     stop();
@@ -274,7 +288,8 @@ export async function refreshWithOAuth(currentRefreshToken: string): Promise<Cre
   }
 
   if (response.account?.uuid) {
-    patch.uuid = response.account.uuid;
+    patch.accountId = response.account.uuid;
+    patch.accountUuid = response.account.uuid;
   }
 
   if (response.account?.email_address) {

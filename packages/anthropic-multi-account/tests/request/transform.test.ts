@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import {
   buildRequestHeaders,
   createResponseStreamTransform,
@@ -167,11 +167,13 @@ describe("transformRequestBody", () => {
 
       const parsed = JSON.parse(transformed as string) as {
         system: Array<{ text?: string }>;
-        tools: Array<{ name?: string }>;
+        tools: Array<{ name?: string; input_schema?: unknown }>;
+        messages: Array<{ role?: string; content?: Array<Record<string, unknown>> }>;
         metadata?: { user_id?: string };
         thinking?: Record<string, unknown>;
         context_management?: Record<string, unknown>;
         output_config?: Record<string, unknown>;
+        tool_choice?: { name?: string };
       };
 
       expect(parsed.system).toHaveLength(3);
@@ -180,14 +182,25 @@ describe("transformRequestBody", () => {
       const stableSystemPromptLead = template.system_prompt.split("\n\n", 1)[0];
       expect(parsed.system[2]?.text).toContain(stableSystemPromptLead);
       expect(parsed.system[2]?.text).not.toContain("x-anthropic-billing-header: cc_version=1.2.3");
-      expect(parsed.tools).toHaveLength(2);
-      expect(parsed.tools[0]?.name).toMatch(/^tool_[a-f0-9]+$/);
-      expect(parsed.tools[1]?.name).toMatch(/^tool_[a-f0-9]+$/);
-      expect(parsed.tools[0]?.name).not.toBe(parsed.tools[1]?.name);
+      expect(parsed.system[2]?.text).not.toContain("OpenCode");
+      expect(parsed.system[2]?.text).not.toContain("Remove this orchestration note.");
+      expect(parsed.tools).toHaveLength(3);
+      for (const tool of parsed.tools) {
+        expect(tool.name).toMatch(/^tool_[a-f0-9]+$/);
+        expect(tool.input_schema).toBeTruthy();
+      }
+      expect(new Set(parsed.tools.map((tool) => tool.name)).size).toBe(3);
+      expect(parsed.tool_choice?.name).toBe(parsed.tools[1]?.name);
       expect(typeof parsed.metadata?.user_id).toBe("string");
       expect("thinking" in parsed).toBe(false);
       expect("context_management" in parsed).toBe(false);
       expect("output_config" in parsed).toBe(false);
+      expect(JSON.stringify(parsed.messages)).not.toContain("cache_control");
+      expect(JSON.stringify(parsed.messages)).not.toContain('"thinking"');
+      expect(parsed.messages[0]?.content?.[0]?.text).toContain("/tmp/kyoli/opencode-state");
+      expect(parsed.messages[0]?.content?.[0]?.text).not.toContain("OpenCode");
+      expect(parsed.messages[1]?.content?.[0]?.name).toBe(parsed.tools[0]?.name);
+      expect(parsed.messages[2]?.content?.[0]?.content).toBe("Found  retry guidance.");
     } finally {
       await cleanup();
     }

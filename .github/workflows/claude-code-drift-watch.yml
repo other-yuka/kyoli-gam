@@ -1,0 +1,308 @@
+name: Claude Code drift watch
+
+on:
+  schedule:
+    - cron: "0 0-1,3-23 * * *"
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Bypass the version cache and run the full drift check
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  version_check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.probe.outputs.version }}
+      should_run: ${{ steps.gate.outputs.should_run }}
+    steps:
+      - name: Fetch latest Claude Code version
+        id: probe
+        run: |
+          set +e
+          VERSION=$(curl -sS --fail --max-time 15 \
+            https://registry.npmjs.org/@anthropic-ai/claude-code/latest \
+            | node -pe "JSON.parse(require('fs').readFileSync(0, 'utf8')).version" 2>/dev/null)
+          EXIT=$?
+          set -e
+          if [ $EXIT -ne 0 ] || [ -z "$VERSION" ]; then
+            echo "::warning::npm registry probe failed (exit=$EXIT). Running the full check."
+            echo "version=unknown-fail-open" >> "$GITHUB_OUTPUT"
+          else
+            echo "Claude Code latest on npm: $VERSION"
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Cache version sentinel
+        id: version_cache
+        if: steps.probe.outputs.version != 'unknown-fail-open'
+        uses: actions/cache@v5
+        with:
+          path: .claude-code-version-sentinel
+          key: claude-code-drift-checked-${{ steps.probe.outputs.version }}
+
+      - name: Gate drift check
+        id: gate
+        run: |
+          FORCED='${{ github.event_name == 'workflow_dispatch' && inputs.force == 'true' }}'
+          VERSION='${{ steps.probe.outputs.version }}'
+          CACHE_HIT='${{ steps.version_cache.outputs.cache-hit }}'
+          EVENT='${{ github.event.schedule }}'
+
+          if [ "$FORCED" = "true" ]; then
+            echo "Manual force=true; running."
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          elif [ "$VERSION" = "unknown-fail-open" ]; then
+            echo "Version probe failed; running."
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT" = "0 2 * * *" ]; then
+            echo "Daily fallback cron; running even if the cache was hit."
+            touch .claude-code-version-sentinel
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          elif [ "$CACHE_HIT" = "true" ]; then
+            echo "Claude Code v$VERSION was already checked. Skipping."
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Claude Code v$VERSION is new. Running."
+            touch .claude-code-version-sentinel
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  drift:
+    needs: version_check
+    if: needs.version_check.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      exit_code: ${{ steps.drift.outputs.exit_code }}
+      cc_version: ${{ steps.version.outputs.cc_version }}
+      should_create_pr: ${{ steps.classify.outputs.should_create_pr }}
+      should_open_issue: ${{ steps.classify.outputs.should_open_issue }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Claude OpenCode package
+        run: pnpm --filter opencode-anthropic-multi-account build
+
+      - name: Run static Claude Code drift check
+        id: drift
+        run: |
+          set +e
+          node packages/anthropic-multi-account/scripts/check-claude-code-static-oauth-drift.mjs \
+            > drift-report.json 2> drift-log.txt
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          set -e
+          cat drift-log.txt
+          echo "--- drift report ---"
+          cat drift-report.json
+
+      - name: Extract Claude Code version
+        if: always()
+        id: version
+        run: |
+          CC_VERSION=$(node -e "try { console.log(JSON.parse(require('fs').readFileSync('drift-report.json','utf8')).ccVersion || 'unknown') } catch { console.log('unknown') }")
+          echo "cc_version=$CC_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Classify drift handling
+        if: steps.drift.outputs.exit_code != '0'
+        id: classify
+        run: |
+          node packages/anthropic-multi-account/scripts/auto-draft-static-oauth-drift-fix.mjs
+          SHOULD_CREATE_PR=$(node -e "console.log(JSON.parse(require('fs').readFileSync('auto-draft-result.json','utf8')).shouldCreatePr ? 'true' : 'false')")
+          if [ "$SHOULD_CREATE_PR" = "true" ]; then
+            echo "should_create_pr=true" >> "$GITHUB_OUTPUT"
+            echo "should_open_issue=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_create_pr=false" >> "$GITHUB_OUTPUT"
+            echo "should_open_issue=true" >> "$GITHUB_OUTPUT"
+          fi
+          cat auto-draft-result.json
+
+      - name: Upload drift artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: claude-code-drift-report
+          path: |
+            drift-report.json
+            drift-log.txt
+            auto-draft-result.json
+            auto-draft-pr-body.md
+          if-no-files-found: ignore
+          retention-days: 30
+
+  compat_pr:
+    needs: drift
+    if: needs.drift.outputs.should_create_pr == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+      pull-requests: write
+    outputs:
+      pr_url: ${{ steps.pr.outputs.pr_url }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: claude-code-drift-report
+
+      - name: Prepare compat-range patch
+        id: autopatch
+        run: |
+          node packages/anthropic-multi-account/scripts/auto-draft-static-oauth-drift-fix.mjs
+          cat auto-draft-result.json
+
+      - name: Open or update compat-range PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHANGED_FILES_JSON: ${{ steps.autopatch.outputs.changed_files }}
+        run: |
+          set -euo pipefail
+          BRANCH="${{ steps.autopatch.outputs.branch_name }}"
+          COMMIT_MESSAGE="${{ steps.autopatch.outputs.commit_message }}"
+          PR_TITLE="${{ steps.autopatch.outputs.pr_title }}"
+          PR_BODY_PATH="${{ steps.autopatch.outputs.pr_body_path }}"
+
+          git config user.name "claude-code-drift-watch[bot]"
+          git config user.email "actions@github.com"
+          git fetch origin "$BRANCH:refs/remotes/origin/$BRANCH" || true
+          git checkout -B "$BRANCH"
+
+          node <<'NODE' > changed-files.txt
+          const files = JSON.parse(process.env.CHANGED_FILES_JSON || "[]");
+          for (const file of files) console.log(file);
+          NODE
+
+          while IFS= read -r file; do
+            git add "$file"
+          done < changed-files.txt
+
+          git commit -m "$COMMIT_MESSAGE"
+          git push --force-with-lease origin "$BRANCH"
+
+          PR_URL=$(gh pr view "$BRANCH" --json url --jq .url 2>/dev/null || true)
+          if [ -z "$PR_URL" ]; then
+            PR_URL=$(gh pr create \
+              --base "${GITHUB_REF_NAME}" \
+              --head "$BRANCH" \
+              --title "$PR_TITLE" \
+              --body-file "$PR_BODY_PATH")
+          else
+            gh pr edit "$PR_URL" --title "$PR_TITLE" --body-file "$PR_BODY_PATH"
+          fi
+
+          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
+          echo "Auto-drafted compatibility PR: $PR_URL"
+
+  manual_issue:
+    needs: drift
+    if: needs.drift.outputs.should_open_issue == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: claude-code-drift-report
+
+      - name: Render issue body
+        run: |
+          node packages/anthropic-multi-account/scripts/render-claude-code-drift-issue.mjs \
+            drift-report.json \
+            issue-body.md
+
+      - name: Ensure drift label exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create claude-code-drift \
+            --color FBCA04 \
+            --description "Claude Code package drift requires kyoli compatibility review" \
+            2>/dev/null || true
+
+      - name: Open or update manual drift issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          CC_VERSION="${{ needs.drift.outputs.cc_version }}"
+          TITLE="Claude Code drift detected: v${CC_VERSION}"
+          LEGACY_TITLE="Fingerprint drift detected: Claude Code v${CC_VERSION}"
+          EXISTING=$(gh issue list --label claude-code-drift --state open --search "in:title \"${TITLE}\"" --json number --jq '.[0].number')
+          if [ -z "$EXISTING" ]; then
+            EXISTING=$(gh issue list --label fingerprint-drift --state open --search "in:title \"${LEGACY_TITLE}\"" --json number --jq '.[0].number' 2>/dev/null || true)
+          fi
+
+          if [ -z "$EXISTING" ]; then
+            gh issue create \
+              --title "$TITLE" \
+              --label claude-code-drift \
+              --body-file issue-body.md
+          else
+            gh issue comment "$EXISTING" --body-file issue-body.md
+          fi
+
+  close_resolved_issues:
+    needs:
+      - drift
+      - compat_pr
+    if: always() && (needs.drift.outputs.exit_code == '0' || (needs.drift.outputs.should_create_pr == 'true' && needs.compat_pr.result == 'success'))
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Close resolved drift issues
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMPAT_PR_URL: ${{ needs.compat_pr.outputs.pr_url }}
+        run: |
+          CC_VERSION="${{ needs.drift.outputs.cc_version }}"
+          TITLE_MATCH="Claude Code drift detected: v${CC_VERSION}"
+          LEGACY_TITLE_MATCH="Fingerprint drift detected: Claude Code v${CC_VERSION}"
+          {
+            gh issue list --label claude-code-drift --state open --search "in:title \"${TITLE_MATCH}\"" --json number --jq '.[].number'
+            gh issue list --label fingerprint-drift --state open --search "in:title \"${LEGACY_TITLE_MATCH}\"" --json number --jq '.[].number' 2>/dev/null || true
+          } | sort -u > drift-issue-numbers.txt
+          if [ -n "$COMPAT_PR_URL" ]; then
+            COMMENT="Handled by automated compatibility PR: $COMPAT_PR_URL"
+          else
+            COMMENT="Resolved: static Claude Code drift scan is clean for v${CC_VERSION}."
+          fi
+          while IFS= read -r n; do
+            if [ -z "$n" ]; then
+              continue
+            fi
+            gh issue close "$n" --comment "$COMMENT"
+          done < drift-issue-numbers.txt

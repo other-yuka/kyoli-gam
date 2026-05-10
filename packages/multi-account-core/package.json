@@ -1,7 +1,7 @@
 {
   "name": "opencode-multi-account-core",
   "version": "0.2.32",
-  "description": "Shared core for multi-account OpenCode plugins",
+  "description": "Shared core for OpenCode Plugin Mode",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -16,9 +16,10 @@
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit",
-    "test": "for f in tests/*.test.ts; do bun test \"$f\" || exit 1; done",
-    "prepack": "bun run build",
-    "dev": "bun run build --watch"
+    "test": "vitest run tests",
+    "test:contract:native": "vitest run tests/native-plugin-lifecycle.test.ts tests/native-plugin-auth.test.ts tests/native-plugin-loader.test.ts tests/native-plugin-bootstrap-auth.test.ts",
+    "prepack": "pnpm run build",
+    "dev": "tsup --watch"
   },
   "engines": {
     "node": ">=20.0.0"

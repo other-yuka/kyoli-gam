@@ -1,5 +1,6 @@
 import derivedDefaultsJson from "../fixtures/defaults/cc-derived-defaults.json";
 import bundledTemplateJson from "./fingerprint/data.json";
+import { loadClaudeCodeSharedRequestProfile } from "../../../providers/claude-code/src/opencode-shared";
 import { detectCliVersion } from "./cli-version";
 import { loadTemplate, type TemplateData } from "./fingerprint/capture";
 import { detectOAuthConfig, type DetectedOAuthConfig } from "./oauth-config/detect";
@@ -18,9 +19,10 @@ const derivedDefaults = derivedDefaultsJson as {
 };
 
 const DEFAULT_BASE_API_URL = derivedDefaults.request?.baseApiUrl || "https://api.anthropic.com";
-const DEFAULT_ANTHROPIC_VERSION = bundledTemplate.header_values?.["anthropic-version"] || derivedDefaults.request?.anthropicVersion || "2023-06-01";
-const DEFAULT_X_APP = bundledTemplate.header_values?.["x-app"] || derivedDefaults.request?.xApp || "cli";
-const DEFAULT_BETA_HEADER = bundledTemplate.anthropic_beta || bundledTemplate.header_values?.["anthropic-beta"] || derivedDefaults.request?.betaHeader || "oauth-2025-04-20,interleaved-thinking-2025-05-14";
+const sharedProfile = loadClaudeCodeSharedRequestProfile();
+const DEFAULT_ANTHROPIC_VERSION = bundledTemplate.header_values?.["anthropic-version"] || sharedProfile.anthropicVersion || derivedDefaults.request?.anthropicVersion || "2023-06-01";
+const DEFAULT_X_APP = bundledTemplate.header_values?.["x-app"] || sharedProfile.xApp || derivedDefaults.request?.xApp || "cli";
+const DEFAULT_BETA_HEADER = bundledTemplate.anthropic_beta || bundledTemplate.header_values?.["anthropic-beta"] || sharedProfile.anthropicBeta || derivedDefaults.request?.betaHeader || "oauth-2025-04-20,interleaved-thinking-2025-05-14";
 
 export interface CCDerivedRequestProfile {
   template: TemplateData;
@@ -51,8 +53,8 @@ export function loadCCDerivedRequestProfile(): CCDerivedRequestProfile {
     anthropicVersion,
     betaHeader,
     xApp,
-    baseApiUrl: DEFAULT_BASE_API_URL,
-    apiV1BaseUrl: `${DEFAULT_BASE_API_URL}/v1`,
+    baseApiUrl: sharedProfile.baseUrl || DEFAULT_BASE_API_URL,
+    apiV1BaseUrl: sharedProfile.apiV1BaseUrl || `${DEFAULT_BASE_API_URL}/v1`,
   };
 }
 

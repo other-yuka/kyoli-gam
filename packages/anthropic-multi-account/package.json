@@ -15,14 +15,17 @@
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit",
-    "test": "bun test tests",
-    "check:fingerprint-drift": "bun run build && node scripts/check-live-fingerprint-drift.mjs",
-    "check:cc-authorize-probe": "bun run build && node scripts/check-cc-authorize-probe.mjs",
+    "test": "vitest run tests",
+    "test:contract:native": "vitest run tests/index.test.ts tests/model/capabilities.test.ts tests/request/tool-adapter.test.ts tests/request/client-adapter.test.ts tests/request/upstream-request.test.ts tests/contract/native-contract-invariants.test.ts tests/request/transform.test.ts tests/runtime/factory.test.ts",
+    "test:live:opencode-claude-native": "vitest run tests/live/opencode-claude-native.test.ts",
+    "check:fingerprint-drift": "pnpm run build && node scripts/check-live-fingerprint-drift.mjs",
+    "check:cc-authorize-probe": "pnpm run build && node scripts/check-cc-authorize-probe.mjs",
     "check:cc-authorize-probe-headless": "node scripts/check-cc-authorize-probe-headless.mjs",
     "fix:static-oauth-drift": "node scripts/auto-draft-static-oauth-drift-fix.mjs",
-    "bake:fingerprint": "bun run build && ALLOW_FINGERPRINT_OVERWRITE=1 node scripts/rebake-bundled-fingerprint.mjs",
-    "prepack": "bun run build",
-    "dev": "bun run build --watch"
+    "fix:claude-code-drift": "node scripts/auto-draft-static-oauth-drift-fix.mjs",
+    "bake:fingerprint": "pnpm run build && ALLOW_FINGERPRINT_OVERWRITE=1 node scripts/rebake-bundled-fingerprint.mjs",
+    "prepack": "pnpm run build",
+    "dev": "tsup --watch"
   },
   "engines": {
     "node": ">=20.0.0"
@@ -45,7 +48,7 @@
   },
   "dependencies": {
     "@opencode-ai/plugin": "^1.14.24",
-    "opencode-multi-account-core": "^0.2.32",
+    "opencode-multi-account-core": "workspace:*",
     "valibot": "^1.2.0"
   },
   "devDependencies": {

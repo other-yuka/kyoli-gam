@@ -1,4 +1,5 @@
 import * as v from "valibot";
+import { createServer, type Server } from "node:http";
 import {
   OPENAI_CLIENT_ID,
   OAUTH_ISSUER,
@@ -18,28 +19,13 @@ type OAuthCallbackQuery = {
   errorDescription?: string;
 };
 
-interface BunServerLike {
+interface OAuthServerLike {
   stop(closeActiveConnections?: boolean): void;
 }
 
-interface BunRuntimeLike {
-  serve(options: {
-    port: number;
-    fetch(request: Request): Response | Promise<Response>;
-  }): BunServerLike;
-}
-
-let oauthServer: BunServerLike | null = null;
+let oauthServer: OAuthServerLike | null = null;
 let resolveOAuthQuery: ((value: OAuthCallbackQuery) => void) | null = null;
 let rejectOAuthQuery: ((reason?: unknown) => void) | null = null;
-
-function getBunRuntime(): BunRuntimeLike {
-  const maybeBun = (globalThis as unknown as { Bun?: BunRuntimeLike }).Bun;
-  if (!maybeBun || typeof maybeBun.serve !== "function") {
-    throw new Error("Browser OAuth requires Bun runtime");
-  }
-  return maybeBun;
-}
 
 function getRedirectUri(port: number = OAUTH_PORT): string {
   return `http://localhost:${port}/auth/callback`;
@@ -248,54 +234,80 @@ export async function startOAuthServer(): Promise<{ port: number; redirectUri: s
     return { port: OAUTH_PORT, redirectUri: getRedirectUri() };
   }
 
-  const bun = getBunRuntime();
-  oauthServer = bun.serve({
-    port: OAUTH_PORT,
-    fetch(request) {
-      const url = new URL(request.url);
-
-      if (url.pathname === "/cancel") {
-        failOAuthQuery(new Error("Authentication cancelled by user"));
-        return new Response(renderErrorHtml("Authentication was cancelled."), {
-          status: 200,
-          headers: { "Content-Type": "text/html; charset=utf-8" },
-        });
-      }
-
-      if (url.pathname !== "/auth/callback") {
-        return new Response("Not Found", { status: 404 });
-      }
-
-      const error = url.searchParams.get("error") ?? undefined;
-      const errorDescription = url.searchParams.get("error_description") ?? undefined;
-      const code = url.searchParams.get("code") ?? undefined;
-      const state = url.searchParams.get("state") ?? undefined;
-
-      if (error) {
-        failOAuthQuery(new Error(errorDescription ?? error));
-        return new Response(renderErrorHtml(errorDescription ?? error), {
-          status: 400,
-          headers: { "Content-Type": "text/html; charset=utf-8" },
-        });
-      }
-
-      if (!code) {
-        failOAuthQuery(new Error("Missing authorization code"));
-        return new Response(renderErrorHtml("Missing authorization code."), {
-          status: 400,
-          headers: { "Content-Type": "text/html; charset=utf-8" },
-        });
-      }
-
-      completeOAuthQuery({ code, state });
-      return new Response(renderSuccessHtml(), {
-        status: 200,
-        headers: { "Content-Type": "text/html; charset=utf-8" },
-      });
-    },
+  const server = createServer(async (request, response) => {
+    const result = handleOAuthRequest(`http://localhost:${OAUTH_PORT}${request.url ?? "/"}`);
+    response.statusCode = result.status;
+    for (const [key, value] of result.headers) response.setHeader(key, value);
+    response.end(await result.text());
   });
+  await listen(server, OAUTH_PORT);
+  oauthServer = {
+    stop(closeActiveConnections = false) {
+      if (closeActiveConnections) server.closeAllConnections();
+      server.close();
+    },
+  };
 
   return { port: OAUTH_PORT, redirectUri: getRedirectUri() };
+}
+
+function handleOAuthRequest(requestUrl: string): Response {
+  const url = new URL(requestUrl);
+
+  if (url.pathname === "/cancel") {
+    failOAuthQuery(new Error("Authentication cancelled by user"));
+    return new Response(renderErrorHtml("Authentication was cancelled."), {
+      status: 200,
+      headers: { "Content-Type": "text/html; charset=utf-8" },
+    });
+  }
+
+  if (url.pathname !== "/auth/callback") {
+    return new Response("Not Found", { status: 404 });
+  }
+
+  const error = url.searchParams.get("error") ?? undefined;
+  const errorDescription = url.searchParams.get("error_description") ?? undefined;
+  const code = url.searchParams.get("code") ?? undefined;
+  const state = url.searchParams.get("state") ?? undefined;
+
+  if (error) {
+    failOAuthQuery(new Error(errorDescription ?? error));
+    return new Response(renderErrorHtml(errorDescription ?? error), {
+      status: 400,
+      headers: { "Content-Type": "text/html; charset=utf-8" },
+    });
+  }
+
+  if (!code) {
+    failOAuthQuery(new Error("Missing authorization code"));
+    return new Response(renderErrorHtml("Missing authorization code."), {
+      status: 400,
+      headers: { "Content-Type": "text/html; charset=utf-8" },
+    });
+  }
+
+  completeOAuthQuery({ code, state });
+  return new Response(renderSuccessHtml(), {
+    status: 200,
+    headers: { "Content-Type": "text/html; charset=utf-8" },
+  });
+}
+
+function listen(server: Server, port: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onError = (error: Error) => {
+      server.off("listening", onListening);
+      reject(error);
+    };
+    const onListening = () => {
+      server.off("error", onError);
+      resolve();
+    };
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen(port, "127.0.0.1");
+  });
 }
 
 export function stopOAuthServer(): void {

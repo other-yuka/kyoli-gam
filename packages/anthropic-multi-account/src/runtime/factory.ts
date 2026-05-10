@@ -198,6 +198,13 @@ function transformBodyToUpstream(
   }
 }
 
+function resolveAccountIdentity(storedAccount: StoredAccount, fallback: ClaudeIdentity): ClaudeIdentity {
+  return {
+    deviceId: storedAccount.deviceId || fallback.deviceId,
+    accountUuid: storedAccount.accountUuid || storedAccount.accountId || fallback.accountUuid || storedAccount.uuid || "",
+  };
+}
+
 async function applyResponseReverseLookup(
   response: Response,
   reverseLookup: Map<string, string>,
@@ -314,6 +321,9 @@ export class AccountRuntimeFactory {
       account.expiresAt = refreshed.patch.expiresAt;
       if (refreshed.patch.refreshToken) account.refreshToken = refreshed.patch.refreshToken;
       if (refreshed.patch.uuid) account.uuid = refreshed.patch.uuid;
+      if (refreshed.patch.accountId) account.accountId = refreshed.patch.accountId;
+      if (refreshed.patch.accountUuid && !account.accountUuid) account.accountUuid = refreshed.patch.accountUuid;
+      if (refreshed.patch.deviceId && !account.deviceId) account.deviceId = refreshed.patch.deviceId;
       if (refreshed.patch.email) account.email = refreshed.patch.email;
       account.consecutiveAuthFailures = 0;
       account.isAuthDisabled = false;
@@ -364,6 +374,7 @@ export class AccountRuntimeFactory {
     input: RequestInfo | URL,
     init: RequestInit | undefined,
     accessToken: string,
+    identity: ClaudeIdentity,
   ): Promise<Response> {
     const transformedInput = transformRequestUrl(input);
     const modelId = extractModelIdFromBody(init?.body);
@@ -384,7 +395,7 @@ export class AccountRuntimeFactory {
     }
 
     const transformedRequest = typeof init?.body === "string"
-      ? transformBodyToUpstream(init.body, this.identity, sessionId)
+      ? transformBodyToUpstream(init.body, identity, sessionId)
       : { body: init?.body, reverseLookup: new Map<string, string>(), validationError: null };
 
     if (transformedRequest.validationError) {
@@ -513,7 +524,12 @@ export class AccountRuntimeFactory {
         throw new Error(`No access token available for account ${uuid}`);
       }
 
-      return this.executeTransformedFetch(input, init, accessToken);
+      return this.executeTransformedFetch(
+        input,
+        init,
+        accessToken,
+        resolveAccountIdentity(storedAccount, this.identity),
+      );
     };
 
     debugLog(this.client, `Runtime created for account ${uuid.slice(0, 8)}`);

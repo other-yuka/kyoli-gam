@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 
 describe("getUsageSummary", () => {
   it("shows reset time regardless of utilization level", async () => {

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 
 describe("opencode-multi-account-core", () => {
   it("has test harness configured", () => {

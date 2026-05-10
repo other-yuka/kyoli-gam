@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "vitest";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import type { CapturedRequest, TemplateData } from "../../../src/claude-code/fingerprint/capture";
@@ -14,6 +14,7 @@ const {
   refreshLiveFingerprintAsync,
   resetFingerprintCaptureForTest,
   setFingerprintCaptureTestOverridesForTest,
+  SUPPORTED_CC_RANGE,
 } = await import(fingerprintCaptureModulePath) as typeof import("../../../src/claude-code/fingerprint/capture");
 
 const CACHE_FILE_NAME = "fingerprint-cache.json";
@@ -304,7 +305,7 @@ describe("fingerprint-capture", () => {
     expect(checkCCCompat(null).status).toBe("unknown");
     expect(checkCCCompat("dev-build").status).toBe("unknown");
     expect(checkCCCompat("0.9.9").status).toBe("below-min");
-    expect(checkCCCompat(getBundledCCVersion()).status).toBe("ok");
+    expect(checkCCCompat(SUPPORTED_CC_RANGE.maxTested).status).toBe("ok");
     expect(checkCCCompat("9.0.0").status).toBe("untested-above");
   });
 
@@ -673,7 +674,7 @@ describe("fingerprint-capture", () => {
               system: [
                 "x-anthropic-billing-header: cc_version=2.1.90.abc; cch=00000;",
                 bundled.agent_identity,
-                `${bundled.system_prompt}\n# Environment\nOS: darwin\n# Remaining\nInspect the repo at /Users/testuser/project.`,
+                `${bundled.system_prompt}\n# Environment\nOS: darwin\n# Remaining\nInspect the repo at /Users/example-user/project.`,
               ],
                 tools: [
                 ...bundled.tools,

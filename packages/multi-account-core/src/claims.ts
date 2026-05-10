@@ -5,6 +5,7 @@ import { getConfigDir } from "./utils";
 
 const CLAIMS_FILENAME = "multiauth-claims.json";
 const CLAIM_EXPIRY_MS = 60_000;
+const CLAIM_LOCK_STALE_MS = 15_000;
 
 export type ClaimsMap = Record<string, { pid: number; at: number }>;
 
@@ -101,18 +102,76 @@ async function writeClaimsFile(path: string, claims: ClaimsMap): Promise<void> {
   }
 }
 
+async function readClaimsFile(path: string): Promise<ClaimsMap> {
+  try {
+    const data = await fs.readFile(path, "utf-8");
+    return parseClaims(data);
+  } catch {
+    return {};
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function acquireClaimsLock(path: string): Promise<() => Promise<void>> {
+  const lockPath = `${path}.lock`;
+
+  await fs.mkdir(dirname(path), { recursive: true });
+
+  for (;;) {
+    try {
+      await fs.mkdir(lockPath, { mode: 0o700 });
+      return async () => {
+        try {
+          await fs.rm(lockPath, { recursive: true, force: true });
+        } catch {
+        }
+      };
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EEXIST") throw error;
+
+      try {
+        const stat = await fs.stat(lockPath);
+        if (Date.now() - stat.mtimeMs > CLAIM_LOCK_STALE_MS) {
+          await fs.rm(lockPath, { recursive: true, force: true });
+        }
+      } catch {
+      }
+
+      await sleep(10 + Math.floor(Math.random() * 20));
+    }
+  }
+}
+
+async function withClaimsLock<T>(path: string, fn: () => Promise<T>): Promise<T> {
+  const release = await acquireClaimsLock(path);
+  try {
+    return await fn();
+  } finally {
+    await release();
+  }
+}
+
 export function createClaimsManager(filename: string = CLAIMS_FILENAME): ClaimsManager {
   async function readClaims(): Promise<ClaimsMap> {
     const claimsPath = getClaimsPath(filename);
     try {
-      const data = await fs.readFile(claimsPath, "utf-8");
-      const parsed = parseClaims(data);
+      const parsed = await readClaimsFile(claimsPath);
       const now = Date.now();
       const { cleaned, changed } = cleanClaims(parsed, now);
 
       if (changed) {
         try {
-          await writeClaimsFile(claimsPath, cleaned);
+          await withClaimsLock(claimsPath, async () => {
+            const current = await readClaimsFile(claimsPath);
+            const latest = cleanClaims(current, Date.now());
+            if (latest.changed) {
+              await writeClaimsFile(claimsPath, latest.cleaned);
+            }
+          });
         } catch {
         }
       }
@@ -125,33 +184,37 @@ export function createClaimsManager(filename: string = CLAIMS_FILENAME): ClaimsM
 
   async function writeClaim(accountId: string): Promise<void> {
     const claimsPath = getClaimsPath(filename);
-    const now = Date.now();
-    const claims = await readClaims();
-    const { cleaned } = cleanClaims(claims, now);
-
-    cleaned[accountId] = { pid: process.pid, at: now };
-
     try {
-      await writeClaimsFile(claimsPath, cleaned);
+      await withClaimsLock(claimsPath, async () => {
+        const now = Date.now();
+        const claims = await readClaimsFile(claimsPath);
+        const { cleaned } = cleanClaims(claims, now);
+
+        cleaned[accountId] = { pid: process.pid, at: now };
+
+        await writeClaimsFile(claimsPath, cleaned);
+      });
     } catch {
     }
   }
 
   async function releaseClaim(accountId: string): Promise<void> {
     const claimsPath = getClaimsPath(filename);
-    const now = Date.now();
-    const claims = await readClaims();
-    const { cleaned } = cleanClaims(claims, now);
-
-    const currentClaim = cleaned[accountId];
-    if (!currentClaim || currentClaim.pid !== process.pid) {
-      return;
-    }
-
-    delete cleaned[accountId];
-
     try {
-      await writeClaimsFile(claimsPath, cleaned);
+      await withClaimsLock(claimsPath, async () => {
+        const now = Date.now();
+        const claims = await readClaimsFile(claimsPath);
+        const { cleaned } = cleanClaims(claims, now);
+
+        const currentClaim = cleaned[accountId];
+        if (!currentClaim || currentClaim.pid !== process.pid) {
+          return;
+        }
+
+        delete cleaned[accountId];
+
+        await writeClaimsFile(claimsPath, cleaned);
+      });
     } catch {
     }
   }

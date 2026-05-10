@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, afterEach, vi } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import { ANTHROPIC_OAUTH_ADAPTER, TOKEN_EXPIRY_BUFFER_MS } from "../../src/shared/constants";
 import * as anthropicOAuth from "../../src/oauth/anthropic-oauth";
 import type { CredentialRefreshPatch } from "../../src/shared/types";

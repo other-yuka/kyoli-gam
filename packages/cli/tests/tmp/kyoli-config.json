@@ -1,0 +1,1 @@
+{"host":"0.0.0.0","port":3030,"databasePath":"/tmp/kyoli.db","accountSelectionStrategy":"weighted","softQuotaThresholdPercent":88,"planWeights":{"max":5,"pro":2},"usageRefreshIntervalMs":12345,"maxConcurrentRequests":12,"adminToken":"file-token","logLevel":"debug"}

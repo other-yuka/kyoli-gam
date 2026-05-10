@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
 import { join } from "node:path";
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { isClaimedByOther, readClaims, releaseClaim, type ClaimsMap, writeClaim } from "../../src/accounts/claims";
 import { CLAIMS_FILENAME } from "../../src/shared/constants";
 import { setupTestEnv } from "../helpers";
