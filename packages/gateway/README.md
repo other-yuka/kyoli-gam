@@ -56,6 +56,9 @@ curl http://127.0.0.1:2021/admin/accounts/status?provider=codex
 curl 'http://127.0.0.1:2021/admin/request-logs?provider=codex&grouped=true&limit=50'
 ```
 
+`/admin/accounts/status` includes ready, rate-limited, auth-cooldown, disabled,
+reauth-required, expired rate-limit, and recent failure buckets.
+
 Set `KYOLI_ADMIN_TOKEN` or config `adminToken` before binding outside localhost:
 
 ```bash

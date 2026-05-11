@@ -41,6 +41,8 @@ pnpm install
 # 2. Add OAuth accounts
 pnpm --dir packages/cli login codex
 pnpm --dir packages/cli login claude
+# For manual/headless sessions:
+pnpm --dir packages/cli login codex --manual
 
 # 3. Start the local gateway
 pnpm --dir packages/cli serve
@@ -145,6 +147,7 @@ pnpm --dir packages/cli login codex
 pnpm --dir packages/cli login claude
 pnpm --dir packages/cli accounts import opencode --dry-run
 pnpm --dir packages/cli accounts import opencode
+pnpm --dir packages/cli accounts import opencode --sync
 
 # Inspect and recover account state
 pnpm --dir packages/cli accounts list
@@ -159,6 +162,7 @@ pnpm --dir packages/cli restore opencode --dry-run
 
 # Doctors
 pnpm --dir packages/cli doctor
+pnpm --dir packages/cli doctor pool
 pnpm --dir packages/cli doctor codex
 pnpm --dir packages/cli doctor codex --file
 pnpm --dir packages/cli doctor codex --e2e --opencode
@@ -245,6 +249,7 @@ To move OpenCode plugin accounts into Server Mode:
 ```bash
 pnpm --dir packages/cli accounts import opencode --dry-run
 pnpm --dir packages/cli accounts import opencode
+pnpm --dir packages/cli accounts import opencode --sync
 pnpm --dir packages/cli install opencode
 ```
 

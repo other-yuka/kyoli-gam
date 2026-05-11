@@ -10,8 +10,8 @@ For end-to-end setup and operation flows, see [Workflows](../../docs/workflows.m
 ## 30 seconds
 
 ```bash
-kyoli login codex
-kyoli login claude
+kyoli login codex [--manual|--headless|--no-browser]
+kyoli login claude [--manual|--headless|--no-browser]
 kyoli serve
 kyoli install opencode --dry-run
 kyoli install opencode
@@ -46,8 +46,8 @@ kyoli config init [--force]
 ### Accounts
 
 ```bash
-kyoli login codex
-kyoli login claude
+kyoli login codex [--manual|--headless|--no-browser]
+kyoli login claude [--manual|--headless|--no-browser]
 
 kyoli accounts list [codex|claude-code]
 kyoli accounts status [codex|claude-code] [--json]
@@ -60,14 +60,20 @@ kyoli accounts delete <id>
 kyoli accounts refresh <id>
 kyoli accounts reset <id> [--enable]
 kyoli accounts reset-expired [codex|claude-code] [--enable]
-kyoli accounts import opencode [--dry-run] [--provider all|codex|claude-code] [--config-dir ~/.config/opencode]
+kyoli accounts import opencode [--dry-run] [--sync] [--provider all|codex|claude-code] [--config-dir ~/.config/opencode]
 ```
 
-`accounts status` summarizes ready, rate-limited, disabled, reauth-required, expired
-rate-limit, and failed account state. Use `--json` for scripts or dashboards.
+`accounts status` summarizes ready, rate-limited, auth-cooldown, disabled,
+reauth-required, expired rate-limit, and failed account state. Use `--json` for
+scripts or dashboards.
 
 `accounts import opencode` copies enabled OAuth accounts from OpenCode plugin account
 files into the Server Mode SQLite store. Run it with `--dry-run` first.
+Use `--sync` to refresh existing imported credentials and metadata from OpenCode.
+
+`login` opens the browser by default and always prints the fallback URL. Use
+`--manual`, `--headless`, `--no-browser`, or `KYOLI_OAUTH_BROWSER=manual` when a
+browser should not be launched automatically.
 
 ### OpenCode Server Mode
 
@@ -89,6 +95,7 @@ a local registry fallback when the server is offline.
 
 ```bash
 kyoli doctor [--json]
+kyoli doctor pool [--json]
 kyoli doctor codex [--route /backend-api/codex/responses|/v1/responses|/v1/chat/completions] [--model openai/<model>] [--file|--e2e|--load] [--json]
 kyoli doctor claude [--binary|--template|--wire|--smoke] [--json]
 kyoli doctor opencode [--run] [--config-dir ~/.config/opencode] [--json]

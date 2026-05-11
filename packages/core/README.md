@@ -12,8 +12,8 @@ store, account selection pool, and account status helpers used by the gateway an
 | Account store | Persist OAuth credentials and provider metadata locally |
 | Sticky sessions | Keep prompt-cache-heavy traffic pinned to an account |
 | Request logs | Record provider, route, status, and selected account trace data |
-| Account pool | Select ready accounts and skip disabled/rate-limited ones |
-| Status helpers | Summarize ready, rate-limited, disabled, failed, and reauth-required accounts |
+| Account pool | Select ready accounts and skip disabled, rate-limited, and auth-cooldown ones |
+| Status helpers | Summarize ready, rate-limited, auth-cooldown, disabled, failed, and reauth-required accounts |
 
 ## Used by
 
