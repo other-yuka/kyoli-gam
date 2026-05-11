@@ -1,5 +1,14 @@
 # opencode-anthropic-multi-account
 
+## 0.2.33
+
+### Patch Changes
+
+- Improve OAuth account pool operations and release packaging.
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.33
+
 ## 0.2.32
 
 ### Patch Changes

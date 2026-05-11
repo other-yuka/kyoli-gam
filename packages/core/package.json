@@ -1,6 +1,7 @@
 {
   "name": "@kyoli-gam/core",
   "version": "0.0.0",
+  "private": true,
   "description": "Core gateway contracts for kyoli-gam v1",
   "type": "module",
   "main": "./dist/index.js",

@@ -1,6 +1,7 @@
 {
   "name": "@kyoli-gam/provider-codex-chatgpt",
   "version": "0.0.0",
+  "private": true,
   "description": "Codex ChatGPT OAuth provider adapter for kyoli-gam v1",
   "type": "module",
   "main": "./dist/index.js",

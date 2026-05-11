@@ -1,5 +1,11 @@
 # opencode-multi-account-core
 
+## 0.2.33
+
+### Patch Changes
+
+- Improve OAuth account pool operations and release packaging.
+
 ## 0.2.32
 
 ## 0.2.31

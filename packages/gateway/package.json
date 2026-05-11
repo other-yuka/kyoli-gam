@@ -1,6 +1,7 @@
 {
   "name": "@kyoli-gam/gateway",
   "version": "0.0.0",
+  "private": true,
   "description": "HTTP gateway for kyoli-gam v1",
   "type": "module",
   "main": "./dist/index.js",

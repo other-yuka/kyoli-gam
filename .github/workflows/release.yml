@@ -20,16 +20,19 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: pnpm/action-setup@v4
         with:
-          bun-version: latest
+          version: 10.29.2
 
       - uses: actions/setup-node@v6
         with:
-          node-version: "24"
+          node-version: "22"
           registry-url: "https://registry.npmjs.org"
+          cache: "pnpm"
 
-      - run: bun install --frozen-lockfile
+      - run: corepack enable
+
+      - run: pnpm install --frozen-lockfile
 
       - name: Create Release PR or Publish
         id: changesets
@@ -37,8 +40,8 @@ jobs:
         with:
           title: "chore: version packages"
           commit: "chore: version packages"
-          version: bunx changeset version
-          publish: bun run release
+          version: pnpm exec changeset version
+          publish: pnpm run release
           createGithubReleases: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
