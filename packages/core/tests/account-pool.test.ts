@@ -193,6 +193,26 @@ describe("StickyAccountPool", () => {
     expect((await store.get(limited.id))?.rateLimitResetAt).toBeDefined();
   });
 
+  it("keeps accounts in auth cooldown out of selection", async () => {
+    const store = new MemoryAccountStore();
+    const coolingDown = await store.create({ provider: "codex", kind: "oauth", name: "cooldown" });
+    await store.recordFailure(coolingDown.id, {
+      status: 401,
+      message: "auth rejected",
+    });
+    const ready = await store.create({ provider: "codex", kind: "oauth", name: "ready" });
+    const pool = new StickyAccountPool(store);
+
+    const selected = await pool.select({
+      provider: "codex",
+      kind: "oauth",
+      sessionKey: "session-a",
+    });
+
+    expect(selected?.id).toBe(ready.id);
+    expect((await store.get(coolingDown.id))?.authCooldownUntil).toBeDefined();
+  });
+
   it("skips accounts over the soft quota threshold when alternatives exist", async () => {
     const store = new MemoryAccountStore();
     const saturated = await store.create({

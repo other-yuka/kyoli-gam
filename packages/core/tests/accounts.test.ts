@@ -5,6 +5,29 @@ import { join } from "node:path";
 import { MemoryAccountStore, SQLiteRequestLogStore, SQLiteStickySessionStore } from "../src";
 
 describe("AccountStore state reset", () => {
+  it("puts transient 401/403 failures into auth cooldown without disabling the account", async () => {
+    const store = new MemoryAccountStore();
+    const account = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: { accessToken: "secret" },
+    });
+
+    const first = await store.recordFailure(account.id, {
+      status: 401,
+      message: "upstream auth rejected",
+    });
+
+    expect(first).toMatchObject({
+      enabled: true,
+      failureCount: 1,
+      consecutiveAuthFailures: 1,
+      reauthRequiredReason: undefined,
+    });
+    expect(first?.authCooldownUntil).toBeDefined();
+    expect(new Date(first!.authCooldownUntil!).getTime()).toBeGreaterThan(Date.now());
+  });
+
   it("clears transient failure state without changing credentials", async () => {
     const store = new MemoryAccountStore();
     const account = await store.create({
@@ -28,7 +51,31 @@ describe("AccountStore state reset", () => {
     });
     expect(reset?.lastErrorAt).toBeUndefined();
     expect(reset?.rateLimitResetAt).toBeUndefined();
+    expect(reset?.authCooldownUntil).toBeUndefined();
+    expect(reset?.consecutiveAuthFailures).toBe(0);
     expect(reset?.reauthRequiredReason).toBeUndefined();
+  });
+
+  it("still supports explicit reauth-required failures", async () => {
+    const store = new MemoryAccountStore();
+    const account = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: { accessToken: "secret" },
+    });
+
+    const updated = await store.recordFailure(account.id, {
+      status: 401,
+      message: "refresh failed",
+      reauthRequiredReason: "refresh failed",
+    });
+
+    expect(updated).toMatchObject({
+      enabled: false,
+      reauthRequiredReason: "refresh failed",
+      authCooldownUntil: undefined,
+      consecutiveAuthFailures: 1,
+    });
   });
 });
 

@@ -71,6 +71,86 @@ describe("importOpenCodeAccounts", () => {
     expect(await store.list()).toHaveLength(2);
   });
 
+  it("syncs changed OpenCode tokens into existing Kyoli accounts", async () => {
+    const configDir = await createOpenCodeConfig();
+    const store = new MemoryAccountStore();
+    await importOpenCodeAccounts(store, { configDir });
+    const [initial] = (await store.listByProvider("codex"));
+    expect(initial).toBeDefined();
+    await store.recordFailure(initial!.id, {
+      status: 401,
+      message: "stale token",
+    });
+    await writeFile(
+      join(configDir, "openai-multi-account-accounts.json"),
+      JSON.stringify({
+        accounts: [
+          createStoredAccount({
+            uuid: "codex-1",
+            accountId: "codex-account-1",
+            email: "codex@example.test",
+            accessToken: "rotated-access-token",
+            refreshToken: "rotated-refresh-token",
+            expiresAt: Date.now() + 2 * 60 * 60 * 1000,
+            planTier: "pro",
+            cachedUsage: {
+              five_hour: { utilization: 10 },
+            },
+          }),
+        ],
+      }),
+    );
+
+    const result = await importOpenCodeAccounts(store, {
+      configDir,
+      provider: "codex",
+      sync: true,
+    });
+    const synced = await store.get(initial!.id);
+
+    expect(result).toMatchObject({
+      created: 0,
+      updated: 1,
+      unchanged: 0,
+      duplicates: 0,
+      skipped: 0,
+    });
+    expect(await store.listByProvider("codex")).toHaveLength(1);
+    expect(synced?.credentials).toMatchObject({
+      accessToken: "rotated-access-token",
+      refreshToken: "rotated-refresh-token",
+    });
+    expect(synced?.metadata).toMatchObject({
+      planTier: "pro",
+      cachedUsage: {
+        five_hour: { utilization: 10 },
+      },
+    });
+    expect(synced?.failureCount).toBe(0);
+    expect(synced?.authCooldownUntil).toBeUndefined();
+    expect(synced?.consecutiveAuthFailures).toBe(0);
+  });
+
+  it("keeps unchanged synced duplicates out of the updated count", async () => {
+    const configDir = await createOpenCodeConfig();
+    const store = new MemoryAccountStore();
+    await importOpenCodeAccounts(store, { configDir });
+
+    const result = await importOpenCodeAccounts(store, {
+      configDir,
+      provider: "codex",
+      sync: true,
+    });
+
+    expect(result).toMatchObject({
+      created: 0,
+      updated: 0,
+      unchanged: 1,
+      duplicates: 0,
+      skipped: 1,
+    });
+  });
+
   it("can import a single provider", async () => {
     const configDir = await createOpenCodeConfig();
     const store = new MemoryAccountStore();

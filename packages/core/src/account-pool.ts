@@ -246,8 +246,15 @@ function isEligible(account: AccountRecord, input: AccountSelectionInput): boole
     account.enabled &&
       !account.reauthRequiredReason &&
       !isRateLimited(account) &&
+      !isAuthCoolingDown(account) &&
       !input.excludeAccountIds?.includes(account.id) &&
       (!input.kind || account.kind === input.kind),
+  );
+}
+
+function isAuthCoolingDown(account: AccountRecord): boolean {
+  return Boolean(
+    account.authCooldownUntil && new Date(account.authCooldownUntil).getTime() > Date.now(),
   );
 }
 

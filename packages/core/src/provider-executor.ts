@@ -253,10 +253,12 @@ function toPublicAccountStatusSummary(row: ReturnType<typeof summarizeAccountSta
     total: row.total,
     ready: row.ready,
     rate_limited: row.rateLimited,
+    auth_cooldown: row.authCooldown,
     disabled: row.disabled,
     reauth_required: row.reauthRequired,
     failed: row.failed,
     next_reset_at: row.nextResetAt,
+    next_auth_retry_at: row.nextAuthRetryAt,
   };
 }
 
@@ -268,6 +270,10 @@ function accountExhaustionMessage(
   if (summary.rateLimited > 0) {
     const suffix = summary.nextResetAt ? ` Next reset is ${summary.nextResetAt}.` : "";
     return `All ${provider} ${kind} accounts are currently rate-limited.${suffix}`;
+  }
+  if (summary.authCooldown > 0) {
+    const suffix = summary.nextAuthRetryAt ? ` Next auth retry is ${summary.nextAuthRetryAt}.` : "";
+    return `All ${provider} ${kind} accounts are in auth-failure cooldown.${suffix}`;
   }
 
   return `No ready ${provider} ${kind} accounts are available. Check disabled accounts or accounts that require re-authentication.`;

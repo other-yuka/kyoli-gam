@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { AccountStore, ProviderId } from "@kyoli-gam/core";
+import type { AccountRecord, AccountStore, ProviderId } from "@kyoli-gam/core";
 import { loadClaudeCodeIdentity, type ClaudeCodeIdentity } from "@kyoli-gam/provider-claude-code";
 
 export type OpenCodeImportProvider = "all" | "codex" | "claude-code";
@@ -11,10 +11,13 @@ export interface OpenCodeImportOptions {
   provider?: OpenCodeImportProvider;
   configDir?: string;
   claudeIdentity?: ClaudeCodeIdentity;
+  sync?: boolean;
 }
 
 export interface OpenCodeImportResult {
   created: number;
+  updated: number;
+  unchanged: number;
   duplicates: number;
   skipped: number;
   sources: Array<{
@@ -23,6 +26,8 @@ export interface OpenCodeImportResult {
     total: number;
     eligible: number;
     created: number;
+    updated: number;
+    unchanged: number;
     duplicates: number;
     skipped: number;
   }>;
@@ -81,6 +86,8 @@ export async function importOpenCodeAccounts(
   );
   const result: OpenCodeImportResult = {
     created: 0,
+    updated: 0,
+    unchanged: 0,
     duplicates: 0,
     skipped: 0,
     sources: [],
@@ -95,6 +102,8 @@ export async function importOpenCodeAccounts(
       total: accounts.length,
       eligible: 0,
       created: 0,
+      updated: 0,
+      unchanged: 0,
       duplicates: 0,
       skipped: 0,
     };
@@ -108,43 +117,41 @@ export async function importOpenCodeAccounts(
       }
 
       sourceResult.eligible += 1;
-      if (await hasDuplicateAccount(store, source.provider, normalized)) {
+      const existing = await findMatchingAccount(store, source.provider, normalized);
+      if (existing) {
+        if (options.sync) {
+          const input = createAccountInput(source, normalized, claudeIdentity);
+          const needsUpdate = shouldUpdateAccount(existing, input);
+          const shouldResetState = shouldResetSyncedAccountState(existing, input);
+          if (needsUpdate || shouldResetState) {
+            if (!options.dryRun) {
+              await store.update(existing.id, {
+                name: input.name,
+                credentials: input.credentials,
+                metadata: { ...existing.metadata, ...input.metadata },
+              });
+              if (shouldResetState) {
+                await store.resetState(existing.id, {
+                  enable: Boolean(existing.reauthRequiredReason) || existing.enabled,
+                });
+              }
+            }
+            sourceResult.updated += 1;
+            result.updated += 1;
+          } else {
+            sourceResult.unchanged += 1;
+            result.unchanged += 1;
+          }
+          continue;
+        }
+
         sourceResult.duplicates += 1;
         result.duplicates += 1;
         continue;
       }
 
       if (!options.dryRun) {
-        const providerAccountId = source.provider === "claude-code"
-          ? normalized.accountId ?? normalized.uuid
-          : normalized.accountId;
-        await store.create({
-          provider: source.provider,
-          kind: "oauth",
-          name: normalized.email
-            ? `${source.provider === "codex" ? "Codex" : "Claude"} ${normalized.email}`
-            : `${source.provider} ${normalized.uuid}`,
-          credentials: {
-            accessToken: normalized.accessToken,
-            refreshToken: normalized.refreshToken,
-            expiresAt: normalized.expiresAt,
-            accountId: providerAccountId,
-          },
-          metadata: {
-            source: source.source,
-            sourceUuid: normalized.uuid,
-            email: normalized.email,
-            accountId: providerAccountId,
-            deviceId: source.provider === "claude-code" ? claudeIdentity?.deviceId : undefined,
-            localAccountUuid: source.provider === "claude-code" ? claudeIdentity?.accountUuid : undefined,
-            planTier: normalized.planTier,
-            cachedUsage: normalized.cachedUsage,
-            cachedUsageAt: normalized.cachedUsageAt,
-            addedAt: normalized.addedAt,
-            lastUsed: normalized.lastUsed,
-            rateLimitResetAt: normalized.rateLimitResetAt,
-          },
-        });
+        await store.create(createAccountInput(source, normalized, claudeIdentity));
       }
 
       sourceResult.created += 1;
@@ -155,6 +162,43 @@ export async function importOpenCodeAccounts(
   }
 
   return result;
+}
+
+function createAccountInput(
+  source: (typeof PROVIDER_SOURCES)[number],
+  normalized: NonNullable<ReturnType<typeof normalizeOpenCodeAccount>>,
+  claudeIdentity: ClaudeCodeIdentity | undefined,
+) {
+  const providerAccountId = source.provider === "claude-code"
+    ? normalized.accountId ?? normalized.uuid
+    : normalized.accountId;
+  return {
+    provider: source.provider,
+    kind: "oauth" as const,
+    name: normalized.email
+      ? `${source.provider === "codex" ? "Codex" : "Claude"} ${normalized.email}`
+      : `${source.provider} ${normalized.uuid}`,
+    credentials: compactRecord({
+      accessToken: normalized.accessToken,
+      refreshToken: normalized.refreshToken,
+      expiresAt: normalized.expiresAt,
+      accountId: providerAccountId,
+    }),
+    metadata: compactRecord({
+      source: source.source,
+      sourceUuid: normalized.uuid,
+      email: normalized.email,
+      accountId: providerAccountId,
+      deviceId: source.provider === "claude-code" ? claudeIdentity?.deviceId : undefined,
+      localAccountUuid: source.provider === "claude-code" ? claudeIdentity?.accountUuid : undefined,
+      planTier: normalized.planTier,
+      cachedUsage: normalized.cachedUsage,
+      cachedUsageAt: normalized.cachedUsageAt,
+      addedAt: normalized.addedAt,
+      lastUsed: normalized.lastUsed,
+      rateLimitResetAt: normalized.rateLimitResetAt,
+    }),
+  };
 }
 
 function shouldImportClaude(provider: OpenCodeImportProvider): boolean {
@@ -209,13 +253,13 @@ function normalizeOpenCodeAccount(account: OpenCodeStoredAccount): {
   };
 }
 
-async function hasDuplicateAccount(
+async function findMatchingAccount(
   store: AccountStore,
   provider: ProviderId,
   account: { uuid: string; accountId?: string; email?: string },
-): Promise<boolean> {
+): Promise<AccountRecord | undefined> {
   const existing = await store.listByProvider(provider);
-  return existing.some((stored) =>
+  return existing.find((stored) =>
     stored.metadata.sourceUuid === account.uuid ||
     (account.accountId && (
       stored.metadata.accountId === account.accountId ||
@@ -223,6 +267,33 @@ async function hasDuplicateAccount(
     )) ||
     (account.email && stored.metadata.email === account.email)
   );
+}
+
+function shouldUpdateAccount(
+  existing: AccountRecord,
+  input: ReturnType<typeof createAccountInput>,
+): boolean {
+  return existing.name !== input.name ||
+    !sameJson(existing.credentials, input.credentials) ||
+    !sameJson(existing.metadata, { ...existing.metadata, ...input.metadata });
+}
+
+function shouldResetSyncedAccountState(
+  existing: AccountRecord,
+  input: ReturnType<typeof createAccountInput>,
+): boolean {
+  const tokenChanged = existing.credentials.accessToken !== input.credentials.accessToken ||
+    existing.credentials.refreshToken !== input.credentials.refreshToken ||
+    existing.credentials.expiresAt !== input.credentials.expiresAt;
+  return Boolean(tokenChanged || existing.authCooldownUntil || existing.reauthRequiredReason);
+}
+
+function sameJson(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function compactRecord(input: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined));
 }
 
 function expandHome(path: string): string {

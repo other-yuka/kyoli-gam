@@ -450,7 +450,7 @@ function createAccountStatusResponse(records: Awaited<ReturnType<AccountStore["l
     data: summarizeAccountStatus(records).map(toPublicAccountStatusSummary),
     ready: listReadyAccounts(records).map(toPublicReadyAccount),
     rate_limited: listRateLimitedAccounts(records).map(toPublicRateLimitedAccount),
-    blocked: listBlockedAccounts(records),
+    blocked: listBlockedAccounts(records).map(toPublicBlockedAccount),
     failed: listFailedAccounts(records).map(toPublicFailedAccount),
     expired_rate_limits: listExpiredRateLimitAccounts(records).map((account) => ({
       id: account.id,
@@ -468,10 +468,12 @@ function toPublicAccountStatusSummary(row: ReturnType<typeof summarizeAccountSta
     total: row.total,
     ready: row.ready,
     rate_limited: row.rateLimited,
+    auth_cooldown: row.authCooldown,
     disabled: row.disabled,
     reauth_required: row.reauthRequired,
     failed: row.failed,
     next_reset_at: row.nextResetAt,
+    next_auth_retry_at: row.nextAuthRetryAt,
   };
 }
 
@@ -498,6 +500,18 @@ function toPublicRateLimitedAccount(row: ReturnType<typeof listRateLimitedAccoun
   };
 }
 
+function toPublicBlockedAccount(row: ReturnType<typeof listBlockedAccounts>[number]) {
+  return {
+    id: row.id,
+    provider: row.provider,
+    state: row.state,
+    reason: row.reason,
+    name: row.name,
+    retry_at: row.retryAt,
+    consecutive_auth_failures: row.consecutiveAuthFailures,
+  };
+}
+
 function toPublicFailedAccount(row: ReturnType<typeof listFailedAccounts>[number]) {
   return {
     id: row.id,
@@ -506,6 +520,7 @@ function toPublicFailedAccount(row: ReturnType<typeof listFailedAccounts>[number
     failure_count: row.failureCount,
     last_error_at: row.lastErrorAt,
     reset_at: row.resetAt,
+    auth_retry_at: row.authRetryAt,
     name: row.name,
   };
 }

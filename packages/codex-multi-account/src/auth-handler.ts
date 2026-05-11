@@ -9,7 +9,7 @@ import { fetchUsage, fetchProfile, derivePlanTier } from "./usage";
 import { AccountStore } from "./account-store";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
-import { exec } from "node:child_process";
+import { execFile } from "node:child_process";
 import {
   startOAuthServer,
   stopOAuthServer,
@@ -257,10 +257,13 @@ function promptYesNo(message: string): Promise<boolean> {
 }
 
 function openBrowser(url: string): void {
-  const cmd = process.platform === "darwin" ? "open"
-    : process.platform === "win32" ? "start"
+  const command = process.platform === "darwin" ? "open"
+    : process.platform === "win32" ? "rundll32.exe"
     : "xdg-open";
-  exec(`${cmd} ${JSON.stringify(url)}`);
+  const args = process.platform === "win32"
+    ? ["url.dll,FileProtocolHandler", url]
+    : [url];
+  execFile(command, args, { windowsHide: true }, () => {});
 }
 
 async function addMoreAccountsLoop(

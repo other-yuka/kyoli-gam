@@ -18,6 +18,8 @@ export interface AccountRecord {
   lastUsedAt?: string;
   lastErrorAt?: string;
   rateLimitResetAt?: string;
+  authCooldownUntil?: string;
+  consecutiveAuthFailures: number;
   reauthRequiredReason?: string;
   createdAt: string;
   updatedAt: string;
@@ -74,6 +76,8 @@ export interface PublicAccountRecord {
   lastUsedAt?: string;
   lastErrorAt?: string;
   rateLimitResetAt?: string;
+  authCooldownUntil?: string;
+  consecutiveAuthFailures: number;
   reauthRequiredReason?: string;
   createdAt: string;
   updatedAt: string;
@@ -166,6 +170,8 @@ export class SQLiteAccountStore implements AccountStore {
         last_used_at text,
         last_error_at text,
         rate_limit_reset_at text,
+        auth_cooldown_until text,
+        consecutive_auth_failures integer not null default 0,
         reauth_required_reason text,
         created_at text not null,
         updated_at text not null
@@ -175,6 +181,8 @@ export class SQLiteAccountStore implements AccountStore {
     addColumnIfMissing(this.db, "last_used_at", "text");
     addColumnIfMissing(this.db, "last_error_at", "text");
     addColumnIfMissing(this.db, "rate_limit_reset_at", "text");
+    addColumnIfMissing(this.db, "auth_cooldown_until", "text");
+    addColumnIfMissing(this.db, "consecutive_auth_failures", "integer not null default 0");
     addColumnIfMissing(this.db, "reauth_required_reason", "text");
   }
 
@@ -207,8 +215,9 @@ export class SQLiteAccountStore implements AccountStore {
           id, provider, kind, name, enabled,
           credentials_json, metadata_json, failure_count,
           last_used_at, last_error_at, rate_limit_reset_at,
+          auth_cooldown_until, consecutive_auth_failures,
           reauth_required_reason, created_at, updated_at
-        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         account.id,
@@ -222,6 +231,8 @@ export class SQLiteAccountStore implements AccountStore {
         account.lastUsedAt ?? null,
         account.lastErrorAt ?? null,
         account.rateLimitResetAt ?? null,
+        account.authCooldownUntil ?? null,
+        account.consecutiveAuthFailures,
         account.reauthRequiredReason ?? null,
         account.createdAt,
         account.updatedAt,
@@ -245,6 +256,8 @@ export class SQLiteAccountStore implements AccountStore {
               last_used_at = ?,
               last_error_at = ?,
               rate_limit_reset_at = ?,
+              auth_cooldown_until = ?,
+              consecutive_auth_failures = ?,
               reauth_required_reason = ?,
               updated_at = ?
           where id = ?`,
@@ -258,6 +271,8 @@ export class SQLiteAccountStore implements AccountStore {
         updated.lastUsedAt ?? null,
         updated.lastErrorAt ?? null,
         updated.rateLimitResetAt ?? null,
+        updated.authCooldownUntil ?? null,
+        updated.consecutiveAuthFailures,
         updated.reauthRequiredReason ?? null,
         updated.updatedAt,
         id,
@@ -312,6 +327,8 @@ export class SQLiteAccountStore implements AccountStore {
               last_used_at = ?,
               last_error_at = ?,
               rate_limit_reset_at = ?,
+              auth_cooldown_until = ?,
+              consecutive_auth_failures = ?,
               reauth_required_reason = ?,
               updated_at = ?
           where id = ?`,
@@ -322,6 +339,8 @@ export class SQLiteAccountStore implements AccountStore {
         account.lastUsedAt ?? null,
         account.lastErrorAt ?? null,
         account.rateLimitResetAt ?? null,
+        account.authCooldownUntil ?? null,
+        account.consecutiveAuthFailures,
         account.reauthRequiredReason ?? null,
         account.updatedAt,
         account.id,
@@ -342,6 +361,8 @@ export function toPublicAccount(account: AccountRecord): PublicAccountRecord {
     lastUsedAt: account.lastUsedAt,
     lastErrorAt: account.lastErrorAt,
     rateLimitResetAt: account.rateLimitResetAt,
+    authCooldownUntil: account.authCooldownUntil,
+    consecutiveAuthFailures: account.consecutiveAuthFailures,
     reauthRequiredReason: account.reauthRequiredReason,
     createdAt: account.createdAt,
     updatedAt: account.updatedAt,
@@ -366,6 +387,8 @@ interface AccountRow {
   last_used_at?: string | null;
   last_error_at?: string | null;
   rate_limit_reset_at?: string | null;
+  auth_cooldown_until?: string | null;
+  consecutive_auth_failures?: number;
   reauth_required_reason?: string | null;
   created_at: string;
   updated_at: string;
@@ -383,6 +406,7 @@ function createAccountRecord(input: AccountCreateInput): AccountRecord {
     credentials: input.credentials ?? {},
     metadata: input.metadata ?? {},
     failureCount: 0,
+    consecutiveAuthFailures: 0,
     createdAt: now,
     updatedAt: now,
   };
@@ -402,6 +426,8 @@ function updateAccountRecord(
     lastUsedAt: existing.lastUsedAt,
     lastErrorAt: existing.lastErrorAt,
     rateLimitResetAt: existing.rateLimitResetAt,
+    authCooldownUntil: existing.authCooldownUntil,
+    consecutiveAuthFailures: existing.consecutiveAuthFailures,
     reauthRequiredReason: existing.reauthRequiredReason,
     updatedAt: new Date().toISOString(),
   };
@@ -415,6 +441,8 @@ function recordAccountSuccess(existing: AccountRecord): AccountRecord {
     lastUsedAt: now,
     lastErrorAt: undefined,
     rateLimitResetAt: undefined,
+    authCooldownUntil: undefined,
+    consecutiveAuthFailures: 0,
     updatedAt: now,
   };
 }
@@ -429,6 +457,8 @@ function resetAccountState(
     failureCount: 0,
     lastErrorAt: undefined,
     rateLimitResetAt: undefined,
+    authCooldownUntil: undefined,
+    consecutiveAuthFailures: 0,
     reauthRequiredReason: undefined,
     updatedAt: new Date().toISOString(),
   };
@@ -439,11 +469,11 @@ function recordAccountFailure(
   input: AccountFailureInput,
 ): AccountRecord {
   const now = new Date().toISOString();
-  const reauthRequiredReason =
-    input.reauthRequiredReason ??
-    (input.status === 401 || input.status === 403
-      ? input.message ?? `Upstream returned ${input.status}`
-      : existing.reauthRequiredReason);
+  const authFailure = input.status === 401 || input.status === 403;
+  const consecutiveAuthFailures = authFailure
+    ? existing.consecutiveAuthFailures + 1
+    : existing.consecutiveAuthFailures;
+  const reauthRequiredReason = input.reauthRequiredReason ?? existing.reauthRequiredReason;
 
   return {
     ...existing,
@@ -451,6 +481,12 @@ function recordAccountFailure(
     failureCount: existing.failureCount + 1,
     lastErrorAt: now,
     rateLimitResetAt: input.rateLimitResetAt ?? existing.rateLimitResetAt,
+    authCooldownUntil: reauthRequiredReason
+      ? undefined
+      : authFailure
+        ? calculateAuthCooldownUntil(consecutiveAuthFailures)
+        : existing.authCooldownUntil,
+    consecutiveAuthFailures,
     reauthRequiredReason,
     updatedAt: now,
   };
@@ -469,6 +505,8 @@ function rowToAccount(row: AccountRow): AccountRecord {
     lastUsedAt: row.last_used_at ?? undefined,
     lastErrorAt: row.last_error_at ?? undefined,
     rateLimitResetAt: row.rate_limit_reset_at ?? undefined,
+    authCooldownUntil: row.auth_cooldown_until ?? undefined,
+    consecutiveAuthFailures: row.consecutive_auth_failures ?? 0,
     reauthRequiredReason: row.reauth_required_reason ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -484,6 +522,14 @@ function parseJsonRecord(value: string): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+function calculateAuthCooldownUntil(consecutiveAuthFailures: number): string {
+  const baseMs = 60_000;
+  const maxMs = 30 * 60_000;
+  const exponent = Math.max(0, consecutiveAuthFailures - 1);
+  const delayMs = Math.min(maxMs, baseMs * 2 ** exponent);
+  return new Date(Date.now() + delayMs).toISOString();
 }
 
 function addColumnIfMissing(db: Database, column: string, definition: string): void {

@@ -62,6 +62,17 @@ import {
   type OpenCodeInstallResult,
   type OpenCodeRestoreResult,
 } from "./opencode-install";
+import {
+  openOAuthBrowser,
+  readOAuthBrowserMode,
+  shouldOpenOAuthBrowser,
+  type OAuthBrowserMode,
+} from "./oauth-browser";
+import {
+  createPoolStatus,
+  formatPoolBanner,
+  formatPoolDoctorDetail,
+} from "./pool-status";
 
 const command = process.argv[2] ?? "help";
 const cliConfig = await loadCliConfig(process.argv, process.env);
@@ -104,12 +115,17 @@ if (command === "serve") {
   });
 
   console.log(`kyoli-gam gateway listening on http://${server.hostname}:${server.port}`);
+  printPoolBanner(await accountStore.list(), {
+    strategy: cliConfig.accountSelectionStrategy ?? "sticky",
+    stickySessions: stickySessionStore,
+    requestLogs: requestLogStore,
+  });
 } else if (command === "login" && process.argv[3] === "codex") {
   const accountStore = new SQLiteAccountStore(cliConfig.databasePath);
   const login = await startCodexOAuthLogin();
+  const browserMode = readOAuthBrowserMode(process.argv);
 
-  console.log("Open this URL in your browser to sign in with ChatGPT/Codex:");
-  console.log(login.authorizeUrl);
+  printOAuthLoginInstructions("ChatGPT/Codex", login.authorizeUrl, browserMode);
 
   try {
     const tokens = await login.waitForTokens;
@@ -136,9 +152,9 @@ if (command === "serve") {
 } else if (command === "login" && process.argv[3] === "claude") {
   const accountStore = new SQLiteAccountStore(cliConfig.databasePath);
   const login = await startClaudeCodeOAuthLogin();
+  const browserMode = readOAuthBrowserMode(process.argv);
 
-  console.log("Open this URL in your browser to sign in with Claude Code:");
-  console.log(login.authorizeUrl);
+  printOAuthLoginInstructions("Claude Code", login.authorizeUrl, browserMode);
   console.log(`OAuth config source: ${login.oauthConfig.source}`);
 
   try {
@@ -236,8 +252,19 @@ async function handleDoctorCommand(argv: string[]): Promise<void> {
   const subcommand = argv[3] ?? "all";
 
   if (subcommand === "all") {
+    const accountStore = new SQLiteAccountStore(cliConfig.databasePath);
+    const stickySessionStore = new SQLiteStickySessionStore(cliConfig.databasePath);
+    const requestLogStore = new SQLiteRequestLogStore(cliConfig.databasePath);
+    const pool = withDoctorName(await runPoolDoctor(
+      accountStore,
+      cliConfig,
+      {
+        stickySessions: stickySessionStore,
+        requestLogs: requestLogStore,
+      },
+    ), "pool");
     const codex = withDoctorName(await runCodexSmokeDoctor(
-      new SQLiteAccountStore(cliConfig.databasePath),
+      accountStore,
       cliConfig,
       {
         route: readCodexSmokeRouteFlag(argv),
@@ -249,8 +276,22 @@ async function handleDoctorCommand(argv: string[]): Promise<void> {
     ), "codex");
     const claude = withDoctorName(await runClaudeFingerprintDoctor(), "claude");
     const install = await runOpenCodeInstallDoctor(argv, cliConfig);
-    const report = combineDoctorReports("doctor", [codex, claude, install]);
+    const report = combineDoctorReports("doctor", [pool, codex, claude, install]);
     printMaybeJsonDoctorReport(report, argv);
+    setDoctorExitCode(report);
+    return;
+  }
+
+  if (subcommand === "pool") {
+    const report = await runPoolDoctor(
+      new SQLiteAccountStore(cliConfig.databasePath),
+      cliConfig,
+      {
+        stickySessions: new SQLiteStickySessionStore(cliConfig.databasePath),
+        requestLogs: new SQLiteRequestLogStore(cliConfig.databasePath),
+      },
+    );
+    printMaybeJsonDoctorReport(withDoctorName(report, "pool"), argv);
     setDoctorExitCode(report);
     return;
   }
@@ -365,7 +406,7 @@ async function handleDoctorCommand(argv: string[]): Promise<void> {
     return;
   }
 
-  throw new Error("Supported doctor targets: codex, claude, opencode.");
+  throw new Error("Supported doctor targets: pool, codex, claude, opencode.");
 }
 
 async function handleConfigCommand(
@@ -423,10 +464,14 @@ async function handleAccountsCommand(
 
     const result = await importOpenCodeAccounts(store, {
       dryRun: argv.includes("--dry-run"),
+      sync: argv.includes("--sync"),
       provider: readImportProviderFlag(argv),
       configDir: readStringFlag(argv, "--config-dir"),
     });
-    printOpenCodeImportResult(result, { dryRun: argv.includes("--dry-run") });
+    printOpenCodeImportResult(result, {
+      dryRun: argv.includes("--dry-run"),
+      sync: argv.includes("--sync"),
+    });
     return;
   }
 
@@ -527,11 +572,12 @@ async function handleAccountsCommand(
 
 function printOpenCodeImportResult(
   result: OpenCodeImportResult,
-  options: { dryRun: boolean },
+  options: { dryRun: boolean; sync: boolean },
 ): void {
   const action = options.dryRun ? "creatable" : "created";
+  const mode = options.sync ? "sync" : "import";
   console.log(
-    `OpenCode import ${options.dryRun ? "dry-run" : "done"}: ${result.created} ${action}, ${result.duplicates} duplicates, ${result.skipped} skipped`,
+    `OpenCode ${mode} ${options.dryRun ? "dry-run" : "done"}: ${result.created} ${action}, ${result.updated} updated, ${result.unchanged} unchanged, ${result.duplicates} duplicates, ${result.skipped} skipped`,
   );
 
   const rows = result.sources.map((source) => ({
@@ -539,13 +585,32 @@ function printOpenCodeImportResult(
     total: String(source.total),
     eligible: String(source.eligible),
     [action]: String(source.created),
+    updated: String(source.updated),
+    unchanged: String(source.unchanged),
     duplicates: String(source.duplicates),
     skipped: String(source.skipped),
     path: source.path,
   }));
   if (rows.length > 0) {
-    printTable(rows, ["provider", "total", "eligible", action, "duplicates", "skipped", "path"]);
+    printTable(rows, ["provider", "total", "eligible", action, "updated", "unchanged", "duplicates", "skipped", "path"]);
   }
+}
+
+function printOAuthLoginInstructions(
+  providerLabel: string,
+  authorizeUrl: string,
+  browserMode: OAuthBrowserMode,
+): void {
+  if (shouldOpenOAuthBrowser(browserMode)) {
+    openOAuthBrowser(authorizeUrl);
+    console.log(`Attempting to open your browser to sign in with ${providerLabel}.`);
+    console.log("Paste this URL into your browser if it does not open automatically:");
+  } else if (browserMode === "headless") {
+    console.log(`Headless login requested for ${providerLabel}. Open this URL in a browser on this machine:`);
+  } else {
+    console.log(`Manual login requested for ${providerLabel}. Open this URL in your browser:`);
+  }
+  console.log(authorizeUrl);
 }
 
 function printOpenCodeInstallResult(result: OpenCodeInstallResult): void {
@@ -692,20 +757,24 @@ function printAccountStatus(
     total: String(summary.total),
     ready: String(summary.ready),
     rate_limited: String(summary.rate_limited),
+    auth_cooldown: String(summary.auth_cooldown),
     disabled: String(summary.disabled),
     reauth_required: String(summary.reauth_required),
     failed: String(summary.failed),
     next_reset: summary.next_reset_at ? formatRelativeFuture(summary.next_reset_at) : "-",
+    next_auth_retry: summary.next_auth_retry_at ? formatRelativeFuture(summary.next_auth_retry_at) : "-",
   }));
   printTable(summaryRows, [
     "provider",
     "total",
     "ready",
     "rate_limited",
+    "auth_cooldown",
     "disabled",
     "reauth_required",
     "failed",
     "next_reset",
+    "next_auth_retry",
   ]);
 
   const readyRows = payload.ready.map((account) => ({
@@ -742,12 +811,13 @@ function printAccountStatus(
     provider: account.provider,
     state: account.state,
     reason: truncate(account.reason, 48),
+    retry_in: account.retry_at ? formatRelativeFuture(account.retry_at) : "-",
     name: account.name,
   }));
   if (blockedRows.length > 0) {
     console.log("");
     console.log("Blocked accounts:");
-    printTable(blockedRows, ["id", "provider", "state", "reason", "name"]);
+    printTable(blockedRows, ["id", "provider", "state", "reason", "retry_in", "name"]);
   }
 
   const failedRows = payload.failed.map((account) => ({
@@ -756,13 +826,17 @@ function printAccountStatus(
     state: account.state,
     failures: String(account.failure_count),
     last_error: formatRelativeTime(account.last_error_at),
-    reset_in: account.reset_at ? formatRelativeFuture(account.reset_at) : "-",
+    retry_in: account.auth_retry_at
+      ? formatRelativeFuture(account.auth_retry_at)
+      : account.reset_at
+        ? formatRelativeFuture(account.reset_at)
+        : "-",
     name: account.name,
   }));
   if (failedRows.length > 0) {
     console.log("");
     console.log("Recent failures:");
-    printTable(failedRows, ["id", "provider", "state", "failures", "last_error", "reset_in", "name"]);
+    printTable(failedRows, ["id", "provider", "state", "failures", "last_error", "retry_in", "name"]);
   }
 
   if (payload.observability.length > 0) {
@@ -781,6 +855,25 @@ function printAccountStatus(
   }
 }
 
+function printPoolBanner(
+  accounts: AccountRecord[],
+  options: {
+    strategy: string;
+    stickySessions?: StickySessionRegistry;
+    requestLogs?: RequestLogStore;
+  },
+): void {
+  const status = createPoolStatus({
+    accounts,
+    strategy: options.strategy,
+    stickySessions: options.stickySessions,
+    requestLogs: options.requestLogs,
+  });
+  for (const line of formatPoolBanner(status)) {
+    console.log(line);
+  }
+}
+
 function createAccountStatusPayload(
   accounts: AccountRecord[],
   options: {
@@ -792,7 +885,7 @@ function createAccountStatusPayload(
     summary: summarizeAccountStatus(accounts).map(toPublicAccountStatusSummary),
     ready: listReadyAccounts(accounts).map(toPublicReadyAccount),
     rate_limited: listRateLimitedAccounts(accounts).map(toPublicRateLimitedAccount),
-    blocked: listBlockedAccounts(accounts),
+    blocked: listBlockedAccounts(accounts).map(toPublicBlockedAccount),
     failed: listFailedAccounts(accounts).map(toPublicFailedAccount),
     expired_rate_limits: listExpiredRateLimitAccounts(accounts).map((account) => ({
       id: account.id,
@@ -811,10 +904,12 @@ function toPublicAccountStatusSummary(row: ReturnType<typeof summarizeAccountSta
     total: row.total,
     ready: row.ready,
     rate_limited: row.rateLimited,
+    auth_cooldown: row.authCooldown,
     disabled: row.disabled,
     reauth_required: row.reauthRequired,
     failed: row.failed,
     next_reset_at: row.nextResetAt,
+    next_auth_retry_at: row.nextAuthRetryAt,
   };
 }
 
@@ -841,6 +936,18 @@ function toPublicRateLimitedAccount(row: ReturnType<typeof listRateLimitedAccoun
   };
 }
 
+function toPublicBlockedAccount(row: ReturnType<typeof listBlockedAccounts>[number]) {
+  return {
+    id: row.id,
+    provider: row.provider,
+    state: row.state,
+    reason: row.reason,
+    name: row.name,
+    retry_at: row.retryAt,
+    consecutive_auth_failures: row.consecutiveAuthFailures,
+  };
+}
+
 function toPublicFailedAccount(row: ReturnType<typeof listFailedAccounts>[number]) {
   return {
     id: row.id,
@@ -849,6 +956,7 @@ function toPublicFailedAccount(row: ReturnType<typeof listFailedAccounts>[number
     failure_count: row.failureCount,
     last_error_at: row.lastErrorAt,
     reset_at: row.resetAt,
+    auth_retry_at: row.authRetryAt,
     name: row.name,
   };
 }
@@ -899,6 +1007,8 @@ function printAccountDetails(account: AccountRecord): void {
     last_used_at: account.lastUsedAt,
     last_error_at: account.lastErrorAt,
     rate_limit_reset_at: account.rateLimitResetAt,
+    auth_cooldown_until: account.authCooldownUntil,
+    consecutive_auth_failures: account.consecutiveAuthFailures,
     reauth_required_reason: account.reauthRequiredReason,
     created_at: account.createdAt,
     updated_at: account.updatedAt,
@@ -920,6 +1030,70 @@ interface DoctorReport {
     fail: number;
   };
   checks: DoctorCheck[];
+}
+
+async function runPoolDoctor(
+  store: AccountStore,
+  config: Awaited<ReturnType<typeof loadCliConfig>>,
+  options: {
+    stickySessions?: StickySessionRegistry;
+    requestLogs?: RequestLogStore;
+  } = {},
+): Promise<DoctorReport> {
+  const accounts = await store.list();
+  const status = createPoolStatus({
+    accounts,
+    strategy: config.accountSelectionStrategy ?? "sticky",
+    stickySessions: options.stickySessions,
+    requestLogs: options.requestLogs,
+  });
+
+  const checks: DoctorCheck[] = [
+    warnCheck("account inventory", status.total > 0, formatPoolDoctorDetail(status)),
+    warnCheck(
+      "ready accounts",
+      status.ready > 0,
+      status.total === 0
+        ? "No accounts available yet"
+        : `${status.ready}/${status.total} account(s) ready`,
+    ),
+    warnCheck(
+      "pool mode",
+      status.total !== 1,
+      status.total === 0
+        ? "No accounts loaded yet"
+        : status.total === 1
+        ? "single-account mode; add another account for failover and load balancing"
+        : `${status.strategy} across ${status.total} account(s)`,
+    ),
+    warnCheck(
+      "blocked accounts",
+      status.disabled + status.reauthRequired + status.authCooldown === 0,
+      `disabled=${status.disabled} reauth_required=${status.reauthRequired} auth_cooldown=${status.authCooldown}`,
+    ),
+  ];
+
+  for (const provider of status.providers) {
+    checks.push(
+      warnCheck(
+        `${provider.provider} ready`,
+        provider.ready > 0,
+        `${provider.ready}/${provider.total} ready; rate_limited=${provider.rateLimited} reauth_required=${provider.reauthRequired} auth_cooldown=${provider.authCooldown}`,
+      ),
+    );
+  }
+
+  checks.push(warnCheck(
+    "sticky sessions",
+    status.stickySessions > 0 || status.responses === 0,
+    `${status.stickySessions} sticky session(s), ${status.responses} response event(s)`,
+  ));
+
+  return {
+    name: "pool",
+    summary: summarizeChecks(checks),
+    checks,
+  };
 }
 
 async function runClaudeBinaryDoctor(): Promise<DoctorReport> {
@@ -1719,6 +1893,9 @@ function formatAccountState(account: AccountRecord): string {
   if (account.rateLimitResetAt && new Date(account.rateLimitResetAt).getTime() > Date.now()) {
     return "rate-limited";
   }
+  if (account.authCooldownUntil && new Date(account.authCooldownUntil).getTime() > Date.now()) {
+    return "auth-cooldown";
+  }
   return "ready";
 }
 
@@ -1947,8 +2124,8 @@ function printHelp(): void {
 Usage:
   # Server Mode
   kyoli serve [--port 2021] [--config ~/.config/kyoli-gam/config.json]
-  kyoli login codex
-  kyoli login claude
+  kyoli login codex [--manual|--headless|--no-browser]
+  kyoli login claude [--manual|--headless|--no-browser]
 
   # Accounts
   kyoli accounts list [codex|claude-code]
@@ -1962,7 +2139,7 @@ Usage:
   kyoli accounts refresh <id>
   kyoli accounts reset <id> [--enable]
   kyoli accounts reset-expired [codex|claude-code] [--enable]
-  kyoli accounts import opencode [--dry-run] [--provider all|codex|claude-code] [--config-dir ~/.config/opencode]
+  kyoli accounts import opencode [--dry-run] [--sync] [--provider all|codex|claude-code] [--config-dir ~/.config/opencode]
 
   # OpenCode Server Mode integration
   kyoli install opencode [--dry-run] [--force] [--no-models] [--all-models] [--preserve-openai] [--config-dir ~/.config/opencode] [--json]
@@ -1970,6 +2147,7 @@ Usage:
 
   # Doctors
   kyoli doctor [--json]
+  kyoli doctor pool [--json]
   kyoli doctor codex [--file|--e2e|--load] [--json]
   kyoli doctor claude [--binary|--template|--wire|--smoke] [--json]
   kyoli doctor opencode [--run] [--config-dir ~/.config/opencode] [--json]

@@ -86,7 +86,7 @@ function parseTokenResponseBody(body: string, endpoint: string): TokenResponse {
 
 function getOpenBrowserCommand(url: string, platform = process.platform): string {
   if (platform === "win32") {
-    return `start "" ${JSON.stringify(url)}`;
+    return `rundll32.exe url.dll,FileProtocolHandler ${JSON.stringify(url)}`;
   }
 
   if (platform === "darwin") {

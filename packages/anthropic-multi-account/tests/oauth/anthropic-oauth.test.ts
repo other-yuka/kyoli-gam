@@ -652,7 +652,7 @@ describe("anthropic-oauth", () => {
       'open "http://localhost:12345"',
     );
     expect(anthropicOAuthTestExports.getOpenBrowserCommand("http://localhost:12345", "win32")).toBe(
-      'start "" "http://localhost:12345"',
+      'rundll32.exe url.dll,FileProtocolHandler "http://localhost:12345"',
     );
     expect(anthropicOAuthTestExports.getOpenBrowserCommand("http://localhost:12345", "linux")).toBe(
       'xdg-open "http://localhost:12345"',

@@ -158,6 +158,7 @@ describe("executeWithAccountFailover", () => {
     await store.recordFailure(account.id, {
       status: 401,
       message: "refresh failed",
+      reauthRequiredReason: "refresh failed",
     });
     const accounts = new StickyAccountPool(store);
 
