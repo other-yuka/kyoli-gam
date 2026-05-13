@@ -1,7 +1,7 @@
 # @kyoli-gam/cli
 
-CLI for kyoli Server Mode: login, serve, account management, OpenCode install/restore,
-and doctor checks.
+CLI for kyoli Server Mode: login, serve, account management, Codex/OpenCode
+install/restore, and doctor checks.
 
 For the product overview, start at the root [README](../../README.md). For no-server
 OpenCode usage, see [OpenCode Plugin Usage](../../docs/opencode-plugin-usage.md).
@@ -13,8 +13,11 @@ For end-to-end setup and operation flows, see [Workflows](../../docs/workflows.m
 kyoli login codex [--manual|--headless|--no-browser]
 kyoli login claude [--manual|--headless|--no-browser]
 kyoli serve
+kyoli install codex --dry-run
+kyoli install codex
 kyoli install opencode --dry-run
 kyoli install opencode
+kyoli doctor codex --e2e
 kyoli doctor opencode --run
 ```
 
@@ -27,9 +30,10 @@ The server defaults to `http://127.0.0.1:2021`.
 | Server Mode | `kyoli serve` runs the local gateway and uses the SQLite account store. |
 | OpenCode Plugin Mode | No server. Install `opencode-codex-multi-account` / `opencode-anthropic-multi-account` in OpenCode instead. |
 
-`kyoli install opencode` is only for Server Mode. It patches OpenCode's built-in
-`openai` and `anthropic` providers to point at the local kyoli gateway. It creates a
-backup before writing.
+`kyoli install codex` and `kyoli install opencode` are only for Server Mode. They
+create a backup before writing. Codex CLI gets a dedicated `model_provider = "kyoli"`
+entry; OpenCode's built-in `openai` and `anthropic` providers are pointed at the
+local kyoli gateway.
 
 ## Commands
 
@@ -75,13 +79,30 @@ Use `--sync` to refresh existing imported credentials and metadata from OpenCode
 `--manual`, `--headless`, `--no-browser`, or `KYOLI_OAUTH_BROWSER=manual` when a
 browser should not be launched automatically.
 
-### OpenCode Server Mode
+### Client Install
 
 ```bash
+kyoli install codex [--dry-run] [--config-dir ~/.codex] [--json]
+kyoli restore codex [--backup <path>] [--dry-run] [--config-dir ~/.codex] [--json]
 kyoli install opencode [--dry-run] [--force] [--no-models] [--all-models] [--preserve-openai] [--config-dir ~/.config/opencode] [--json]
 kyoli restore opencode [--backup <path>] [--dry-run] [--config-dir ~/.config/opencode] [--json]
 kyoli doctor opencode [--run] [--config-dir ~/.config/opencode] [--json]
 ```
+
+`install codex` patches `~/.codex/config.toml` with:
+
+```toml
+model_provider = "kyoli"
+
+[model_providers.kyoli]
+name = "OpenAI" # required by Codex CLI for remote /responses/compact
+base_url = "http://127.0.0.1:2021/backend-api/codex"
+wire_api = "responses"
+supports_websockets = true
+requires_openai_auth = true
+```
+
+Codex CLI may warn that the OpenAI base URL is overridden. This is expected for the Codex-native proxy path and matches codex-lb's Codex CLI setup.
 
 `install opencode` keeps familiar provider names:
 
@@ -96,7 +117,7 @@ a local registry fallback when the server is offline.
 ```bash
 kyoli doctor [--json]
 kyoli doctor pool [--json]
-kyoli doctor codex [--route /backend-api/codex/responses|/v1/responses|/v1/chat/completions] [--model openai/<model>] [--file|--e2e|--load] [--json]
+kyoli doctor codex [--route /backend-api/codex/responses|/v1/responses|/v1/chat/completions] [--model openai/<model>] [--file|--e2e|--load|--websocket|--sdk] [--json]
 kyoli doctor claude [--binary|--template|--wire|--smoke] [--json]
 kyoli doctor opencode [--run] [--config-dir ~/.config/opencode] [--json]
 ```
@@ -106,9 +127,17 @@ Recommended order before real Codex/OpenCode use:
 ```bash
 kyoli doctor codex
 kyoli doctor codex --file
-kyoli doctor codex --e2e --opencode
+kyoli doctor codex --websocket
+kyoli doctor codex --e2e --codex-cli
+kyoli doctor codex --e2e --codex-cli-tools
+kyoli doctor codex --load --session-mode same --selection-strategy sticky
+kyoli doctor codex --load --session-mode unique --selection-strategy round-robin
 kyoli doctor opencode --run
 ```
+
+`doctor codex --sdk` runs OpenAI SDK smoke checks when the `openai` npm package is
+installed in the current environment. Without that package it reports a warning instead
+of failing the whole doctor run.
 
 Recommended Claude order:
 
@@ -133,7 +162,7 @@ The CLI reads `~/.config/kyoli-gam/config.json` by default. Override it with
   "host": "127.0.0.1",
   "port": 2021,
   "databasePath": "~/.local/share/kyoli-gam/kyoli.db",
-  "accountSelectionStrategy": "weighted",
+  "accountSelectionStrategy": "round-robin",
   "softQuotaThresholdPercent": 90,
   "planWeights": {
     "max": 3,

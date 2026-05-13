@@ -45,10 +45,18 @@ import {
   resolveConfigPath,
 } from "./config";
 import {
+  installCodexCli,
+  restoreCodexCli,
+  type CodexInstallResult,
+  type CodexRestoreResult,
+} from "./codex-install";
+import {
   runCodexE2EDoctor,
   runCodexFileSmokeDoctor,
   runCodexLoadDoctor,
+  runCodexSdkDoctor,
   runCodexSmokeDoctor,
+  runCodexWebSocketDoctor,
 } from "./codex-smoke";
 import {
   importOpenCodeAccounts,
@@ -207,8 +215,23 @@ async function handleInstallCommand(
   config: Awaited<ReturnType<typeof loadCliConfig>>,
 ): Promise<void> {
   const target = argv[3];
+  if (target === "codex") {
+    const result = await installCodexCli(config, {
+      configDir: readStringFlag(argv, "--config-dir"),
+      dryRun: argv.includes("--dry-run"),
+    });
+
+    if (argv.includes("--json")) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+
+    printCodexInstallResult(result);
+    return;
+  }
+
   if (target !== "opencode") {
-    throw new Error("Supported install target: opencode");
+    throw new Error("Supported install targets: codex, opencode");
   }
 
   const result = await installOpenCode(config, {
@@ -230,8 +253,24 @@ async function handleInstallCommand(
 
 async function handleRestoreCommand(argv: string[]): Promise<void> {
   const target = argv[3];
+  if (target === "codex") {
+    const result = await restoreCodexCli({
+      configDir: readStringFlag(argv, "--config-dir"),
+      backupPath: readStringFlag(argv, "--backup"),
+      dryRun: argv.includes("--dry-run"),
+    });
+
+    if (argv.includes("--json")) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+
+    printCodexRestoreResult(result);
+    return;
+  }
+
   if (target !== "opencode") {
-    throw new Error("Supported restore target: opencode");
+    throw new Error("Supported restore targets: codex, opencode");
   }
 
   const result = await restoreOpenCode({
@@ -328,6 +367,7 @@ async function handleDoctorCommand(argv: string[]): Promise<void> {
             includeOpenCode: argv.includes("--opencode"),
             openCodeCommand: readStringFlag(argv, "--opencode-bin"),
             includeCodexCli: argv.includes("--codex-cli"),
+            includeCodexCliTools: argv.includes("--codex-cli-tools"),
             codexCliCommand: readStringFlag(argv, "--codex-bin"),
             keepTemp: argv.includes("--keep-temp"),
           },
@@ -347,9 +387,43 @@ async function handleDoctorCommand(argv: string[]): Promise<void> {
             model: readStringFlag(argv, "--model"),
             requests: readOptionalNumber(readStringFlag(argv, "--requests")),
             concurrency: readOptionalNumber(readStringFlag(argv, "--concurrency")),
+            sessionMode: readCodexLoadSessionModeFlag(argv),
+            selectionStrategy: readCodexLoadSelectionStrategyFlag(argv),
             timeoutMs: readOptionalNumber(readStringFlag(argv, "--timeout-ms")),
           },
         ), "codex/load"),
+        argv,
+      );
+      return;
+    }
+
+    if (argv.includes("--websocket")) {
+      runAndPrintDoctorReport(
+        withDoctorName(await runCodexWebSocketDoctor(
+          new SQLiteAccountStore(cliConfig.databasePath),
+          cliConfig,
+          {
+            timeoutMs: readOptionalNumber(readStringFlag(argv, "--timeout-ms")),
+            port: readOptionalNumber(readStringFlag(argv, "--port")),
+          },
+        ), "codex/websocket"),
+        argv,
+      );
+      return;
+    }
+
+    if (argv.includes("--sdk")) {
+      runAndPrintDoctorReport(
+        withDoctorName(await runCodexSdkDoctor(
+          new SQLiteAccountStore(cliConfig.databasePath),
+          cliConfig,
+          {
+            model: readStringFlag(argv, "--model"),
+            expectedText: readStringFlag(argv, "--expect"),
+            timeoutMs: readOptionalNumber(readStringFlag(argv, "--timeout-ms")),
+            port: readOptionalNumber(readStringFlag(argv, "--port")),
+          },
+        ), "codex/sdk"),
         argv,
       );
       return;
@@ -614,11 +688,14 @@ function printOAuthLoginInstructions(
 }
 
 function printOpenCodeInstallResult(result: OpenCodeInstallResult): void {
-  console.log(`OpenCode install ${result.dryRun ? "dry-run" : "done"}: ${result.changed ? "changes prepared" : "already up to date"}`);
+  const changed = result.changed || result.authChanged;
+  console.log(`OpenCode install ${result.dryRun ? "dry-run" : "done"}: ${changed ? "changes prepared" : "already up to date"}`);
   console.log(`Config: ${result.configPath}`);
+  if (result.authPath) console.log(`Auth: ${result.authPath}`);
   console.log(`Server: ${result.baseUrl}`);
   console.log(`Models: ${result.modelSource}`);
   if (result.backupPath) console.log(`Backup: ${result.backupPath}`);
+  if (result.authBackupPath) console.log(`Auth backup: ${result.authBackupPath}`);
 
   printTable(
     result.providers.map((provider) => ({
@@ -628,6 +705,23 @@ function printOpenCodeInstallResult(result: OpenCodeInstallResult): void {
     })),
     ["provider", "baseURL", "models"],
   );
+
+  if (result.warnings.length > 0) {
+    console.log("\nWarnings:");
+    for (const warning of result.warnings) console.log(`- ${warning}`);
+  }
+
+  if (result.dryRun) {
+    console.log("\nNo files were written. Re-run without --dry-run to apply.");
+  }
+}
+
+function printCodexInstallResult(result: CodexInstallResult): void {
+  console.log(`Codex CLI install ${result.dryRun ? "dry-run" : "done"}: ${result.changed ? "changes prepared" : "already up to date"}`);
+  console.log(`Config: ${result.configPath}`);
+  console.log(`Provider: ${result.providerId}`);
+  console.log(`Base URL: ${result.providerBaseUrl}`);
+  if (result.backupPath) console.log(`Backup: ${result.backupPath}`);
 
   if (result.warnings.length > 0) {
     console.log("\nWarnings:");
@@ -651,6 +745,17 @@ function printOpenCodeRestoreResult(result: OpenCodeRestoreResult): void {
 
   if (result.dryRun) {
     console.log("\nNo files were written. Re-run without --dry-run to restore.");
+  }
+}
+
+function printCodexRestoreResult(result: CodexRestoreResult): void {
+  console.log(`Codex CLI restore ${result.dryRun ? "dry-run" : "done"}: ${result.restored ? "backup selected" : "no backup restored"}`);
+  console.log(`Config: ${result.configPath}`);
+  if (result.backupPath) console.log(`Backup: ${result.backupPath}`);
+
+  if (result.warnings.length > 0) {
+    console.log("\nWarnings:");
+    for (const warning of result.warnings) console.log(`- ${warning}`);
   }
 }
 
@@ -1992,6 +2097,20 @@ function readCodexSmokeRouteFlag(
   throw new Error(`Unsupported codex smoke route: ${value}`);
 }
 
+function readCodexLoadSessionModeFlag(argv: string[]): "unique" | "same" | undefined {
+  const value = readStringFlag(argv, "--session-mode");
+  if (!value) return undefined;
+  if (value === "unique" || value === "same") return value;
+  throw new Error(`Unsupported codex load session mode: ${value}`);
+}
+
+function readCodexLoadSelectionStrategyFlag(argv: string[]): "sticky" | "round-robin" | "weighted" | undefined {
+  const value = readStringFlag(argv, "--selection-strategy");
+  if (!value) return undefined;
+  if (value === "sticky" || value === "round-robin" || value === "weighted") return value;
+  throw new Error(`Unsupported codex load selection strategy: ${value}`);
+}
+
 function readStringFlag(argv: string[], flag: string): string | undefined {
   const index = argv.indexOf(flag);
   if (index === -1) return undefined;
@@ -2141,14 +2260,16 @@ Usage:
   kyoli accounts reset-expired [codex|claude-code] [--enable]
   kyoli accounts import opencode [--dry-run] [--sync] [--provider all|codex|claude-code] [--config-dir ~/.config/opencode]
 
-  # OpenCode Server Mode integration
+  # Server Mode client integration
+  kyoli install codex [--dry-run] [--config-dir ~/.codex] [--json]
+  kyoli restore codex [--backup <path>] [--dry-run] [--config-dir ~/.codex] [--json]
   kyoli install opencode [--dry-run] [--force] [--no-models] [--all-models] [--preserve-openai] [--config-dir ~/.config/opencode] [--json]
   kyoli restore opencode [--backup <path>] [--dry-run] [--config-dir ~/.config/opencode] [--json]
 
   # Doctors
   kyoli doctor [--json]
   kyoli doctor pool [--json]
-  kyoli doctor codex [--file|--e2e|--load] [--json]
+  kyoli doctor codex [--file|--e2e|--load|--websocket|--sdk] [--json]
   kyoli doctor claude [--binary|--template|--wire|--smoke] [--json]
   kyoli doctor opencode [--run] [--config-dir ~/.config/opencode] [--json]
 

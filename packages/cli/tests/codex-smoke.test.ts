@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { MemoryAccountStore } from "@kyoli-gam/core";
 import {
   createCodexCliE2EArgs,
+  createCodexCliToolE2EArgs,
   createOpenCodeE2EConfig,
   runCodexE2EDoctor,
   runCodexFileSmokeDoctor,
@@ -43,9 +44,32 @@ describe("runCodexSmokeDoctor", () => {
       "-m",
       "gpt-5.3-codex",
       "-c",
-      "chatgpt_base_url=\"http://127.0.0.1:2021/backend-api\"",
+      "model_provider=\"kyoli\"",
+      "-c",
+      "model_providers.kyoli.name=\"OpenAI\"",
+      "-c",
+      "model_providers.kyoli.base_url=\"http://127.0.0.1:2021/backend-api/codex\"",
+      "-c",
+      "model_providers.kyoli.wire_api=\"responses\"",
+      "-c",
+      "model_providers.kyoli.supports_websockets=true",
+      "-c",
+      "model_providers.kyoli.requires_openai_auth=true",
       "Reply exactly: smoke-ok",
     ]);
+  });
+
+  it("builds Codex CLI tool E2E args with workspace write sandbox", () => {
+    const args = createCodexCliToolE2EArgs({
+      backendApiBaseUrl: "http://127.0.0.1:2021/backend-api",
+      modelId: "gpt-5.3-codex",
+      expectedText: "tool-smoke-ok",
+      projectDir: "/tmp/kyoli-codex-cli-tools-e2e",
+    });
+
+    expect(args).toContain("workspace-write");
+    expect(args).toContain("model_providers.kyoli.supports_websockets=true");
+    expect(args.at(-1)).toContain("Create ./result.txt containing exactly: tool-smoke-ok");
   });
 
   it("builds OpenCode E2E config through the built-in openai Responses provider", () => {
@@ -508,6 +532,8 @@ describe("runCodexSmokeDoctor", () => {
       {
         requests: 4,
         concurrency: 2,
+        sessionMode: "unique",
+        selectionStrategy: "round-robin",
         fetch: async (_input, init) => {
           const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
           const instructions = String(body.instructions ?? "");
@@ -523,5 +549,8 @@ describe("runCodexSmokeDoctor", () => {
     expect(report.summary.fail).toBe(0);
     expect(report.checks.find((check) => check.name === "completed requests")?.detail).toContain("4/4");
     expect(report.checks.find((check) => check.name === "account distribution")?.status).toBe("pass");
+    expect(report.checks.find((check) => check.name === "account distribution")?.detail).toContain(
+      "selection_strategy=round-robin",
+    );
   });
 });

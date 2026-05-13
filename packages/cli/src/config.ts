@@ -71,7 +71,7 @@ export function createDefaultCliConfig(): Required<CliConfig> {
     host: "127.0.0.1",
     port: 2021,
     databasePath: join("~", ".local", "share", "kyoli-gam", "kyoli.db"),
-    accountSelectionStrategy: "sticky",
+    accountSelectionStrategy: "round-robin",
     softQuotaThresholdPercent: 100,
     planWeights: {
       max: 3,

@@ -2,7 +2,7 @@ import type { AccountExecutionTraceEvent, AccountRecord, AccountStore } from "@k
 import { StickyAccountPool, stripProviderPrefix } from "@kyoli-gam/core";
 import { createGateway, serveGateway } from "@kyoli-gam/gateway";
 import { createCodexChatGPTProvider } from "@kyoli-gam/provider-codex-chatgpt";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -36,8 +36,21 @@ export interface CodexE2EOptions {
   includeOpenCode?: boolean;
   openCodeCommand?: string;
   includeCodexCli?: boolean;
+  includeCodexCliTools?: boolean;
   codexCliCommand?: string;
   keepTemp?: boolean;
+}
+
+export interface CodexWebSocketSmokeOptions {
+  timeoutMs?: number;
+  port?: number;
+}
+
+export interface CodexSdkSmokeOptions {
+  model?: string;
+  expectedText?: string;
+  timeoutMs?: number;
+  port?: number;
 }
 
 export interface CodexLoadOptions {
@@ -45,6 +58,8 @@ export interface CodexLoadOptions {
   model?: string;
   requests?: number;
   concurrency?: number;
+  sessionMode?: "unique" | "same";
+  selectionStrategy?: "sticky" | "round-robin" | "weighted";
   timeoutMs?: number;
   fetch?: typeof fetch;
 }
@@ -442,6 +457,24 @@ export async function runCodexE2EDoctor(
       );
     }
 
+    if (options.includeCodexCliTools) {
+      const result = await runCodexCliToolE2E({
+        baseUrl,
+        model,
+        expectedText,
+        command: options.codexCliCommand,
+        timeoutMs,
+        keepTemp: options.keepTemp,
+      });
+      checks.push(
+        check(
+          "Codex CLI tool read/write client",
+          result.ok,
+          result.ok ? result.detail : result.detail,
+        ),
+      );
+    }
+
     const responseEvents = trace.filter((event) => event.type === "response");
     checks.push(
       check(
@@ -457,6 +490,142 @@ export async function runCodexE2EDoctor(
   }
 }
 
+export async function runCodexWebSocketDoctor(
+  store: AccountStore,
+  config: CliConfig,
+  options: CodexWebSocketSmokeOptions = {},
+): Promise<CodexSmokeReport> {
+  const host = config.host ?? "127.0.0.1";
+  const port = options.port ?? 0;
+  const timeoutMs = options.timeoutMs ?? 30_000;
+  const accounts = await store.listByProvider("codex");
+  const enabledAccounts = accounts.filter(isReadyOAuthAccount);
+  const checks: CodexSmokeReport["checks"] = [
+    check(
+      "codex account inventory",
+      enabledAccounts.length > 0,
+      `${enabledAccounts.length} ready codex/oauth account(s)`,
+    ),
+  ];
+  if (enabledAccounts.length === 0) return report("codex-websocket", checks);
+
+  const accountPool = new StickyAccountPool(store, {
+    strategy: config.accountSelectionStrategy,
+    softQuotaThresholdPercent: config.softQuotaThresholdPercent,
+    planWeights: config.planWeights,
+  });
+  const server = await serveGateway({
+    config: { host, port },
+    accounts: store,
+    providers: [
+      createCodexChatGPTProvider({
+        accounts: accountPool,
+      }),
+    ],
+  });
+  const baseUrl = `http://${server.hostname}:${server.port}`;
+
+  try {
+    const result = await openCodexWebSocketAndClose({
+      url: `${baseUrl.replace(/^http:/, "ws:").replace(/^https:/, "wss:")}/backend-api/codex/responses`,
+      timeoutMs,
+    });
+    checks.push(
+      check(
+        "native Codex WebSocket open",
+        result.opened,
+        result.opened ? `opened; close=${result.closeCode} ${result.closeReason ?? ""}`.trim() : result.detail,
+      ),
+    );
+    checks.push(
+      check(
+        "native Codex WebSocket close",
+        result.closeCode === 1000,
+        `close=${result.closeCode ?? "unknown"} ${result.closeReason ?? ""}`.trim(),
+      ),
+    );
+    return report("codex-websocket", checks);
+  } finally {
+    server.stop(true);
+  }
+}
+
+export async function runCodexSdkDoctor(
+  store: AccountStore,
+  config: CliConfig,
+  options: CodexSdkSmokeOptions = {},
+): Promise<CodexSmokeReport> {
+  const host = config.host ?? "127.0.0.1";
+  const port = options.port ?? 0;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const expectedText = options.expectedText ?? DEFAULT_EXPECTED_TEXT;
+  const accounts = await store.listByProvider("codex");
+  const enabledAccounts = accounts.filter(isReadyOAuthAccount);
+  const checks: CodexSmokeReport["checks"] = [
+    check(
+      "codex account inventory",
+      enabledAccounts.length > 0,
+      `${enabledAccounts.length} ready codex/oauth account(s)`,
+    ),
+  ];
+  if (enabledAccounts.length === 0) return report("codex-sdk", checks);
+
+  const OpenAI = await loadOpenAIConstructor();
+  if (!OpenAI) {
+    checks.push(warnCheck("openai sdk installed", false, "Install the openai npm package to run SDK smoke checks."));
+    return report("codex-sdk", checks);
+  }
+
+  const accountPool = new StickyAccountPool(store, {
+    strategy: config.accountSelectionStrategy,
+    softQuotaThresholdPercent: config.softQuotaThresholdPercent,
+    planWeights: config.planWeights,
+  });
+  const server = await serveGateway({
+    config: { host, port },
+    accounts: store,
+    providers: [
+      createCodexChatGPTProvider({
+        accounts: accountPool,
+        fetch: withTimeout(fetch, timeoutMs),
+      }),
+    ],
+  });
+  const baseUrl = `http://${server.hostname}:${server.port}`;
+
+  try {
+    const modelsResponse = await fetch(`${baseUrl}/v1/models`, { signal: AbortSignal.timeout(timeoutMs) });
+    const modelsBody = await readJsonRecord(modelsResponse);
+    const model = options.model ?? selectDefaultCodexModel(modelsBody);
+    const client = new OpenAI({
+      apiKey: "kyoli-local-sdk",
+      baseURL: `${baseUrl}/v1`,
+      timeout: timeoutMs,
+    });
+
+    const responsesText = await runOpenAISdkResponses(client, model, expectedText);
+    checks.push(
+      check(
+        "OpenAI SDK responses.create",
+        responsesText.includes(expectedText),
+        responsesText.includes(expectedText) ? `saw ${expectedText}` : `missing ${expectedText}: ${excerpt(responsesText)}`,
+      ),
+    );
+
+    const chatText = await runOpenAISdkChatCompletions(client, model, expectedText);
+    checks.push(
+      check(
+        "OpenAI SDK chat.completions.create",
+        chatText.includes(expectedText),
+        chatText.includes(expectedText) ? `saw ${expectedText}` : `missing ${expectedText}: ${excerpt(chatText)}`,
+      ),
+    );
+    return report("codex-sdk", checks);
+  } finally {
+    server.stop(true);
+  }
+}
+
 export async function runCodexLoadDoctor(
   store: AccountStore,
   config: CliConfig,
@@ -465,6 +634,8 @@ export async function runCodexLoadDoctor(
   const route = options.route ?? "/v1/responses";
   const requests = Math.max(1, Math.floor(options.requests ?? 8));
   const concurrency = Math.max(1, Math.min(requests, Math.floor(options.concurrency ?? 2)));
+  const sessionMode = options.sessionMode ?? "unique";
+  const selectionStrategy = options.selectionStrategy ?? config.accountSelectionStrategy;
   const beforeAccounts = await store.listByProvider("codex");
   const enabledAccounts = beforeAccounts.filter(isReadyOAuthAccount);
   const trace: AccountExecutionTraceEvent[] = [];
@@ -478,7 +649,7 @@ export async function runCodexLoadDoctor(
   if (enabledAccounts.length === 0) return report("codex-load", checks);
 
   const accountPool = new StickyAccountPool(store, {
-    strategy: config.accountSelectionStrategy,
+    strategy: selectionStrategy,
     softQuotaThresholdPercent: config.softQuotaThresholdPercent,
     planWeights: config.planWeights,
   });
@@ -517,7 +688,7 @@ export async function runCodexLoadDoctor(
         method: "POST",
         headers: {
           "content-type": "application/json",
-          "x-kyoli-session-id": `load-${index}`,
+          "x-kyoli-session-id": sessionMode === "same" ? "load-shared" : `load-${index}`,
         },
         body: JSON.stringify(body),
       }),
@@ -549,8 +720,8 @@ export async function runCodexLoadDoctor(
   checks.push(
     warnCheck(
       "account distribution",
-      enabledAccounts.length === 1 || selectedAccounts.size > 1,
-      `${selectedAccounts.size} account(s) selected for ${requests} request(s)`,
+      selectionStrategy === "sticky" || enabledAccounts.length === 1 || selectedAccounts.size > 1,
+      `${selectedAccounts.size} account(s) selected for ${requests} request(s); session_mode=${sessionMode} selection_strategy=${selectionStrategy}`,
     ),
   );
   checks.push(
@@ -796,12 +967,62 @@ async function runCodexCliE2E(input: {
   }
 }
 
+async function runCodexCliToolE2E(input: {
+  baseUrl: string;
+  model: string;
+  expectedText: string;
+  command?: string;
+  timeoutMs: number;
+  keepTemp?: boolean;
+}): Promise<{ ok: boolean; detail: string }> {
+  const root = await mkdtemp(join(tmpdir(), "kyoli-codex-cli-tools-e2e-"));
+  const projectDir = join(root, "project");
+  const command = input.command ?? process.env.CODEX_BIN ?? "codex";
+  const modelId = stripProviderPrefix(input.model);
+  const resultPath = join(projectDir, "result.txt");
+
+  try {
+    await mkdir(projectDir, { recursive: true });
+    await writeFile(join(projectDir, "input.txt"), `expected=${input.expectedText}\n`, "utf8");
+    const result = await execFileWithTimeout(command, createCodexCliToolE2EArgs({
+      backendApiBaseUrl: `${input.baseUrl}/backend-api`,
+      modelId,
+      expectedText: input.expectedText,
+      projectDir,
+    }), {
+      cwd: projectDir,
+      timeout: input.timeoutMs,
+      env: process.env,
+    });
+    const output = `${result.stdout}\n${result.stderr}`;
+    const fileText = await readFile(resultPath, "utf8").catch(() => "");
+    return {
+      ok: fileText.trim() === input.expectedText,
+      detail: fileText.trim() === input.expectedText
+        ? `result.txt=${input.expectedText}`
+        : `result.txt=${JSON.stringify(fileText.trim())}; output=${excerpt(output)}`,
+    };
+  } catch (error) {
+    const output = readExecErrorOutput(error);
+    return {
+      ok: false,
+      detail: output ? excerpt(output) : error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    if (!input.keepTemp) {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+}
+
 export function createCodexCliE2EArgs(input: {
   backendApiBaseUrl: string;
   modelId: string;
   expectedText: string;
   projectDir: string;
 }): string[] {
+  const codexBaseUrl = `${input.backendApiBaseUrl.replace(/\/+$/, "")}/codex`;
+
   return [
     "-a",
     "never",
@@ -818,9 +1039,164 @@ export function createCodexCliE2EArgs(input: {
     "-m",
     input.modelId,
     "-c",
-    `chatgpt_base_url="${input.backendApiBaseUrl}"`,
+    `model_provider="kyoli"`,
+    "-c",
+    `model_providers.kyoli.name="OpenAI"`,
+    "-c",
+    `model_providers.kyoli.base_url="${codexBaseUrl}"`,
+    "-c",
+    `model_providers.kyoli.wire_api="responses"`,
+    "-c",
+    `model_providers.kyoli.supports_websockets=true`,
+    "-c",
+    `model_providers.kyoli.requires_openai_auth=true`,
     `Reply exactly: ${input.expectedText}`,
   ];
+}
+
+export function createCodexCliToolE2EArgs(input: {
+  backendApiBaseUrl: string;
+  modelId: string;
+  expectedText: string;
+  projectDir: string;
+}): string[] {
+  const args = createCodexCliE2EArgs(input);
+  const sandboxIndex = args.indexOf("read-only");
+  if (sandboxIndex !== -1) args[sandboxIndex] = "workspace-write";
+  args[args.length - 1] = [
+    "Read ./input.txt.",
+    `Create ./result.txt containing exactly: ${input.expectedText}`,
+    "Do not include any extra characters in the file.",
+  ].join(" ");
+  return args;
+}
+
+async function openCodexWebSocketAndClose(input: {
+  url: string;
+  timeoutMs: number;
+}): Promise<{ opened: boolean; closeCode?: number; closeReason?: string; detail: string }> {
+  const WebSocketCtor = (globalThis as typeof globalThis & {
+    WebSocket?: new (
+      url: string,
+      protocols?: string[],
+      init?: { headers?: Record<string, string> },
+    ) => {
+      close(code?: number, reason?: string): void;
+      addEventListener(type: "open" | "close" | "error", listener: (event: unknown) => void, options?: { once?: boolean }): void;
+    };
+  }).WebSocket;
+  if (!WebSocketCtor) {
+    return { opened: false, detail: "global WebSocket is unavailable in this Node.js runtime" };
+  }
+
+  return new Promise((resolve) => {
+    let opened = false;
+    const timeout = setTimeout(() => {
+      resolve({ opened, detail: "timed out waiting for WebSocket close" });
+    }, input.timeoutMs);
+    const websocket = new WebSocketCtor(input.url, [], {
+      headers: {
+        "x-codex-session-id": `codex-ws-${Date.now()}`,
+        "x-codex-turn-state": "codex-ws-smoke",
+        originator: "codex_cli_rs",
+        "user-agent": "codex_cli_rs/0.0.0",
+      },
+    });
+
+    websocket.addEventListener("open", () => {
+      opened = true;
+      websocket.close(1000, "smoke-done");
+    }, { once: true });
+    websocket.addEventListener("close", (event) => {
+      clearTimeout(timeout);
+      const record = readRecord(event);
+      resolve({
+        opened,
+        closeCode: readNumber(record?.code),
+        closeReason: readString(record?.reason),
+        detail: opened ? "opened and closed" : "closed before open",
+      });
+    }, { once: true });
+    websocket.addEventListener("error", (event) => {
+      clearTimeout(timeout);
+      resolve({
+        opened,
+        detail: readWebSocketErrorDetail(event),
+      });
+    }, { once: true });
+  });
+}
+
+type OpenAIConstructor = new (input: {
+  apiKey: string;
+  baseURL: string;
+  timeout?: number;
+}) => OpenAIClientLike;
+
+interface OpenAIClientLike {
+  responses?: {
+    create(input: Record<string, unknown>): Promise<unknown>;
+  };
+  chat?: {
+    completions?: {
+      create(input: Record<string, unknown>): Promise<unknown>;
+    };
+  };
+}
+
+async function loadOpenAIConstructor(): Promise<OpenAIConstructor | undefined> {
+  try {
+    const dynamicImport = new Function("specifier", "return import(specifier)") as (specifier: string) => Promise<unknown>;
+    const module = readRecord(await dynamicImport("openai"));
+    const constructor = module?.default;
+    return typeof constructor === "function" ? constructor as OpenAIConstructor : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function runOpenAISdkResponses(
+  client: OpenAIClientLike,
+  model: string,
+  expectedText: string,
+): Promise<string> {
+  if (!client.responses?.create) return "OpenAI SDK client is missing responses.create";
+  const payload = await client.responses.create(createCodexSmokeBody(model, expectedText));
+  return extractUnknownText(payload);
+}
+
+async function runOpenAISdkChatCompletions(
+  client: OpenAIClientLike,
+  model: string,
+  expectedText: string,
+): Promise<string> {
+  if (!client.chat?.completions?.create) return "OpenAI SDK client is missing chat.completions.create";
+  const payload = await client.chat.completions.create(createCodexChatSmokeBody(model, expectedText));
+  return extractUnknownText(payload);
+}
+
+function extractUnknownText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value === null || value === undefined) return "";
+  if (typeof value !== "object") return String(value);
+
+  const record = value as Record<string, unknown>;
+  const outputText = readString(record.output_text);
+  if (outputText) return outputText;
+  const choices = record.choices;
+  if (Array.isArray(choices)) {
+    return choices
+      .map((choice) => readString(readRecord(readRecord(choice)?.message)?.content) ?? "")
+      .join("\n");
+  }
+  return JSON.stringify(value);
+}
+
+function readWebSocketErrorDetail(event: unknown): string {
+  const record = readRecord(event);
+  const error = record?.error;
+  if (error instanceof Error) return error.message;
+  return error === undefined ? "WebSocket error" : String(error);
 }
 
 function execFileWithTimeout(
@@ -1181,4 +1557,8 @@ function readRecord(value: unknown): Record<string, unknown> | undefined {
 
 function readString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function readNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }

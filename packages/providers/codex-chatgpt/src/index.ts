@@ -1,6 +1,7 @@
 import type {
   AccountExecutionTraceEvent,
   AccountPool,
+  GatewayWebSocketContext,
   ModelInfo,
   ProviderAdapter,
 } from "@kyoli-gam/core";
@@ -13,11 +14,13 @@ import {
 } from "@kyoli-gam/core";
 
 const CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses";
+const CODEX_WEBSOCKET_ENDPOINT = "wss://chatgpt.com/backend-api/codex/responses";
 const CODEX_COMPACT_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses/compact";
 const CODEX_BACKEND_API_BASE = "https://chatgpt.com/backend-api";
 const OPENAI_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const OPENAI_TOKEN_ENDPOINT = "https://auth.openai.com/oauth/token";
 const CODEX_ORIGINATOR = "codex_cli_rs";
+const CODEX_BRIDGE_ORIGINATOR = "codex_chatgpt_desktop";
 const CODEX_USER_AGENT = "codex_cli_rs/0.0.0";
 const TOKEN_EXPIRY_BUFFER_MS = 60_000;
 const TOKEN_REFRESH_TIMEOUT_MS = 30_000;
@@ -28,6 +31,40 @@ const STREAM_TEXT_DECODER = new TextDecoder();
 const STREAM_TEXT_ENCODER = new TextEncoder();
 const DEFAULT_CHAT_COMPLETIONS_INSTRUCTIONS = "You are a helpful assistant.";
 const CODEX_REASONING_INCLUDE = "reasoning.encrypted_content";
+const RESPONSES_WEBSOCKET_BETA_HEADER = "responses_websockets=2026-02-06";
+const WEBSOCKET_HOP_BY_HOP_HEADERS = new Set([
+  "accept",
+  "connection",
+  "content-type",
+  "content-length",
+  "cookie",
+  "host",
+  "sec-websocket-extensions",
+  "sec-websocket-key",
+  "sec-websocket-protocol",
+  "sec-websocket-version",
+  "upgrade",
+]);
+const NATIVE_CODEX_ORIGINATORS = new Set([
+  "Codex Desktop",
+  "codex_atlas",
+  "codex_chatgpt_desktop",
+  "codex_cli_rs",
+  "codex_exec",
+  "codex_vscode",
+]);
+const NATIVE_CODEX_STREAM_HEADERS = new Set([
+  "x-codex-turn-state",
+  "x-codex-turn-metadata",
+  "x-codex-beta-features",
+]);
+const BRIDGE_FORWARD_HEADERS = new Set([
+  "accept",
+  "request-id",
+  "x-request-id",
+  "x-codex-conversation-id",
+  "x-codex-session-id",
+]);
 
 const models: ModelInfo[] = [
   {
@@ -43,6 +80,7 @@ const models: ModelInfo[] = [
 export interface CodexChatGPTProviderOptions {
   accounts?: AccountPool;
   fetch?: typeof fetch;
+  webSocketFactory?: CodexWebSocketFactory;
   maxAccountAttempts?: number;
   tokenRefresh?: CodexTokenRefresh;
   onTrace?: (event: AccountExecutionTraceEvent) => void;
@@ -65,6 +103,20 @@ interface CodexTokenRefreshResult {
 }
 
 type CodexTokenRefresh = (refreshToken: string) => Promise<CodexTokenRefreshResult>;
+
+export interface CodexWebSocketLike {
+  readyState?: number;
+  binaryType?: string;
+  send(data: string | Uint8Array | ArrayBuffer | Buffer): void;
+  close(code?: number, reason?: string): void;
+  addEventListener(type: "open" | "message" | "error" | "close", listener: (event: unknown) => void, options?: { once?: boolean }): void;
+}
+
+export type CodexWebSocketFactory = (
+  url: string,
+  protocols: string[],
+  init: { headers: Record<string, string> },
+) => CodexWebSocketLike;
 
 export function createCodexChatGPTProvider(
   options: CodexChatGPTProviderOptions = {},
@@ -162,6 +214,7 @@ export function createCodexChatGPTProvider(
               context.request.headers,
               credential.value,
               (credential as CodexCredential).chatgptAccountId,
+              { bridge: context.route.startsWith("/v1/") },
             ),
             body: body === undefined ? context.request.body : JSON.stringify(body),
             duplex: "half",
@@ -175,7 +228,87 @@ export function createCodexChatGPTProvider(
           : context.model,
       });
     },
+    async handleWebSocket(context) {
+      if (context.route !== "/backend-api/codex/responses") {
+        await context.websocket.accept();
+        await sendWebSocketError(context, "route_not_supported", `Codex WebSocket is not implemented for ${context.route}.`);
+        await context.websocket.close(1008, "Unsupported route");
+        return;
+      }
+      await handleResponsesWebSocket({ context, options });
+    },
   };
+}
+
+async function handleResponsesWebSocket(input: {
+  context: GatewayWebSocketContext;
+  options: CodexChatGPTProviderOptions;
+}): Promise<void> {
+  const { context, options } = input;
+  const websocketFactory = options.webSocketFactory ?? createGlobalWebSocket;
+  const turnState = context.request.headers.get("x-codex-turn-state") ?? crypto.randomUUID();
+
+  const credential = await readOAuthCredential({
+    accounts: options.accounts,
+    sessionKey: context.sessionKey,
+    excludeAccountIds: [],
+    tokenRefresh: options.tokenRefresh ?? refreshCodexToken,
+  });
+
+  await context.websocket.accept({ "x-codex-turn-state": turnState });
+
+  if (!credential) {
+    await sendWebSocketError(
+      context,
+      "missing_oauth_account",
+      "Codex WebSocket requests require a stored codex/oauth account. Add one with kyoli login codex.",
+    );
+    await context.websocket.close(1008, "Missing OAuth account");
+    return;
+  }
+
+  let upstream: CodexWebSocketLike | undefined;
+  try {
+    upstream = websocketFactory(CODEX_WEBSOCKET_ENDPOINT, [], {
+      headers: buildUpstreamWebSocketHeaders(
+        context.request.headers,
+        credential.value,
+        (credential as CodexCredential).chatgptAccountId,
+      ),
+    });
+    upstream.binaryType = "arraybuffer";
+    await waitForWebSocketOpen(upstream);
+    if (credential.accountId) await options.accounts?.recordSuccess(credential.accountId);
+  } catch (error) {
+    if (credential.accountId) {
+      await options.accounts?.recordFailure(credential.accountId, {
+        status: 502,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+    await sendWebSocketError(
+      context,
+      "upstream_unavailable",
+      error instanceof Error ? error.message : "Codex WebSocket upstream connection failed.",
+    );
+    await context.websocket.close(1011, "Upstream unavailable");
+    return;
+  }
+
+  relayUpstreamMessages(upstream, context);
+
+  while (true) {
+    const message = await context.websocket.receive();
+    if (message.type === "close") {
+      upstream.close(message.code, message.reason);
+      return;
+    }
+    if (message.type === "text") {
+      upstream.send(message.data);
+    } else {
+      upstream.send(message.data);
+    }
+  }
 }
 
 async function handleResponsesRequest(input: {
@@ -226,6 +359,7 @@ async function handleResponsesRequest(input: {
           input.context.request.headers,
           credential.value,
           (credential as CodexCredential).chatgptAccountId,
+          { bridge: true },
         ),
         body: JSON.stringify(upstreamBody),
         duplex: "half",
@@ -256,7 +390,12 @@ async function handleChatCompletionsRequest(input: {
   }
   const converted = convertChatCompletionBodyToResponses(body);
   if (!converted.ok) return converted.response;
-  const responsesBody = rewriteBodyModel(converted.value);
+  const responsesBody = applyOpenAIResponsesCodexDefaults(
+    rewriteBodyModel({
+      ...converted.value,
+      stream: true,
+    }),
+  );
   const upstream = await executeWithAccountFailover({
     provider: "codex",
     kind: "oauth",
@@ -288,6 +427,7 @@ async function handleChatCompletionsRequest(input: {
           input.context.request.headers,
           credential.value,
           (credential as CodexCredential).chatgptAccountId,
+          { bridge: true },
         ),
         body: JSON.stringify(responsesBody),
         duplex: "half",
@@ -306,7 +446,9 @@ async function handleChatCompletionsRequest(input: {
     return convertResponsesStreamToChatCompletions(upstream, body);
   }
 
-  const payload = await readJsonRecord(upstream.clone());
+  const payload = upstream.headers.get("content-type")?.includes("text/event-stream")
+    ? await convertResponsesStreamToResponsePayload(upstream, body)
+    : await readJsonRecord(upstream.clone());
   if (!payload) return upstream;
   return jsonResponse(convertResponsesPayloadToChatCompletion(payload, body), {
     status: upstream.status,
@@ -350,6 +492,7 @@ async function handleCompactRequest(input: {
           input.context.request.headers,
           credential.value,
           (credential as CodexCredential).chatgptAccountId,
+          { bridge: input.context.route.startsWith("/v1/") },
         ),
         body: JSON.stringify(body),
         duplex: "half",
@@ -1273,6 +1416,7 @@ function rewriteBodyModel(body: unknown): unknown {
   if (typeof record.model === "string") {
     record.model = stripProviderPrefix(record.model);
   }
+  normalizeFastModelAlias(record);
   normalizeReasoningAliases(record);
   normalizeServiceTier(record);
   normalizePromptCacheAliases(record);
@@ -1434,7 +1578,21 @@ function normalizeReasoningAliases(record: Record<string, unknown>): void {
 }
 
 function normalizeServiceTier(record: Record<string, unknown>): void {
-  if (record.service_tier === "fast") {
+  const serviceTier = readString(record.service_tier);
+  if (serviceTier?.trim().toLowerCase() === "fast") {
+    record.service_tier = "priority";
+  }
+}
+
+function normalizeFastModelAlias(record: Record<string, unknown>): void {
+  const model = readString(record.model);
+  if (!model) return;
+  const stripped = stripProviderPrefix(model);
+  if (!stripped.endsWith("-fast")) return;
+
+  record.model = stripped.slice(0, -"fast".length - 1);
+  const requestedTier = readString(record.service_tier);
+  if (!requestedTier || requestedTier.trim().toLowerCase() === "fast") {
     record.service_tier = "priority";
   }
 }
@@ -1514,17 +1672,22 @@ function buildUpstreamHeaders(
   headers: Headers,
   accessToken: string,
   accountId: string | undefined,
+  options: { bridge?: boolean } = {},
 ): Headers {
-  const upstream = new Headers(headers);
-  upstream.delete("authorization");
-  upstream.delete("x-api-key");
-  upstream.delete("host");
-  upstream.delete("content-length");
-  upstream.delete("connection");
-  upstream.delete("accept-encoding");
+  const nativeCodex = isNativeCodexRequest(headers);
+  const upstream = options.bridge && !nativeCodex
+    ? buildBridgeHeaders(headers)
+    : new Headers(headers);
+  deleteBlockedUpstreamHeaders(upstream);
   upstream.set("authorization", `Bearer ${accessToken}`);
-  upstream.set("originator", headers.get("originator") ?? CODEX_ORIGINATOR);
-  upstream.set("user-agent", headers.get("user-agent") ?? CODEX_USER_AGENT);
+  upstream.set("originator", nativeCodex
+    ? headers.get("originator") ?? CODEX_ORIGINATOR
+    : options.bridge
+      ? CODEX_BRIDGE_ORIGINATOR
+      : headers.get("originator") ?? CODEX_ORIGINATOR);
+  upstream.set("user-agent", nativeCodex
+    ? headers.get("user-agent") ?? CODEX_USER_AGENT
+    : CODEX_USER_AGENT);
   upstream.set("content-type", "application/json");
 
   if (accountId) {
@@ -1534,6 +1697,163 @@ function buildUpstreamHeaders(
   }
 
   return upstream;
+}
+
+function buildBridgeHeaders(headers: Headers): Headers {
+  const upstream = new Headers();
+  for (const [key, value] of headers.entries()) {
+    const normalized = key.toLowerCase();
+    if (BRIDGE_FORWARD_HEADERS.has(normalized)) upstream.set(key, value);
+  }
+  return upstream;
+}
+
+function deleteBlockedUpstreamHeaders(headers: Headers): void {
+  headers.delete("authorization");
+  headers.delete("x-api-key");
+  headers.delete("host");
+  headers.delete("content-length");
+  headers.delete("connection");
+  headers.delete("accept-encoding");
+  headers.delete("forwarded");
+  headers.delete("x-forwarded-for");
+  headers.delete("x-forwarded-host");
+  headers.delete("x-forwarded-proto");
+  headers.delete("x-real-ip");
+  headers.delete("true-client-ip");
+}
+
+function isNativeCodexRequest(headers: Headers): boolean {
+  for (const header of NATIVE_CODEX_STREAM_HEADERS) {
+    if (headers.has(header)) return true;
+  }
+  const originator = headers.get("originator")?.trim();
+  if (!originator || !NATIVE_CODEX_ORIGINATORS.has(originator)) return false;
+  const userAgent = headers.get("user-agent")?.toLowerCase() ?? "";
+  return userAgent.includes("codex") || userAgent.includes("chatgpt");
+}
+
+function buildUpstreamWebSocketHeaders(
+  headers: Headers,
+  accessToken: string,
+  accountId: string | undefined,
+): Record<string, string> {
+  const upstream = new Headers(headers);
+  for (const header of WEBSOCKET_HOP_BY_HOP_HEADERS) upstream.delete(header);
+
+  upstream.set("authorization", `Bearer ${accessToken}`);
+  upstream.set("originator", headers.get("originator") ?? CODEX_ORIGINATOR);
+  upstream.set("user-agent", headers.get("user-agent") ?? CODEX_USER_AGENT);
+  upstream.set("openai-beta", appendOpenAIBetaHeader(upstream.get("openai-beta")));
+
+  if (accountId) {
+    upstream.set("ChatGPT-Account-ID", accountId);
+  } else {
+    upstream.delete("ChatGPT-Account-ID");
+  }
+
+  return Object.fromEntries(upstream.entries());
+}
+
+function appendOpenAIBetaHeader(value: string | null): string {
+  if (!value) return RESPONSES_WEBSOCKET_BETA_HEADER;
+  const parts = value.split(",").map((part) => part.trim()).filter(Boolean);
+  return parts.includes(RESPONSES_WEBSOCKET_BETA_HEADER)
+    ? parts.join(", ")
+    : [...parts, RESPONSES_WEBSOCKET_BETA_HEADER].join(", ");
+}
+
+function createGlobalWebSocket(
+  url: string,
+  protocols: string[],
+  init: { headers: Record<string, string> },
+): CodexWebSocketLike {
+  const WebSocketCtor = (globalThis as typeof globalThis & {
+    WebSocket?: new (
+      url: string,
+      protocols?: string[],
+      init?: { headers?: Record<string, string> },
+    ) => CodexWebSocketLike;
+  }).WebSocket;
+  if (!WebSocketCtor) {
+    throw new Error("This Node.js runtime does not expose a global WebSocket implementation.");
+  }
+  return new WebSocketCtor(url, protocols, init);
+}
+
+function waitForWebSocketOpen(websocket: CodexWebSocketLike): Promise<void> {
+  if (websocket.readyState === 1) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    websocket.addEventListener("open", () => resolve(), { once: true });
+    websocket.addEventListener("error", (event) => reject(readWebSocketError(event)), { once: true });
+    websocket.addEventListener("close", (event) => reject(readWebSocketCloseError(event)), { once: true });
+  });
+}
+
+function relayUpstreamMessages(
+  upstream: CodexWebSocketLike,
+  context: GatewayWebSocketContext,
+): void {
+  upstream.addEventListener("message", (event) => {
+    const data = readWebSocketEventData(event);
+    if (typeof data === "string") {
+      void context.websocket.sendText(data);
+      return;
+    }
+    if (data) void context.websocket.sendBinary(data);
+  });
+  upstream.addEventListener("close", (event) => {
+    const record = readRecord(event);
+    const code = readNumber(record?.code) ?? 1000;
+    const reason = readString(record?.reason) ?? "Upstream closed";
+    void context.websocket.close(code, reason);
+  });
+  upstream.addEventListener("error", (event) => {
+    void sendWebSocketError(context, "upstream_error", readWebSocketError(event).message)
+      .finally(() => context.websocket.close(1011, "Upstream error"));
+  });
+}
+
+async function sendWebSocketError(
+  context: GatewayWebSocketContext,
+  code: string,
+  message: string,
+): Promise<void> {
+  await context.websocket.sendText(JSON.stringify({
+    type: "error",
+    error: {
+      type: code,
+      code,
+      message,
+    },
+  }));
+}
+
+function readWebSocketEventData(event: unknown): string | Uint8Array | undefined {
+  const record = readRecord(event);
+  const data = record?.data;
+  if (typeof data === "string") return data;
+  if (data instanceof Uint8Array) return data;
+  if (data instanceof ArrayBuffer) return new Uint8Array(data);
+  if (ArrayBuffer.isView(data)) {
+    return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  }
+  return undefined;
+}
+
+function readWebSocketError(event: unknown): Error {
+  const record = readRecord(event);
+  const error = record?.error;
+  if (error instanceof Error) return error;
+  if (error !== undefined) return new Error(String(error));
+  return new Error("Codex WebSocket upstream emitted an error.");
+}
+
+function readWebSocketCloseError(event: unknown): Error {
+  const record = readRecord(event);
+  const code = readNumber(record?.code);
+  const reason = readString(record?.reason);
+  return new Error(`Codex WebSocket upstream closed before open${code ? ` (${code})` : ""}${reason ? `: ${reason}` : "."}`);
 }
 
 function createUpstreamUrl(route: string): string {

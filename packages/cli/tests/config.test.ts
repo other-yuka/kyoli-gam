@@ -110,7 +110,7 @@ describe("loadCliConfig", () => {
     expect(config.host).toBe("127.0.0.1");
     expect(config.port).toBe(2021);
     expect(config.databasePath?.endsWith("/.local/share/kyoli-gam/kyoli.db")).toBe(true);
-    expect(config.accountSelectionStrategy).toBe("sticky");
+    expect(config.accountSelectionStrategy).toBe("round-robin");
     expect(config.maxConcurrentRequests).toBe(0);
     expect(config.logLevel).toBe("info");
   });

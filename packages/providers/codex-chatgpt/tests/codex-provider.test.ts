@@ -3,6 +3,7 @@ import {
   MemoryAccountStore,
   StickyAccountPool,
   type AccountExecutionTraceEvent,
+  type GatewayWebSocketMessage,
 } from "@kyoli-gam/core";
 import { createCodexChatGPTProvider } from "../src";
 
@@ -132,6 +133,121 @@ describe("createCodexChatGPTProvider", () => {
     expect(upstreamUserAgent).toBe("codex_vscode/0.0.0");
   });
 
+  it("scrubs non-native OpenAI SDK headers on the /v1 Responses bridge", async () => {
+    let upstreamHeaders = new Headers();
+
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+      },
+    });
+
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      fetch: async (_input, init) => {
+        upstreamHeaders = new Headers(init?.headers);
+        return new Response(JSON.stringify({ id: "resp_test" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    const response = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/v1/responses", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "user-agent": "AI SDK/5.0 OpenCode",
+          "x-stainless-package-version": "5.0.0",
+          "x-openai-client-user-agent": '{"lang":"js"}',
+          "ai-sdk-provider": "openai",
+          "x-forwarded-for": "127.0.0.1",
+          "x-request-id": "req_test",
+        },
+        body: JSON.stringify({
+          model: "openai/gpt-5.3-codex",
+          input: "hello",
+        }),
+      }),
+      route: "/v1/responses",
+      sessionKey: "session-a",
+      body: {
+        model: "openai/gpt-5.3-codex",
+        input: "hello",
+      },
+      model: "openai/gpt-5.3-codex",
+    });
+
+    expect(response.status).toBe(200);
+    expect(upstreamHeaders.get("originator")).toBe("codex_chatgpt_desktop");
+    expect(upstreamHeaders.get("user-agent")).toBe("codex_cli_rs/0.0.0");
+    expect(upstreamHeaders.get("x-request-id")).toBe("req_test");
+    expect(upstreamHeaders.has("x-stainless-package-version")).toBe(false);
+    expect(upstreamHeaders.has("x-openai-client-user-agent")).toBe(false);
+    expect(upstreamHeaders.has("ai-sdk-provider")).toBe(false);
+    expect(upstreamHeaders.has("x-forwarded-for")).toBe(false);
+  });
+
+  it("does not treat a native originator with an SDK user-agent as native Codex", async () => {
+    let upstreamHeaders = new Headers();
+
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+      },
+    });
+
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      fetch: async (_input, init) => {
+        upstreamHeaders = new Headers(init?.headers);
+        return new Response(JSON.stringify({ id: "resp_test" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    const response = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/v1/responses", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          originator: "codex_cli_rs",
+          "user-agent": "AI SDK/5.0 OpenCode",
+          "x-stainless-package-version": "5.0.0",
+        },
+        body: JSON.stringify({
+          model: "openai/gpt-5.3-codex",
+          input: "hello",
+        }),
+      }),
+      route: "/v1/responses",
+      sessionKey: "session-a",
+      body: {
+        model: "openai/gpt-5.3-codex",
+        input: "hello",
+      },
+      model: "openai/gpt-5.3-codex",
+    });
+
+    expect(response.status).toBe(200);
+    expect(upstreamHeaders.get("originator")).toBe("codex_chatgpt_desktop");
+    expect(upstreamHeaders.get("user-agent")).toBe("codex_cli_rs/0.0.0");
+    expect(upstreamHeaders.has("x-stainless-package-version")).toBe(false);
+  });
+
   it("normalizes common Responses compatibility aliases before proxying", async () => {
     let upstreamBody: Record<string, unknown> = {};
     const store = new MemoryAccountStore();
@@ -238,6 +354,55 @@ describe("createCodexChatGPTProvider", () => {
     expect(upstreamBody.user).toBeUndefined();
     expect(upstreamBody.promptCacheKey).toBeUndefined();
     expect(upstreamBody.textVerbosity).toBeUndefined();
+  });
+
+  it("rewrites fast model aliases to priority service tier", async () => {
+    let upstreamBody: Record<string, unknown> = {};
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+      },
+    });
+
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      fetch: async (_input, init) => {
+        upstreamBody = JSON.parse(String(init?.body));
+        return new Response(JSON.stringify({ id: "resp_test" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    const response = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/v1/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "openai/gpt-5.5-fast",
+          input: "hello",
+        }),
+      }),
+      route: "/v1/responses",
+      sessionKey: "session-a",
+      body: {
+        model: "openai/gpt-5.5-fast",
+        input: "hello",
+      },
+      model: "openai/gpt-5.5-fast",
+    });
+
+    expect(response.status).toBe(200);
+    expect(upstreamBody).toMatchObject({
+      model: "gpt-5.5",
+      service_tier: "priority",
+    });
   });
 
   it("maps Chat Completions response_format and tool choice like codex-lb", async () => {
@@ -1684,14 +1849,17 @@ describe("createCodexChatGPTProvider", () => {
       fetch: async (_input, init) => {
         upstreamBody = JSON.parse(String(init?.body));
         return new Response(
-          JSON.stringify({
-            id: "resp_test",
-            output_text: "hello from responses",
-            usage: { input_tokens: 5, output_tokens: 3 },
-          }),
+          [
+            "event: response.output_text.delta",
+            'data: {"type":"response.output_text.delta","delta":"hello from responses"}',
+            "",
+            "event: response.completed",
+            'data: {"type":"response.completed","response":{"id":"resp_test","status":"completed","usage":{"input_tokens":5,"output_tokens":3}}}',
+            "",
+          ].join("\n"),
           {
             status: 200,
-            headers: { "content-type": "application/json" },
+            headers: { "content-type": "text/event-stream" },
           },
         );
       },
@@ -1742,6 +1910,7 @@ describe("createCodexChatGPTProvider", () => {
       model: "gpt-5.3-codex",
       instructions: "You are a helpful assistant.",
       store: false,
+      stream: true,
       input: [{ role: "user", content: [{ type: "input_text", text: "hello" }] }],
       tools: [
         {
@@ -1909,6 +2078,64 @@ describe("createCodexChatGPTProvider", () => {
     ]);
     expect(frames.at(-1)).toBe("[DONE]");
   });
+
+  it("proxies native Codex WebSocket requests with Responses beta headers", async () => {
+    let upstreamUrl = "";
+    let upstreamHeaders: Record<string, string> = {};
+    let upstreamSocket: FakeUpstreamWebSocket | undefined;
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+        accountId: "acct_test",
+      },
+    });
+
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      webSocketFactory: (url, _protocols, init) => {
+        upstreamUrl = url;
+        upstreamHeaders = init.headers;
+        upstreamSocket = new FakeUpstreamWebSocket();
+        queueMicrotask(() => upstreamSocket?.emit("open", {}));
+        return upstreamSocket;
+      },
+    });
+    const downstream = new FakeGatewayWebSocket([
+      { type: "text", data: '{"type":"response.create"}' },
+      { type: "close", code: 1000, reason: "done" },
+    ]);
+
+    await provider.handleWebSocket?.({
+      request: new Request("http://127.0.0.1:2021/backend-api/codex/responses", {
+        headers: {
+          "sec-websocket-key": "client-key",
+          "sec-websocket-version": "13",
+          originator: "codex_vscode",
+          "user-agent": "codex_vscode/0.0.0",
+          "x-codex-turn-state": "turn-test",
+        },
+      }),
+      route: "/backend-api/codex/responses",
+      sessionKey: "session-a",
+      websocket: downstream,
+    });
+
+    expect(upstreamUrl).toBe("wss://chatgpt.com/backend-api/codex/responses");
+    expect(downstream.acceptedHeaders.get("x-codex-turn-state")).toBe("turn-test");
+    expect(upstreamHeaders.authorization).toBe("Bearer access-test");
+    expect(upstreamHeaders["chatgpt-account-id"]).toBe("acct_test");
+    expect(upstreamHeaders.originator).toBe("codex_vscode");
+    expect(upstreamHeaders["user-agent"]).toBe("codex_vscode/0.0.0");
+    expect(upstreamHeaders["openai-beta"]).toBe("responses_websockets=2026-02-06");
+    expect(upstreamHeaders["sec-websocket-key"]).toBeUndefined();
+    expect(upstreamSocket?.sent).toEqual(['{"type":"response.create"}']);
+    expect(upstreamSocket?.closed).toEqual({ code: 1000, reason: "done" });
+  });
 });
 
 function parseSseData(value: string): string[] {
@@ -1917,4 +2144,58 @@ function parseSseData(value: string): string[] {
     .map((frame) => frame.trim())
     .filter(Boolean)
     .map((frame) => frame.replace(/^data:\s*/, ""));
+}
+
+class FakeGatewayWebSocket {
+  acceptedHeaders = new Headers();
+  sentText: string[] = [];
+  sentBinary: Uint8Array[] = [];
+  closed: { code?: number; reason?: string } | undefined;
+
+  constructor(private readonly messages: GatewayWebSocketMessage[]) {}
+
+  async accept(headers?: HeadersInit): Promise<void> {
+    this.acceptedHeaders = new Headers(headers);
+  }
+
+  async receive(): Promise<GatewayWebSocketMessage> {
+    return this.messages.shift() ?? { type: "close" };
+  }
+
+  async sendText(data: string): Promise<void> {
+    this.sentText.push(data);
+  }
+
+  async sendBinary(data: Uint8Array): Promise<void> {
+    this.sentBinary.push(data);
+  }
+
+  async close(code?: number, reason?: string): Promise<void> {
+    this.closed = { code, reason };
+  }
+}
+
+class FakeUpstreamWebSocket {
+  readyState = 0;
+  binaryType = "";
+  sent: Array<string | Uint8Array | ArrayBuffer | Buffer> = [];
+  closed: { code?: number; reason?: string } | undefined;
+  private readonly listeners = new Map<string, Array<(event: unknown) => void>>();
+
+  send(data: string | Uint8Array | ArrayBuffer | Buffer): void {
+    this.sent.push(data);
+  }
+
+  close(code?: number, reason?: string): void {
+    this.closed = { code, reason };
+  }
+
+  addEventListener(type: "open" | "message" | "error" | "close", listener: (event: unknown) => void): void {
+    this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+  }
+
+  emit(type: "open" | "message" | "error" | "close", event: unknown): void {
+    if (type === "open") this.readyState = 1;
+    for (const listener of this.listeners.get(type) ?? []) listener(event);
+  }
 }

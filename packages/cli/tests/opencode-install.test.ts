@@ -8,19 +8,21 @@ describe("installOpenCode", () => {
   it("previews OpenCode provider config without writing in dry-run mode", async () => {
     const root = join(tmpdir(), `kyoli-opencode-install-${Date.now()}-dry`);
     const configDir = join(root, "opencode");
+    const env = createOpenCodeTestEnv(root);
     const fetchImpl = createModelsFetch();
 
     const result = await installOpenCode(
       { host: "127.0.0.1", port: 2021 },
-      { configDir, dryRun: true, fetch: fetchImpl },
+      { configDir, dryRun: true, fetch: fetchImpl, env },
     );
 
     expect(result.dryRun).toBe(true);
     expect(result.changed).toBe(true);
     expect(result.modelSource).toBe("gateway");
+    expect(result.authChanged).toBe(true);
     expect(result.providers).toEqual([
       { id: "openai", baseURL: "http://127.0.0.1:2021/v1", modelCount: 1 },
-      { id: "anthropic", baseURL: "http://127.0.0.1:2021", modelCount: 1 },
+      { id: "anthropic", baseURL: "http://127.0.0.1:2021/v1", modelCount: 1 },
     ]);
     await expect(stat(join(configDir, "opencode.json"))).rejects.toMatchObject({ code: "ENOENT" });
   });
@@ -28,8 +30,11 @@ describe("installOpenCode", () => {
   it("writes OpenCode config and backs up existing files", async () => {
     const root = join(tmpdir(), `kyoli-opencode-install-${Date.now()}-write`);
     const configDir = join(root, "opencode");
+    const env = createOpenCodeTestEnv(root);
     const configPath = join(configDir, "opencode.json");
+    const authPath = join(root, "data", "opencode", "auth.json");
     await mkdir(configDir, { recursive: true });
+    await mkdir(join(root, "data", "opencode"), { recursive: true });
     await writeFile(
       configPath,
       JSON.stringify({
@@ -43,29 +48,42 @@ describe("installOpenCode", () => {
         },
       }),
     );
+    await writeFile(
+      authPath,
+      JSON.stringify({
+        openai: { type: "oauth", access: "access-test", refresh: "refresh-test" },
+        anthropic: { type: "oauth", access: "anthropic-test", refresh: "anthropic-refresh" },
+      }),
+    );
 
     const result = await installOpenCode(
       { host: "127.0.0.1", port: 2021 },
-      { configDir, fetch: createModelsFetch() },
+      { configDir, fetch: createModelsFetch(), env },
     );
     const written = JSON.parse(await readFile(configPath, "utf8")) as Record<string, any>;
+    const writtenAuth = JSON.parse(await readFile(authPath, "utf8")) as Record<string, any>;
 
     expect(result.backupPath).toBeTruthy();
+    expect(result.authBackupPath).toBeTruthy();
     expect(written.provider.openai.options.baseURL).toBe("http://127.0.0.1:2021/v1");
     expect(written.provider.openai.options.apiKey).toBe("existing");
     expect(written.provider.openai.models["gpt-5.3-codex"].name).toBe("User custom model");
-    expect(written.provider.anthropic.options.baseURL).toBe("http://127.0.0.1:2021");
+    expect(written.provider.anthropic.options.baseURL).toBe("http://127.0.0.1:2021/v1");
     expect(written.provider.anthropic.models["claude-sonnet-4-5"].name).toContain("via kyoli-gam");
+    expect(writtenAuth.openai).toEqual({ type: "api", key: "kyoli-local" });
+    expect(writtenAuth.anthropic.type).toBe("oauth");
     expect(result.warnings.some((warning) => warning.includes("preserved existing model config"))).toBe(true);
+    expect(result.warnings.some((warning) => warning.includes("OpenCode auth.openai OAuth"))).toBe(true);
   });
 
   it("can skip model generation", async () => {
     const root = join(tmpdir(), `kyoli-opencode-install-${Date.now()}-nomodels`);
     const configDir = join(root, "opencode");
+    const env = createOpenCodeTestEnv(root);
 
     const result = await installOpenCode(
       { host: "127.0.0.1", port: 2021 },
-      { configDir, includeModels: false },
+      { configDir, includeModels: false, env },
     );
 
     expect(result.modelSource).toBe("none");
@@ -76,14 +94,15 @@ describe("installOpenCode", () => {
   it("keeps the default OpenCode model list focused unless all models are requested", async () => {
     const root = join(tmpdir(), `kyoli-opencode-install-${Date.now()}-all-models`);
     const configDir = join(root, "opencode");
+    const env = createOpenCodeTestEnv(root);
 
     const defaultResult = await installOpenCode(
       { host: "127.0.0.1", port: 2021 },
-      { configDir, dryRun: true, fetch: createModelsFetch({ includeSecondCodex: true }) },
+      { configDir, dryRun: true, fetch: createModelsFetch({ includeSecondCodex: true }), env },
     );
     const allResult = await installOpenCode(
       { host: "127.0.0.1", port: 2021 },
-      { configDir, dryRun: true, allModels: true, fetch: createModelsFetch({ includeSecondCodex: true }) },
+      { configDir, dryRun: true, allModels: true, fetch: createModelsFetch({ includeSecondCodex: true }), env },
     );
 
     expect(defaultResult.providers.find((provider) => provider.id === "openai")?.modelCount).toBe(1);
@@ -93,6 +112,7 @@ describe("installOpenCode", () => {
   it("can preserve an existing OpenAI provider while installing Anthropic", async () => {
     const root = join(tmpdir(), `kyoli-opencode-install-${Date.now()}-preserve`);
     const configDir = join(root, "opencode");
+    const env = createOpenCodeTestEnv(root);
     const configPath = join(configDir, "opencode.json");
     await mkdir(configDir, { recursive: true });
     await writeFile(
@@ -109,13 +129,15 @@ describe("installOpenCode", () => {
 
     const result = await installOpenCode(
       { host: "127.0.0.1", port: 2021 },
-      { configDir, preserveOpenAI: true, fetch: createModelsFetch() },
+      { configDir, preserveOpenAI: true, fetch: createModelsFetch(), env },
     );
     const written = JSON.parse(await readFile(configPath, "utf8")) as Record<string, any>;
 
     expect(written.provider.openai.options.baseURL).toBe("https://api.openai.com/v1");
-    expect(written.provider.anthropic.options.baseURL).toBe("http://127.0.0.1:2021");
+    expect(written.provider.anthropic.options.baseURL).toBe("http://127.0.0.1:2021/v1");
+    expect(result.authChanged).toBe(false);
     expect(result.warnings.some((warning) => warning.includes("Preserved existing provider.openai"))).toBe(true);
+    expect(result.warnings.some((warning) => warning.includes("Preserved existing OpenCode auth.openai"))).toBe(true);
   });
 
   it("restores the latest OpenCode backup", async () => {
@@ -194,4 +216,10 @@ function createModelsFetch(options: { includeSecondCodex?: boolean } = {}): type
       data,
     });
   }) as typeof fetch;
+}
+
+function createOpenCodeTestEnv(root: string): NodeJS.ProcessEnv {
+  return {
+    XDG_DATA_HOME: join(root, "data"),
+  };
 }

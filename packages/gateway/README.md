@@ -11,9 +11,11 @@ admin routes backed by the kyoli SQLite account pool.
 |---|---|---|
 | `GET /health` | local | Gateway health check |
 | `GET /v1/models` | local registry | `models.dev` backed model list |
+| `GET /backend-api/codex/models` | local registry | Codex CLI model catalog shape |
 | `POST /v1/responses` | Codex OAuth pool | Preferred OpenCode Server Mode path for Codex |
 | `POST /v1/chat/completions` | Codex OAuth pool | Generic OpenAI-compatible bridge |
 | `POST /backend-api/codex/responses` | Codex OAuth pool | Native Codex backend path |
+| `WS /backend-api/codex/responses` | Codex OAuth pool | Native Codex Responses WebSocket relay |
 | `POST /backend-api/files` | Codex OAuth pool | Codex file upload URL creation |
 | `POST /backend-api/files/{file_id}/uploaded` | Codex OAuth pool | Codex file finalize |
 | `POST /v1/messages` | Claude Code OAuth pool | Live generation is opt-in |

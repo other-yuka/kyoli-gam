@@ -54,6 +54,9 @@ export interface OpenCodeRestoreResult {
 export interface OpenCodeInstallResult {
   configPath: string;
   backupPath?: string;
+  authPath?: string;
+  authBackupPath?: string;
+  authChanged: boolean;
   dryRun: boolean;
   existed: boolean;
   changed: boolean;
@@ -85,10 +88,14 @@ export async function installOpenCode(
   const includeModels = options.includeModels !== false;
   const configPath = resolveOpenCodeConfigPath(options);
   const baseUrl = normalizeServerBaseUrl(config);
+  const providerBaseUrl = `${baseUrl}/v1`;
   const existing = await readOpenCodeConfig(configPath);
   const warnings: string[] = [];
   const nextConfig = cloneRecord(existing.config);
   const providers: OpenCodeInstallResult["providers"] = [];
+  let authPath: string | undefined;
+  let authBackupPath: string | undefined;
+  let authChanged = false;
 
   let modelSource: OpenCodeInstallResult["modelSource"] = "none";
   let models: OpenCodeModelInfo[] = [];
@@ -111,7 +118,7 @@ export async function installOpenCode(
     });
   } else {
     const openaiProvider = patchProvider(nextConfig, "openai", {
-      baseURL: `${baseUrl}/v1`,
+      baseURL: providerBaseUrl,
       npm: "@ai-sdk/openai",
       models: grouped.openai,
       force: Boolean(options.force),
@@ -120,12 +127,21 @@ export async function installOpenCode(
     providers.push({
       id: "openai",
       modelCount: openaiProvider.modelCount,
-      baseURL: `${baseUrl}/v1`,
+      baseURL: providerBaseUrl,
     });
   }
 
+  if (!options.preserveOpenAI) {
+    const auth = await installOpenCodeOpenAIAuth(options, warnings);
+    authPath = auth.authPath;
+    authBackupPath = auth.authBackupPath;
+    authChanged = auth.changed;
+  } else {
+    warnings.push("Preserved existing OpenCode auth.openai credentials; OpenAI OAuth may bypass kyoli.");
+  }
+
   const anthropicProvider = patchProvider(nextConfig, "anthropic", {
-    baseURL: baseUrl,
+    baseURL: providerBaseUrl,
     npm: "@ai-sdk/anthropic",
     models: grouped.anthropic,
     force: Boolean(options.force),
@@ -134,7 +150,7 @@ export async function installOpenCode(
   providers.push({
     id: "anthropic",
     modelCount: anthropicProvider.modelCount,
-    baseURL: baseUrl,
+    baseURL: providerBaseUrl,
   });
 
   const changed = JSON.stringify(existing.config) !== JSON.stringify(nextConfig);
@@ -152,6 +168,9 @@ export async function installOpenCode(
   return {
     configPath,
     backupPath,
+    authPath,
+    authBackupPath,
+    authChanged,
     dryRun: Boolean(options.dryRun),
     existed: existing.existed,
     changed,
@@ -211,12 +230,17 @@ export async function runInstalledOpenCode(
   try {
     await mkdir(projectDir, { recursive: true });
     await mkdir(join(dataHome, "opencode"), { recursive: true });
+    const installEnv = {
+      ...(options.env ?? {}),
+      XDG_DATA_HOME: dataHome,
+    };
     const install = await installOpenCode(config, {
       ...options,
       configDir,
       dryRun: false,
       force: true,
       includeModels: options.includeModels !== false,
+      env: installEnv,
     });
     const model = options.model ?? selectRunnableOpenCodeModel(install.config);
     if (!model) {
@@ -296,6 +320,12 @@ function resolveOpenCodeConfigPath(options: OpenCodeInstallOptions): string {
   return join(expandPath(configDir), "opencode.json");
 }
 
+function resolveOpenCodeAuthPath(options: OpenCodeInstallOptions): string {
+  const env = options.env ?? process.env;
+  const dataDir = env.XDG_DATA_HOME ?? join(homedir(), ".local", "share");
+  return join(expandPath(dataDir), "opencode", "auth.json");
+}
+
 function normalizeServerBaseUrl(config: CliConfig): string {
   const host = config.host ?? "127.0.0.1";
   const port = config.port ?? 2021;
@@ -314,6 +344,65 @@ async function readOpenCodeConfig(path: string): Promise<{
     return { existed: true, config: parsed };
   } catch (error) {
     if (isFileMissingError(error)) return { existed: false, config: {} };
+    throw error;
+  }
+}
+
+async function installOpenCodeOpenAIAuth(
+  options: OpenCodeInstallOptions,
+  warnings: string[],
+): Promise<{
+  authPath: string;
+  authBackupPath?: string;
+  changed: boolean;
+}> {
+  const authPath = resolveOpenCodeAuthPath(options);
+  const existing = await readJsonRecordFile(authPath);
+  const next = cloneRecord(existing.record);
+  const currentOpenAI = isRecord(next.openai) ? next.openai : undefined;
+  const changed = !(
+    currentOpenAI?.type === "api" &&
+    currentOpenAI?.key === KYOLI_LOCAL_API_KEY
+  );
+
+  if (!changed) return { authPath, changed: false };
+
+  if (currentOpenAI?.type === "oauth") {
+    warnings.push(
+      "OpenCode auth.openai OAuth will be replaced with kyoli-local API auth so built-in OpenAI requests go through kyoli.",
+    );
+  }
+
+  next.openai = {
+    type: "api",
+    key: KYOLI_LOCAL_API_KEY,
+  };
+
+  let authBackupPath: string | undefined;
+  if (!options.dryRun) {
+    await mkdir(dirname(authPath), { recursive: true });
+    if (existing.existed) {
+      authBackupPath = `${authPath}.bak-${formatTimestamp(new Date())}`;
+      await copyFile(authPath, authBackupPath);
+    }
+    await writeFile(authPath, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+  }
+
+  return { authPath, authBackupPath, changed: true };
+}
+
+async function readJsonRecordFile(path: string): Promise<{
+  existed: boolean;
+  record: Record<string, unknown>;
+}> {
+  try {
+    const parsed = JSON.parse(await readFile(path, "utf8")) as unknown;
+    if (!isRecord(parsed)) {
+      throw new Error(`JSON file must be an object: ${path}`);
+    }
+    return { existed: true, record: parsed };
+  } catch (error) {
+    if (isFileMissingError(error)) return { existed: false, record: {} };
     throw error;
   }
 }

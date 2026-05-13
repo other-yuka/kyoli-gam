@@ -4,6 +4,8 @@ import type {
   AccountUpdateInput,
   GatewayConfig,
   GatewayRoute,
+  GatewayWebSocket,
+  ModelInfo,
   ProviderAdapter,
   ProviderId,
   RequestLogStore,
@@ -11,6 +13,7 @@ import type {
   StickySessionRegistry,
 } from "@kyoli-gam/core";
 import { createServer, type IncomingHttpHeaders } from "node:http";
+import type { Socket } from "node:net";
 import { Readable } from "node:stream";
 import {
   createDefaultGatewayConfig,
@@ -31,6 +34,12 @@ import {
   ModelsDevRegistrySource,
   toOpenAIModelList,
 } from "@kyoli-gam/model-registry";
+import {
+  createUpgradeRequest,
+  NodeGatewayWebSocket,
+  WebSocketUpgradeError,
+  writeUpgradeError,
+} from "./websocket";
 
 export interface GatewayOptions {
   config?: Partial<GatewayConfig>;
@@ -48,6 +57,7 @@ export interface GatewayOptions {
 export interface Gateway {
   readonly config: GatewayConfig;
   fetch(request: Request): Promise<Response>;
+  handleWebSocket(request: Request, websocket: GatewayWebSocket): Promise<void>;
 }
 
 export interface GatewayServer {
@@ -63,6 +73,7 @@ const routeByPath = new Map<string, GatewayRoute>([
   ["/v1/chat/completions", "/v1/chat/completions"],
   ["/v1/messages", "/v1/messages"],
   ["/v1/messages/count_tokens", "/v1/messages/count_tokens"],
+  ["/backend-api/codex/models", "/backend-api/codex/models"],
   ["/backend-api/codex/responses", "/backend-api/codex/responses"],
   ["/backend-api/codex/responses/compact", "/backend-api/codex/responses/compact"],
   ["/backend-api/files", "/backend-api/files"],
@@ -126,6 +137,15 @@ export function createGateway(options: GatewayOptions): Gateway {
         return jsonResponse(toOpenAIModelList(models));
       }
 
+      if (route === "/backend-api/codex/models") {
+        const models = await registry.listModels();
+        return jsonResponse({
+          models: models
+            .filter((model) => model.provider === "codex")
+            .map(toCodexCliModelEntry),
+        });
+      }
+
       const upstreamRequest = request.clone();
       const body = await readJsonBody(request);
       const model = readModel(body);
@@ -172,6 +192,40 @@ export function createGateway(options: GatewayOptions): Gateway {
           sessionKey,
           body,
           model,
+        });
+      } finally {
+        releaseAdmission();
+      }
+    },
+    async handleWebSocket(request, websocket) {
+      const url = new URL(request.url);
+      const route = resolveRoute(url.pathname);
+      if (!route) {
+        throw new WebSocketUpgradeError(404, `No WebSocket route registered for ${url.pathname}.`);
+      }
+
+      const provider = await resolveProvider(registry, route, undefined);
+      if (!provider) {
+        throw new WebSocketUpgradeError(400, `No provider resolved for ${route}.`);
+      }
+      if (!provider.routes.includes(route) || !provider.handleWebSocket) {
+        throw new WebSocketUpgradeError(501, `${provider.id} does not support WebSocket ${route}.`);
+      }
+
+      const releaseAdmission = localAdmission.acquire();
+      if (!releaseAdmission) {
+        throw new WebSocketUpgradeError(429, "kyoli-gam is temporarily overloaded.");
+      }
+
+      try {
+        await provider.handleWebSocket({
+          request,
+          route,
+          sessionKey: createSessionKey({
+            headers: request.headers,
+            apiKeyFingerprint: readAuthFingerprint(request.headers),
+          }),
+          websocket,
         });
       } finally {
         releaseAdmission();
@@ -545,6 +599,30 @@ export async function serveGateway(options: GatewayOptions): Promise<GatewayServ
       }));
     }
   });
+  server.on("upgrade", async (request, socket, head) => {
+    const networkSocket = socket as Socket;
+    const websocket = new NodeGatewayWebSocket(
+      networkSocket,
+      head,
+      Array.isArray(request.headers["sec-websocket-key"])
+        ? request.headers["sec-websocket-key"][0]
+        : request.headers["sec-websocket-key"],
+    );
+
+    try {
+      await gateway.handleWebSocket(createUpgradeRequest(request), websocket);
+    } catch (error) {
+      if (websocket.accepted) {
+        await websocket.close(
+          1011,
+          error instanceof Error ? error.message : "WebSocket handling failed.",
+        );
+        return;
+      }
+      const status = error instanceof WebSocketUpgradeError ? error.status : 500;
+      writeUpgradeError(networkSocket, status, error instanceof Error ? error.message : "WebSocket upgrade failed.");
+    }
+  });
 
   server.requestTimeout = (options.idleTimeoutSeconds ?? 255) * 1000;
   server.keepAliveTimeout = (options.idleTimeoutSeconds ?? 255) * 1000;
@@ -703,12 +781,43 @@ function resolveRoute(pathname: string): GatewayRoute | undefined {
       : undefined);
 }
 
+function toCodexCliModelEntry(model: ModelInfo): Record<string, unknown> {
+  const contextWindow = model.upstreamId.includes("gpt-5.4") ? 1_050_000 : 272_000;
+  return {
+    slug: model.upstreamId,
+    display_name: model.displayName ?? model.upstreamId,
+    description: model.displayName ?? model.upstreamId,
+    default_reasoning_level: "medium",
+    supported_reasoning_levels: [
+      { effort: "low", description: "Fast responses with lighter reasoning" },
+      { effort: "medium", description: "Balanced reasoning" },
+      { effort: "high", description: "Deeper reasoning" },
+      { effort: "xhigh", description: "Extra deep reasoning" },
+    ],
+    supported_in_api: true,
+    supports_reasoning_summaries: model.capabilities.includes("reasoning"),
+    support_verbosity: true,
+    default_verbosity: "medium",
+    supports_parallel_tool_calls: model.capabilities.includes("tools"),
+    context_window: contextWindow,
+    max_context_window: contextWindow,
+    input_modalities: ["text", "image"],
+    available_in_plans: ["plus", "pro"],
+    prefer_websockets: true,
+    visibility: "list",
+  };
+}
+
 async function resolveProvider(
   registry: ModelRegistry,
   route: GatewayRoute,
   model: string | undefined,
 ): Promise<ProviderAdapter | undefined> {
-  if (route === "/backend-api/codex/responses" || route === "/backend-api/codex/responses/compact") {
+  if (
+    route === "/backend-api/codex/models" ||
+    route === "/backend-api/codex/responses" ||
+    route === "/backend-api/codex/responses/compact"
+  ) {
     return registry.getAdapter("codex");
   }
   if (route === "/backend-api/files" || route === "/backend-api/files/uploaded") {

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type {
   GatewayRequestContext,
   GatewayRoute,
+  GatewayWebSocketContext,
   ModelInfo,
   ProviderAdapter,
   ProviderId,
@@ -450,6 +451,77 @@ describe("gateway routing", () => {
     expect(payload.data.some((model) => model.id === "openai/test-codex")).toBe(true);
   });
 
+  it("serves native Codex CLI model catalog shape", async () => {
+    const codex = fakeProvider({
+      id: "codex",
+      routes: ["/backend-api/codex/responses"],
+      models: [
+        {
+          id: "openai/test-codex",
+          provider: "codex",
+          upstreamId: "test-codex",
+          displayName: "Test Codex",
+          capabilities: ["responses", "tools", "reasoning", "codex"],
+          aliases: ["test-codex"],
+        },
+      ],
+    });
+
+    const gateway = createGateway({
+      accounts: new MemoryAccountStore(),
+      providers: [codex],
+    });
+
+    const response = await gateway.fetch(
+      new Request("http://127.0.0.1:2021/backend-api/codex/models"),
+    );
+    const payload = (await response.json()) as {
+      models: Array<Record<string, unknown>>;
+    };
+
+    expect(response.status).toBe(200);
+    expect(payload.models.find((model) => model.slug === "test-codex")).toMatchObject({
+      slug: "test-codex",
+      display_name: "Test Codex",
+      supported_in_api: true,
+      supports_parallel_tool_calls: true,
+      supports_reasoning_summaries: true,
+      prefer_websockets: true,
+      visibility: "list",
+    });
+  });
+
+  it("routes native Codex WebSocket upgrades to the Codex adapter", async () => {
+    let seenContext: GatewayWebSocketContext | undefined;
+    const codex = fakeProvider({
+      id: "codex",
+      routes: ["/backend-api/codex/responses"],
+      models: [],
+      handleWebSocket: async (context) => {
+        seenContext = context;
+        await context.websocket.accept();
+        await context.websocket.close();
+      },
+    });
+
+    const gateway = createGateway({
+      accounts: new MemoryAccountStore(),
+      providers: [codex],
+    });
+
+    const websocket = fakeWebSocket();
+    await gateway.handleWebSocket(
+      new Request("http://127.0.0.1:2021/backend-api/codex/responses", {
+        headers: { "x-codex-session-id": "codex-ws-thread" },
+      }),
+      websocket,
+    );
+
+    expect(websocket.accepted).toBe(true);
+    expect(seenContext?.route).toBe("/backend-api/codex/responses");
+    expect(seenContext?.sessionKey).toBe("header:codex-ws-thread");
+  });
+
   it("rejects provider requests when local concurrency is saturated", async () => {
     let releaseFirstRequest: (() => void) | undefined;
     const firstRequestStarted = deferred<void>();
@@ -519,6 +591,7 @@ function fakeProvider(input: {
   routes: GatewayRoute[];
   models: ModelInfo[];
   handle?: (context: GatewayRequestContext) => Promise<Response>;
+  handleWebSocket?: (context: GatewayWebSocketContext) => Promise<void>;
 }): ProviderAdapter {
   return {
     id: input.id,
@@ -528,5 +601,27 @@ function fakeProvider(input: {
     handleRequest:
       input.handle ??
       (async () => Response.json({ provider: input.id })),
+    handleWebSocket: input.handleWebSocket,
+  };
+}
+
+function fakeWebSocket() {
+  return {
+    accepted: false,
+    async accept() {
+      this.accepted = true;
+    },
+    async receive() {
+      return { type: "close" as const };
+    },
+    async sendText() {
+      return undefined;
+    },
+    async sendBinary() {
+      return undefined;
+    },
+    async close() {
+      return undefined;
+    },
   };
 }

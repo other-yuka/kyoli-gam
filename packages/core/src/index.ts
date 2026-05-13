@@ -9,6 +9,7 @@ export type GatewayRoute =
   | "/v1/chat/completions"
   | "/v1/messages"
   | "/v1/messages/count_tokens"
+  | "/backend-api/codex/models"
   | "/backend-api/codex/responses"
   | "/backend-api/codex/responses/compact"
   | "/backend-api/files"
@@ -41,12 +42,34 @@ export interface GatewayRequestContext {
   model?: string;
 }
 
+export type GatewayWebSocketMessage =
+  | { type: "text"; data: string }
+  | { type: "binary"; data: Uint8Array }
+  | { type: "close"; code?: number; reason?: string };
+
+export interface GatewayWebSocket {
+  accept(headers?: HeadersInit): Promise<void>;
+  receive(): Promise<GatewayWebSocketMessage>;
+  sendText(data: string): Promise<void>;
+  sendBinary(data: Uint8Array): Promise<void>;
+  close(code?: number, reason?: string): Promise<void>;
+}
+
+export interface GatewayWebSocketContext {
+  request: Request;
+  route: GatewayRoute;
+  sessionKey: string;
+  model?: string;
+  websocket: GatewayWebSocket;
+}
+
 export interface ProviderAdapter {
   id: ProviderId;
   displayName: string;
   routes: GatewayRoute[];
   listModels(): Promise<ModelInfo[]>;
   handleRequest(context: GatewayRequestContext): Promise<Response>;
+  handleWebSocket?(context: GatewayWebSocketContext): Promise<void>;
 }
 
 export interface GatewayConfig {

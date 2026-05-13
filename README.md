@@ -47,16 +47,22 @@ pnpm --dir packages/cli login codex --manual
 # 3. Start the local gateway
 pnpm --dir packages/cli serve
 
-# 4. Point OpenCode at kyoli
+# 4. Point clients at kyoli
+pnpm --dir packages/cli install codex --dry-run
+pnpm --dir packages/cli install codex
 pnpm --dir packages/cli install opencode --dry-run
 pnpm --dir packages/cli install opencode
 
-# 5. Check the OpenCode path without touching your real config
+# 5. Check the installed paths
+pnpm --dir packages/cli doctor codex --e2e
+pnpm --dir packages/cli doctor codex --websocket
 pnpm --dir packages/cli doctor opencode --run
 ```
 
 The gateway listens on `http://127.0.0.1:2021` by default. OpenCode keeps using its
 built-in provider names: `openai/<codex-model>` and `anthropic/<claude-model>`.
+Codex CLI uses a dedicated `model_provider = "kyoli"` entry instead of a global
+`chatgpt_base_url` override and enables Codex Responses WebSocket transport.
 
 ### OpenCode Plugin Mode
 
@@ -87,7 +93,7 @@ do not launch `kyoli serve`.
 
 | Mode | Entry point | Account store | Best for |
 |---|---|---|---|
-| **Server Mode** | `kyoli serve` + `kyoli install opencode` | SQLite under kyoli config | OpenCode, Codex CLI, SDK clients, dashboard |
+| **Server Mode** | `kyoli serve` + `kyoli install codex/opencode` | SQLite under kyoli config | OpenCode, Codex CLI, SDK clients, dashboard |
 | **OpenCode Plugin Mode** | `opencode-*-multi-account` plugins | OpenCode plugin JSON files | OpenCode-only, no server/process |
 
 Do not enable both modes for the same provider unless you are intentionally comparing
@@ -103,12 +109,13 @@ Kyoli sits between coding tools and provider OAuth sessions.
 | Client path | Model/provider shape | Kyoli route | Notes |
 |---|---|---|---|
 | OpenCode built-in OpenAI provider | `openai/gpt-5.3-codex` | `/v1/responses` | Preferred OpenCode server-mode path for Codex |
-| Codex CLI | native Codex backend | `/backend-api/codex/responses` | Codex CLI can point `chatgpt_base_url` at kyoli |
+| Codex CLI | custom `model_provider` | `/backend-api/codex/responses` | Native HTTP + WebSocket Responses path |
 | OpenAI-compatible clients | `/v1/responses`, `/v1/chat/completions` | Codex OAuth pool | Chat Completions is a compatibility bridge |
 | Anthropic-compatible clients | `/v1/messages`, `/v1/messages/count_tokens` | Claude Code OAuth pool | Live generation is opt-in in server mode |
 | OpenCode plugins | OpenCode auth/fetch hooks | Provider APIs directly | No kyoli HTTP server |
 
-Routing is sticky by default so prompt-cache-heavy sessions stay on the same account.
+Routing is round-robin by default when a new session key is created, then sticky
+within that session so prompt-cache-heavy conversations stay on the same account.
 When an account is rate-limited, disabled, or needs re-authentication, kyoli can rotate to
 another usable account and records the account state for later inspection.
 
@@ -207,7 +214,7 @@ Default config:
   "host": "127.0.0.1",
   "port": 2021,
   "databasePath": "~/.local/share/kyoli-gam/kyoli.db",
-  "accountSelectionStrategy": "weighted",
+  "accountSelectionStrategy": "round-robin",
   "softQuotaThresholdPercent": 90,
   "planWeights": {
     "max": 3,
