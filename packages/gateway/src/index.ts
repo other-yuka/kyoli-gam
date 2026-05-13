@@ -68,6 +68,11 @@ export interface GatewayServer {
 
 const routeByPath = new Map<string, GatewayRoute>([
   ["/v1/models", "/v1/models"],
+  ["/v1/usage", "/v1/usage"],
+  ["/v1/audio/transcriptions", "/v1/audio/transcriptions"],
+  ["/v1/images/generations", "/v1/images/generations"],
+  ["/v1/images/edits", "/v1/images/edits"],
+  ["/v1/images/variations", "/v1/images/variations"],
   ["/v1/responses", "/v1/responses"],
   ["/v1/responses/compact", "/v1/responses/compact"],
   ["/v1/chat/completions", "/v1/chat/completions"],
@@ -77,6 +82,8 @@ const routeByPath = new Map<string, GatewayRoute>([
   ["/backend-api/codex/responses", "/backend-api/codex/responses"],
   ["/backend-api/codex/responses/compact", "/backend-api/codex/responses/compact"],
   ["/backend-api/files", "/backend-api/files"],
+  ["/backend-api/transcribe", "/backend-api/transcribe"],
+  ["/api/codex/usage", "/api/codex/usage"],
 ]);
 
 const DEFAULT_MAX_BODY_BYTES = 10 * 1024 * 1024;
@@ -144,6 +151,10 @@ export function createGateway(options: GatewayOptions): Gateway {
             .filter((model) => model.provider === "codex")
             .map(toCodexCliModelEntry),
         });
+      }
+
+      if (route === "/api/codex/usage" || route === "/v1/usage") {
+        return jsonResponse(createCodexUsageResponse(await accounts.listByProvider("codex")));
       }
 
       const upstreamRequest = request.clone();
@@ -531,6 +542,101 @@ function toPublicAccountStatusSummary(row: ReturnType<typeof summarizeAccountSta
   };
 }
 
+function createCodexUsageResponse(records: Awaited<ReturnType<AccountStore["listByProvider"]>>) {
+  const readyAccounts = records.filter(
+    (account) =>
+      account.enabled &&
+      !account.reauthRequiredReason &&
+      !(account.rateLimitResetAt && new Date(account.rateLimitResetAt).getTime() > Date.now()),
+  );
+  const summaries = readyAccounts
+    .map((account) => readRecord(account.metadata.cachedUsage) ?? readRecord(account.metadata.usage))
+    .filter((usage): usage is Record<string, unknown> => Boolean(usage));
+
+  return {
+    object: "codex.usage",
+    plan_type: readMostCommonPlan(records),
+    rate_limit: summarizeUsageWindow(summaries, "five_hour") ??
+      summarizeUsageWindow(summaries, "seven_day"),
+    credits: summarizeCredits(summaries),
+    additional_rate_limits: [
+      createUsageWindowLimit("five_hour", summaries),
+      createUsageWindowLimit("seven_day", summaries),
+      createUsageWindowLimit("seven_day_sonnet", summaries),
+    ].filter(Boolean),
+    accounts: records.map((account) => ({
+      id: account.id,
+      state: account.rateLimitResetAt && new Date(account.rateLimitResetAt).getTime() > Date.now()
+        ? "rate_limited"
+        : account.reauthRequiredReason
+          ? "reauth_required"
+          : account.enabled
+            ? "ready"
+            : "disabled",
+      plan_type: readString(account.metadata.planType) ?? readString(account.metadata.plan_type),
+      cached_usage_at: account.metadata.cachedUsageAt,
+      rate_limit_reset_at: account.rateLimitResetAt,
+    })),
+  };
+}
+
+function readMostCommonPlan(records: Awaited<ReturnType<AccountStore["listByProvider"]>>): string {
+  const counts = new Map<string, number>();
+  for (const account of records) {
+    const plan = readString(account.metadata.planType) ?? readString(account.metadata.plan_type);
+    if (plan) counts.set(plan, (counts.get(plan) ?? 0) + 1);
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "unknown";
+}
+
+function createUsageWindowLimit(name: string, usages: Record<string, unknown>[]) {
+  const rateLimit = summarizeUsageWindow(usages, name);
+  if (!rateLimit) return undefined;
+  return {
+    quota_key: name,
+    limit_name: name,
+    display_label: name.replaceAll("_", " "),
+    metered_feature: name,
+    rate_limit: rateLimit,
+  };
+}
+
+function summarizeUsageWindow(usages: Record<string, unknown>[], key: string) {
+  const windows = usages
+    .map((usage) => readRecord(usage[key]))
+    .filter((window): window is Record<string, unknown> => Boolean(window));
+  if (windows.length === 0) return undefined;
+
+  const usedPercents = windows
+    .map((window) => readOptionalNumber(String(window.utilization ?? window.used_percent)))
+    .filter((value): value is number => typeof value === "number");
+  const maxUsedPercent = usedPercents.length > 0 ? Math.max(...usedPercents) : 0;
+  const resetAt = windows
+    .map((window) => readString(window.reset_at) ?? readString(window.resetAt))
+    .filter((value): value is string => Boolean(value))
+    .sort()[0];
+
+  return {
+    allowed: maxUsedPercent < 100,
+    limit_reached: maxUsedPercent >= 100,
+    primary_window: {
+      used_percent: Math.round(maxUsedPercent),
+      reset_at: resetAt ? Math.floor(new Date(resetAt).getTime() / 1000) : undefined,
+      reset_after_seconds: resetAt ? secondsUntil(resetAt) : undefined,
+    },
+  };
+}
+
+function summarizeCredits(usages: Record<string, unknown>[]) {
+  const credits = usages.map((usage) => readRecord(usage.credits)).find(Boolean);
+  if (!credits) return undefined;
+  return {
+    has_credits: Boolean(credits.has_credits ?? credits.hasCredits ?? true),
+    unlimited: Boolean(credits.unlimited),
+    balance: readString(credits.balance),
+  };
+}
+
 function toPublicReadyAccount(row: ReturnType<typeof listReadyAccounts>[number]) {
   return {
     id: row.id,
@@ -828,6 +934,7 @@ async function resolveProvider(
   model: string | undefined,
 ): Promise<ProviderAdapter | undefined> {
   if (
+    route === "/v1/responses" ||
     route === "/backend-api/codex/models" ||
     route === "/backend-api/codex/responses" ||
     route === "/backend-api/codex/responses/compact"
@@ -835,6 +942,15 @@ async function resolveProvider(
     return registry.getAdapter("codex");
   }
   if (route === "/backend-api/files" || route === "/backend-api/files/uploaded") {
+    return registry.getAdapter("codex");
+  }
+  if (
+    route === "/backend-api/transcribe" ||
+    route === "/v1/audio/transcriptions" ||
+    route === "/v1/images/generations" ||
+    route === "/v1/images/edits" ||
+    route === "/v1/images/variations"
+  ) {
     return registry.getAdapter("codex");
   }
 
@@ -922,6 +1038,21 @@ function readRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function readOptionalNumber(value: string): number | undefined {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function secondsUntil(iso: string): number | undefined {
+  const ms = new Date(iso).getTime() - Date.now();
+  if (!Number.isFinite(ms) || ms <= 0) return undefined;
+  return Math.ceil(ms / 1000);
 }
 
 function isProviderId(value: unknown): value is ProviderId {

@@ -4,6 +4,11 @@ export type ProviderId = "codex" | "claude-code";
 
 export type GatewayRoute =
   | "/v1/models"
+  | "/v1/usage"
+  | "/v1/audio/transcriptions"
+  | "/v1/images/generations"
+  | "/v1/images/edits"
+  | "/v1/images/variations"
   | "/v1/responses"
   | "/v1/responses/compact"
   | "/v1/chat/completions"
@@ -13,7 +18,9 @@ export type GatewayRoute =
   | "/backend-api/codex/responses"
   | "/backend-api/codex/responses/compact"
   | "/backend-api/files"
-  | "/backend-api/files/uploaded";
+  | "/backend-api/files/uploaded"
+  | "/backend-api/transcribe"
+  | "/api/codex/usage";
 
 export interface ModelInfo {
   id: string;

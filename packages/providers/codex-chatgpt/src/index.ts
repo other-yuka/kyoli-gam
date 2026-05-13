@@ -18,6 +18,8 @@ const CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses";
 const CODEX_WEBSOCKET_ENDPOINT = "wss://chatgpt.com/backend-api/codex/responses";
 const CODEX_COMPACT_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses/compact";
 const CODEX_BACKEND_API_BASE = "https://chatgpt.com/backend-api";
+const CODEX_TRANSCRIBE_ENDPOINT = "https://chatgpt.com/backend-api/transcribe";
+const DEFAULT_IMAGE_HOST_MODEL = "gpt-5.5";
 const OPENAI_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const OPENAI_TOKEN_ENDPOINT = "https://auth.openai.com/oauth/token";
 const CODEX_ORIGINATOR = "codex_cli_rs";
@@ -87,6 +89,8 @@ export interface CodexChatGPTProviderOptions {
   onTrace?: (event: AccountExecutionTraceEvent) => void;
   fileFinalizePollDelayMs?: number;
   fileFinalizeBudgetMs?: number;
+  compactTimeoutMs?: number;
+  compactRetryDelayMs?: number;
 }
 
 export { startCodexOAuthLogin, type CodexOAuthTokens } from "./oauth";
@@ -132,8 +136,13 @@ export function createCodexChatGPTProvider(
       "/v1/responses",
       "/v1/responses/compact",
       "/v1/chat/completions",
+      "/v1/audio/transcriptions",
+      "/v1/images/generations",
+      "/v1/images/edits",
+      "/v1/images/variations",
       "/backend-api/codex/responses",
       "/backend-api/codex/responses/compact",
+      "/backend-api/transcribe",
       "/backend-api/files",
       "/backend-api/files/uploaded",
     ],
@@ -145,8 +154,13 @@ export function createCodexChatGPTProvider(
         context.route !== "/v1/responses" &&
         context.route !== "/v1/responses/compact" &&
         context.route !== "/v1/chat/completions" &&
+        context.route !== "/v1/audio/transcriptions" &&
+        context.route !== "/v1/images/generations" &&
+        context.route !== "/v1/images/edits" &&
+        context.route !== "/v1/images/variations" &&
         context.route !== "/backend-api/codex/responses" &&
         context.route !== "/backend-api/codex/responses/compact" &&
+        context.route !== "/backend-api/transcribe" &&
         context.route !== "/backend-api/files" &&
         context.route !== "/backend-api/files/uploaded"
       ) {
@@ -163,6 +177,18 @@ export function createCodexChatGPTProvider(
 
       if (context.route === "/v1/chat/completions") {
         return handleChatCompletionsRequest({ context, fetchImpl, options });
+      }
+
+      if (context.route === "/backend-api/transcribe" || context.route === "/v1/audio/transcriptions") {
+        return handleTranscriptionRequest({ context, fetchImpl, options });
+      }
+
+      if (
+        context.route === "/v1/images/generations" ||
+        context.route === "/v1/images/edits" ||
+        context.route === "/v1/images/variations"
+      ) {
+        return handleImagesRequest({ context, fetchImpl, options });
       }
 
       if (context.route === "/v1/responses") {
@@ -230,7 +256,7 @@ export function createCodexChatGPTProvider(
       });
     },
     async handleWebSocket(context) {
-      if (context.route !== "/backend-api/codex/responses") {
+      if (context.route !== "/backend-api/codex/responses" && context.route !== "/v1/responses") {
         await context.websocket.accept();
         await sendWebSocketError(context, "route_not_supported", `Codex WebSocket is not implemented for ${context.route}.`);
         await context.websocket.close(1008, "Unsupported route");
@@ -489,9 +515,10 @@ async function handleChatCompletionsRequest(input: {
     return convertResponsesStreamToChatCompletions(upstream, body);
   }
 
-  const payload = upstream.headers.get("content-type")?.includes("text/event-stream")
+  let payload = upstream.headers.get("content-type")?.includes("text/event-stream")
     ? await convertResponsesStreamToResponsePayload(upstream, body)
     : await readJsonRecord(upstream.clone());
+  payload ??= await convertResponsesStreamToResponsePayload(upstream, body);
   if (!payload) return upstream;
   return jsonResponse(convertResponsesPayloadToChatCompletion(payload, body), {
     status: upstream.status,
@@ -504,6 +531,7 @@ async function handleCompactRequest(input: {
   options: CodexChatGPTProviderOptions;
 }): Promise<Response> {
   const body = rewriteCompactBody(input.context.body);
+  const bodyText = JSON.stringify(body);
   return executeWithAccountFailover({
     provider: "codex",
     kind: "oauth",
@@ -528,8 +556,8 @@ async function handleCompactRequest(input: {
         excludeAccountIds,
         tokenRefresh: input.options.tokenRefresh ?? refreshCodexToken,
       }),
-    execute: (credential) =>
-      input.fetchImpl(CODEX_COMPACT_ENDPOINT, {
+    execute: async (credential) => {
+      const request = {
         method: input.context.request.method,
         headers: buildUpstreamHeaders(
           input.context.request.headers,
@@ -537,9 +565,18 @@ async function handleCompactRequest(input: {
           (credential as CodexCredential).chatgptAccountId,
           { bridge: input.context.route.startsWith("/v1/") },
         ),
-        body: JSON.stringify(body),
+        body: bodyText,
+        signal: AbortSignal.timeout(input.options.compactTimeoutMs ?? 75_000),
         duplex: "half",
-      } as RequestInit),
+      } as RequestInit;
+      const response = await input.fetchImpl(CODEX_COMPACT_ENDPOINT, request);
+      if (!isRetryableCompactStatus(response.status)) return response;
+      await sleep(input.options.compactRetryDelayMs ?? 250);
+      return input.fetchImpl(CODEX_COMPACT_ENDPOINT, {
+        ...request,
+        signal: AbortSignal.timeout(input.options.compactTimeoutMs ?? 75_000),
+      } as RequestInit);
+    },
     failureMessage: (status) => `Codex compact upstream returned ${status}`,
     readRateLimitResetAt: readCodexRateLimitResetAt,
     onTrace: input.options.onTrace,
@@ -628,6 +665,247 @@ async function handleCodexFileRequest(input: {
     traceRoute: context.route,
     traceModel: isCreate ? "files-create" : "files-finalize",
   });
+}
+
+async function handleTranscriptionRequest(input: {
+  context: Parameters<ProviderAdapter["handleRequest"]>[0];
+  fetchImpl: typeof fetch;
+  options: CodexChatGPTProviderOptions;
+}): Promise<Response> {
+  const form = await input.context.request.clone().formData().catch(() => undefined);
+  const file = form?.get("file");
+  const prompt = form?.get("prompt");
+  const model = form?.get("model");
+  if (input.context.route === "/v1/audio/transcriptions" && model !== "gpt-4o-transcribe") {
+    return validationError("model must be gpt-4o-transcribe.").response;
+  }
+  if (!(file instanceof Blob)) {
+    return validationError("Transcription requests require a file multipart part.").response;
+  }
+
+  return executeWithAccountFailover({
+    provider: "codex",
+    kind: "oauth",
+    accounts: input.options.accounts,
+    sessionKey: input.context.sessionKey,
+    maxAttempts: input.options.maxAccountAttempts,
+    missingCredentialResponse: () =>
+      jsonResponse(
+        {
+          error: {
+            type: "missing_oauth_account",
+            message:
+              "Codex transcription requests require a stored codex/oauth account. Add one with kyoli login codex.",
+          },
+        },
+        { status: 401 },
+      ),
+    selectCredential: (excludeAccountIds) =>
+      readOAuthCredential({
+        accounts: input.options.accounts,
+        sessionKey: input.context.sessionKey,
+        excludeAccountIds,
+        tokenRefresh: input.options.tokenRefresh ?? refreshCodexToken,
+      }),
+    execute: (credential) => {
+      const upstreamForm = new FormData();
+      upstreamForm.set(
+        "file",
+        file,
+        file instanceof File && file.name ? file.name : "audio.wav",
+      );
+      if (typeof prompt === "string") upstreamForm.set("prompt", prompt);
+      return input.fetchImpl(CODEX_TRANSCRIBE_ENDPOINT, {
+        method: "POST",
+        headers: buildUpstreamMultipartHeaders(
+          input.context.request.headers,
+          credential.value,
+          (credential as CodexCredential).chatgptAccountId,
+        ),
+        body: upstreamForm,
+        signal: AbortSignal.timeout(input.options.compactTimeoutMs ?? 75_000),
+        duplex: "half",
+      } as RequestInit);
+    },
+    failureMessage: (status) => `Codex transcription upstream returned ${status}`,
+    readRateLimitResetAt: readCodexRateLimitResetAt,
+    onTrace: input.options.onTrace,
+    traceRoute: input.context.route,
+    traceModel: "gpt-4o-transcribe",
+  });
+}
+
+async function handleImagesRequest(input: {
+  context: Parameters<ProviderAdapter["handleRequest"]>[0];
+  fetchImpl: typeof fetch;
+  options: CodexChatGPTProviderOptions;
+}): Promise<Response> {
+  const request = await buildImageResponsesRequest(input.context);
+  if (!request.ok) return request.response;
+  const responsesBody = applyOpenAIResponsesCodexDefaults(rewriteBodyModel(request.value)) as Record<string, unknown>;
+  const upstream = await executeWithAccountFailover({
+    provider: "codex",
+    kind: "oauth",
+    accounts: input.options.accounts,
+    sessionKey: input.context.sessionKey,
+    maxAttempts: input.options.maxAccountAttempts,
+    missingCredentialResponse: () =>
+      jsonResponse(
+        {
+          error: {
+            type: "missing_oauth_account",
+            message:
+              "Codex image requests require a stored codex/oauth account. Add one with kyoli login codex.",
+          },
+        },
+        { status: 401 },
+      ),
+    selectCredential: (excludeAccountIds) =>
+      readOAuthCredential({
+        accounts: input.options.accounts,
+        sessionKey: input.context.sessionKey,
+        excludeAccountIds,
+        tokenRefresh: input.options.tokenRefresh ?? refreshCodexToken,
+      }),
+    execute: (credential) =>
+      input.fetchImpl(CODEX_API_ENDPOINT, {
+        method: "POST",
+        headers: buildUpstreamHeaders(
+          input.context.request.headers,
+          credential.value,
+          (credential as CodexCredential).chatgptAccountId,
+          { bridge: true },
+        ),
+        body: JSON.stringify(responsesBody),
+        duplex: "half",
+      } as RequestInit),
+    failureMessage: (status) => `Codex image upstream returned ${status}`,
+    readRateLimitResetAt: readCodexRateLimitResetAt,
+    onTrace: input.options.onTrace,
+    traceRoute: input.context.route,
+    traceModel: readString(request.value.model),
+  });
+  if (!upstream.ok) return upstream;
+  const payload = await convertResponsesStreamToResponsePayload(upstream, responsesBody);
+  return jsonResponse(convertResponsesPayloadToImageResponse(payload), { status: upstream.status });
+}
+
+function isRetryableCompactStatus(status: number): boolean {
+  return status === 500 || status === 502 || status === 503 || status === 504;
+}
+
+async function buildImageResponsesRequest(
+  context: Parameters<ProviderAdapter["handleRequest"]>[0],
+): Promise<{ ok: true; value: Record<string, unknown> } | { ok: false; response: Response }> {
+  if (context.route === "/v1/images/generations") {
+    const body = readRecord(context.body);
+    if (!body) return validationError("Image generation requests require a JSON object body.");
+    const prompt = readString(body.prompt);
+    if (!prompt) return validationError("prompt is required.");
+    const imageModel = readString(body.model) ?? "gpt-image-1.5";
+    const stream = body.stream === true;
+    return {
+      ok: true,
+      value: {
+        model: DEFAULT_IMAGE_HOST_MODEL,
+        instructions:
+          "You are an image generator. You MUST call the image_generation tool exactly once and return only that tool call.",
+        input: [{ role: "user", content: [{ type: "input_text", text: prompt }] }],
+        tools: [buildImageGenerationTool(body, imageModel, stream)],
+        tool_choice: { type: "image_generation" },
+        stream: true,
+        store: false,
+      },
+    };
+  }
+
+  const form = await context.request.clone().formData().catch(() => undefined);
+  const prompt = form?.get("prompt");
+  const promptText = typeof prompt === "string" && prompt.length > 0
+    ? prompt
+    : context.route === "/v1/images/variations"
+    ? "Create a high-quality variation of the attached image."
+    : undefined;
+  if (!promptText) return validationError("prompt is required.");
+  const images = [...(form?.getAll("image") ?? []), ...(form?.getAll("image[]") ?? [])]
+    .filter((value): value is File => value instanceof File);
+  if (images.length === 0) return validationError("At least one image multipart part is required.");
+  const imageModel = typeof form?.get("model") === "string" ? String(form.get("model")) : "gpt-image-1.5";
+  const imageParts = await Promise.all(images.map(async (image) => ({
+    type: "input_image",
+    image_url: await blobToDataUrl(image),
+  })));
+  const mask = form?.get("mask");
+  if (mask instanceof File) {
+    imageParts.push({ type: "input_image", image_url: await blobToDataUrl(mask) });
+  }
+  return {
+    ok: true,
+    value: {
+    model: DEFAULT_IMAGE_HOST_MODEL,
+      instructions:
+        "You are an image editor. You MUST call the image_generation tool exactly once and return only that tool call.",
+      input: [{ role: "user", content: [{ type: "input_text", text: promptText }, ...imageParts] }],
+      tools: [buildImageGenerationTool(Object.fromEntries(form?.entries() ?? []), imageModel, form?.get("stream") === "true", true)],
+      tool_choice: { type: "image_generation" },
+      stream: true,
+      store: false,
+    },
+  };
+}
+
+function buildImageGenerationTool(
+  body: Record<string, unknown>,
+  model: string,
+  stream: boolean,
+  isEdit = false,
+): Record<string, unknown> {
+  return {
+    type: "image_generation",
+    model,
+    size: readString(body.size) ?? "auto",
+    quality: readString(body.quality) ?? "auto",
+    background: readString(body.background) ?? "auto",
+    output_format: readString(body.output_format) ?? "png",
+    output_compression: readNumber(body.output_compression) ?? 100,
+    moderation: readString(body.moderation) ?? "auto",
+    ...(isEdit ? { action: "edit" } : {}),
+    ...(stream && readNumber(body.partial_images) ? { partial_images: readNumber(body.partial_images) } : {}),
+  };
+}
+
+async function blobToDataUrl(blob: Blob): Promise<string> {
+  const bytes = Buffer.from(await blob.arrayBuffer());
+  return `data:${blob.type || "image/png"};base64,${bytes.toString("base64")}`;
+}
+
+function convertResponsesPayloadToImageResponse(payload: Record<string, unknown>): Record<string, unknown> {
+  const images = extractImageBase64(payload);
+  return {
+    created: readNumber(payload.created_at) ?? Math.floor(Date.now() / 1000),
+    data: images.length > 0 ? images.map((b64_json) => ({ b64_json })) : [],
+    usage: payload.usage,
+  };
+}
+
+function extractImageBase64(value: unknown): string[] {
+  const found: string[] = [];
+  collectImageBase64(value, found);
+  return [...new Set(found)];
+}
+
+function collectImageBase64(value: unknown, found: string[]): void {
+  if (Array.isArray(value)) {
+    for (const item of value) collectImageBase64(item, found);
+    return;
+  }
+  const record = readRecord(value);
+  if (!record) return;
+  for (const key of ["b64_json", "result", "image_base64"]) {
+    const raw = readString(record[key]);
+    if (raw) found.push(raw.startsWith("data:") ? raw.split(",", 2)[1] ?? raw : raw);
+  }
+  for (const child of Object.values(record)) collectImageBase64(child, found);
 }
 
 async function readOAuthCredential(input: {
@@ -1470,6 +1748,7 @@ function rewriteBodyModel(body: unknown): unknown {
   normalizeResponsesInput(record);
   normalizeResponsesInputItems(record);
   stripCodexUnsupportedFields(record);
+  record.store = false;
   delete record.enable_thinking;
   delete record.thinking;
   delete record.reasoningEffort;
@@ -1486,7 +1765,7 @@ function rewriteCompactBody(body: unknown): unknown {
   const rewritten = rewriteBodyModel(body);
   const record = readRecord(rewritten);
   if (!record) return rewritten;
-  record.store = false;
+  delete record.store;
   delete record.tools;
   delete record.tool_choice;
   delete record.parallel_tool_calls;
@@ -1739,6 +2018,25 @@ function buildUpstreamHeaders(
     upstream.delete("ChatGPT-Account-ID");
   }
 
+  return upstream;
+}
+
+function buildUpstreamMultipartHeaders(
+  headers: Headers,
+  accessToken: string,
+  accountId: string | undefined,
+): Headers {
+  const upstream = new Headers();
+  upstream.set("authorization", `Bearer ${accessToken}`);
+  upstream.set("originator", headers.get("originator") ?? CODEX_ORIGINATOR);
+  upstream.set("user-agent", headers.get("user-agent") ?? CODEX_USER_AGENT);
+  for (const [key, value] of headers.entries()) {
+    const normalized = key.toLowerCase();
+    if (normalized.startsWith("x-openai-") || normalized.startsWith("x-codex-")) {
+      upstream.set(key, value);
+    }
+  }
+  if (accountId) upstream.set("ChatGPT-Account-ID", accountId);
   return upstream;
 }
 

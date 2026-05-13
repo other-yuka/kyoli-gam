@@ -219,6 +219,51 @@ describe("admin accounts API", () => {
     expect(JSON.stringify(body)).not.toContain("secret");
   });
 
+  it("serves Codex usage from cached account metadata", async () => {
+    const accounts = new MemoryAccountStore();
+    await accounts.create({
+      provider: "codex",
+      kind: "oauth",
+      metadata: {
+        planType: "plus",
+        cachedUsage: {
+          five_hour: {
+            utilization: "42",
+            reset_at: new Date(Date.now() + 60_000).toISOString(),
+          },
+          seven_day: {
+            utilization: "11",
+          },
+          credits: {
+            has_credits: true,
+            unlimited: false,
+            balance: "10",
+          },
+        },
+      },
+    });
+    const gateway = createGateway({
+      accounts,
+      providers: [],
+    });
+
+    const response = await gateway.fetch(new Request("http://127.0.0.1:2021/api/codex/usage"));
+    const body = await response.json() as {
+      object: string;
+      plan_type: string;
+      rate_limit: { primary_window: { used_percent: number } };
+      credits: { balance: string };
+      additional_rate_limits: Array<{ quota_key: string }>;
+    };
+
+    expect(response.status).toBe(200);
+    expect(body.object).toBe("codex.usage");
+    expect(body.plan_type).toBe("plus");
+    expect(body.rate_limit.primary_window.used_percent).toBe(42);
+    expect(body.credits.balance).toBe("10");
+    expect(body.additional_rate_limits.map((limit) => limit.quota_key)).toContain("five_hour");
+  });
+
   it("resets expired rate-limit state in bulk", async () => {
     const accounts = new MemoryAccountStore();
     const expired = await accounts.create({

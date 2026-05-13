@@ -526,6 +526,37 @@ describe("gateway routing", () => {
     expect(seenContext?.sessionKey).toBe("header:codex-ws-thread");
   });
 
+  it("routes v1 Responses WebSocket upgrades to the Codex adapter", async () => {
+    let seenContext: GatewayWebSocketContext | undefined;
+    const codex = fakeProvider({
+      id: "codex",
+      routes: ["/v1/responses"],
+      models: [],
+      handleWebSocket: async (context) => {
+        seenContext = context;
+        await context.websocket.accept();
+        await context.websocket.close();
+      },
+    });
+
+    const gateway = createGateway({
+      accounts: new MemoryAccountStore(),
+      providers: [codex],
+    });
+
+    const websocket = fakeWebSocket();
+    await gateway.handleWebSocket(
+      new Request("http://127.0.0.1:2021/v1/responses", {
+        headers: { "x-codex-session-id": "v1-ws-thread" },
+      }),
+      websocket,
+    );
+
+    expect(websocket.accepted).toBe(true);
+    expect(seenContext?.route).toBe("/v1/responses");
+    expect(seenContext?.sessionKey).toBe("header:v1-ws-thread");
+  });
+
   it("rejects provider requests when local concurrency is saturated", async () => {
     let releaseFirstRequest: (() => void) | undefined;
     const firstRequestStarted = deferred<void>();

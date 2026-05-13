@@ -53,6 +53,7 @@ describe("createCodexChatGPTProvider", () => {
         body: JSON.stringify({
           model: "codex/gpt-5.3-codex",
           input: "hello",
+          store: true,
         }),
       }),
       route: "/backend-api/codex/responses",
@@ -60,6 +61,7 @@ describe("createCodexChatGPTProvider", () => {
       body: {
         model: "codex/gpt-5.3-codex",
         input: "hello",
+        store: true,
       },
       model: "codex/gpt-5.3-codex",
     });
@@ -74,6 +76,7 @@ describe("createCodexChatGPTProvider", () => {
     expect(upstreamBody).toEqual({
       model: "gpt-5.3-codex",
       input: [{ role: "user", content: [{ type: "input_text", text: "hello" }] }],
+      store: false,
     });
   });
 
@@ -825,10 +828,7 @@ describe("createCodexChatGPTProvider", () => {
             "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"gpt-5.3-codex\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}",
             "",
           ].join("\n"),
-          {
-            status: 200,
-            headers: { "content-type": "text/event-stream" },
-          },
+          { status: 200 },
         );
       },
     });
@@ -1170,12 +1170,154 @@ describe("createCodexChatGPTProvider", () => {
     expect(upstreamBody).toMatchObject({
       model: "gpt-5.3-codex",
       input: [{ role: "user", content: [{ type: "input_text", text: "hello" }] }],
-      store: false,
       service_tier: "priority",
     });
+    expect(upstreamBody.store).toBeUndefined();
     expect(upstreamBody.tools).toBeUndefined();
     expect(upstreamBody.tool_choice).toBeUndefined();
     expect(upstreamBody.parallel_tool_calls).toBeUndefined();
+  });
+
+  it("retries compact 5xx responses once with the same contract", async () => {
+    const statuses: number[] = [];
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+      },
+    });
+
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      compactRetryDelayMs: 0,
+      fetch: async (_input, init) => {
+        statuses.push(statuses.length === 0 ? 503 : 200);
+        const body = JSON.parse(String(init?.body));
+        expect(body.store).toBeUndefined();
+        return new Response(JSON.stringify({ object: "response.compaction", output: [] }), {
+          status: statuses.at(-1),
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    const response = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/backend-api/codex/responses/compact", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "gpt-5.3-codex", instructions: "hi", input: [], store: true }),
+      }),
+      route: "/backend-api/codex/responses/compact",
+      sessionKey: "session-a",
+      body: { model: "gpt-5.3-codex", instructions: "hi", input: [], store: true },
+      model: "gpt-5.3-codex",
+    });
+
+    expect(response.status).toBe(200);
+    expect(statuses).toEqual([503, 200]);
+  });
+
+  it("proxies transcription multipart requests to the Codex transcribe endpoint", async () => {
+    let upstreamUrl = "";
+    let upstreamAuth = "";
+    let upstreamBody: FormData | undefined;
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+      },
+    });
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      fetch: async (input, init) => {
+        upstreamUrl = String(input);
+        upstreamAuth = new Headers(init?.headers).get("authorization") ?? "";
+        upstreamBody = init?.body as FormData;
+        return new Response(JSON.stringify({ text: "transcribed" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+    const form = new FormData();
+    form.set("model", "gpt-4o-transcribe");
+    form.set("prompt", "short");
+    form.set("file", new File([new Uint8Array([1, 2, 3])], "a.wav", { type: "audio/wav" }));
+
+    const response = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/v1/audio/transcriptions", {
+        method: "POST",
+        body: form,
+      }),
+      route: "/v1/audio/transcriptions",
+      sessionKey: "session-a",
+      model: "gpt-4o-transcribe",
+    });
+
+    expect(response.status).toBe(200);
+    expect(upstreamUrl).toBe("https://chatgpt.com/backend-api/transcribe");
+    expect(upstreamAuth).toBe("Bearer access-test");
+    expect(upstreamBody?.get("prompt")).toBe("short");
+    expect(upstreamBody?.get("file")).toBeInstanceOf(File);
+  });
+
+  it("translates image generation requests through Responses image_generation", async () => {
+    let upstreamBody: Record<string, unknown> = {};
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+      },
+    });
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      fetch: async (_input, init) => {
+        upstreamBody = JSON.parse(String(init?.body));
+        return new Response([
+          "event: response.completed",
+          'data: {"type":"response.completed","response":{"id":"resp_img","status":"completed","output":[{"type":"image_generation_call","result":"abc123"}]}}',
+          "",
+        ].join("\n"), { status: 200 });
+      },
+    });
+
+    const response = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/v1/images/generations", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "gpt-image-1.5", prompt: "a tiny icon" }),
+      }),
+      route: "/v1/images/generations",
+      sessionKey: "session-a",
+      body: { model: "gpt-image-1.5", prompt: "a tiny icon" },
+      model: "gpt-image-1.5",
+    });
+
+    expect(response.status).toBe(200);
+    expect(upstreamBody).toMatchObject({
+      model: "gpt-5.5",
+      tool_choice: { type: "image_generation" },
+      store: false,
+      stream: true,
+    });
+    expect(upstreamBody.tools).toEqual([
+      expect.objectContaining({ type: "image_generation", model: "gpt-image-1.5" }),
+    ]);
+    expect(await response.json()).toMatchObject({
+      data: [{ b64_json: "abc123" }],
+    });
   });
 
   it("creates Codex file upload URLs and pins finalize to the same OAuth account", async () => {
