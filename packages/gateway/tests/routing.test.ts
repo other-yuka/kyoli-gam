@@ -483,9 +483,13 @@ describe("gateway routing", () => {
     expect(payload.models.find((model) => model.slug === "test-codex")).toMatchObject({
       slug: "test-codex",
       display_name: "Test Codex",
+      base_instructions: "You are Codex, a coding agent based on GPT-5.",
       supported_in_api: true,
+      priority: 0,
+      minimal_client_version: null,
       supports_parallel_tool_calls: true,
       supports_reasoning_summaries: true,
+      shell_type: "shell_command",
       prefer_websockets: true,
       visibility: "list",
     });

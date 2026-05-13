@@ -602,11 +602,9 @@ export async function serveGateway(options: GatewayOptions): Promise<GatewayServ
   server.on("upgrade", async (request, socket, head) => {
     const networkSocket = socket as Socket;
     const websocket = new NodeGatewayWebSocket(
+      request,
       networkSocket,
       head,
-      Array.isArray(request.headers["sec-websocket-key"])
-        ? request.headers["sec-websocket-key"][0]
-        : request.headers["sec-websocket-key"],
     );
 
     try {
@@ -787,6 +785,7 @@ function toCodexCliModelEntry(model: ModelInfo): Record<string, unknown> {
     slug: model.upstreamId,
     display_name: model.displayName ?? model.upstreamId,
     description: model.displayName ?? model.upstreamId,
+    base_instructions: "You are Codex, a coding agent based on GPT-5.",
     default_reasoning_level: "medium",
     supported_reasoning_levels: [
       { effort: "low", description: "Fast responses with lighter reasoning" },
@@ -795,13 +794,28 @@ function toCodexCliModelEntry(model: ModelInfo): Record<string, unknown> {
       { effort: "xhigh", description: "Extra deep reasoning" },
     ],
     supported_in_api: true,
+    priority: 0,
+    minimal_client_version: null,
+    additional_speed_tiers: [],
+    service_tiers: [],
+    availability_nux: null,
+    upgrade: null,
     supports_reasoning_summaries: model.capabilities.includes("reasoning"),
+    default_reasoning_summary: "none",
     support_verbosity: true,
     default_verbosity: "medium",
+    apply_patch_tool_type: "freeform",
+    web_search_tool_type: "text_and_image",
+    truncation_policy: { mode: "tokens", limit: 10_000 },
     supports_parallel_tool_calls: model.capabilities.includes("tools"),
+    shell_type: "shell_command",
+    supports_image_detail_original: true,
     context_window: contextWindow,
     max_context_window: contextWindow,
+    effective_context_window_percent: 95,
+    experimental_supported_tools: [],
     input_modalities: ["text", "image"],
+    supports_search_tool: true,
     available_in_plans: ["plus", "pro"],
     prefer_websockets: true,
     visibility: "list",

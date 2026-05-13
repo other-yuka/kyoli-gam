@@ -1,7 +1,7 @@
-import { createHash } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import type { Socket } from "node:net";
 import type { GatewayWebSocket, GatewayWebSocketMessage } from "@kyoli-gam/core";
+import { WebSocketServer, type RawData, type WebSocket as WsWebSocket } from "ws";
 
 export class WebSocketUpgradeError extends Error {
   constructor(
@@ -12,17 +12,28 @@ export class WebSocketUpgradeError extends Error {
   }
 }
 
+const responseHeadersByRequest = new WeakMap<IncomingMessage, string[]>();
+const websocketServer = new WebSocketServer({
+  noServer: true,
+  perMessageDeflate: false,
+});
+
+websocketServer.on("headers", (headers, request) => {
+  const extraHeaders = responseHeadersByRequest.get(request);
+  if (extraHeaders) headers.push(...extraHeaders);
+});
+
 export class NodeGatewayWebSocket implements GatewayWebSocket {
   #accepted = false;
   #closed = false;
-  #buffer = Buffer.alloc(0);
+  #websocket: WsWebSocket | undefined;
   #queue: GatewayWebSocketMessage[] = [];
   #receivers: Array<(message: GatewayWebSocketMessage) => void> = [];
 
   constructor(
+    private readonly request: IncomingMessage,
     private readonly socket: Socket,
     private readonly head: Buffer,
-    private readonly key: string | undefined,
   ) {}
 
   get accepted(): boolean {
@@ -31,27 +42,25 @@ export class NodeGatewayWebSocket implements GatewayWebSocket {
 
   async accept(headers?: HeadersInit): Promise<void> {
     if (this.#accepted) return;
-    if (!this.key) {
+    if (!this.request.headers["sec-websocket-key"]) {
       throw new WebSocketUpgradeError(400, "Missing sec-websocket-key.");
     }
 
-    const responseHeaders = new Headers(headers);
-    responseHeaders.set("Upgrade", "websocket");
-    responseHeaders.set("Connection", "Upgrade");
-    responseHeaders.set("Sec-WebSocket-Accept", createAcceptKey(this.key));
-
-    const lines = ["HTTP/1.1 101 Switching Protocols"];
-    responseHeaders.forEach((value, key) => {
-      lines.push(`${key}: ${value}`);
+    responseHeadersByRequest.set(this.request, toResponseHeaderLines(headers));
+    await new Promise<void>((resolve, reject) => {
+      try {
+        websocketServer.handleUpgrade(this.request, this.socket, this.head, (websocket) => {
+          this.#websocket = websocket;
+          this.#accepted = true;
+          this.#attachWebSocket(websocket);
+          resolve();
+        });
+      } catch (error) {
+        reject(error);
+      } finally {
+        responseHeadersByRequest.delete(this.request);
+      }
     });
-    this.socket.write(`${lines.join("\r\n")}\r\n\r\n`);
-    this.#accepted = true;
-
-    this.socket.on("data", (chunk: Buffer) => this.#onData(chunk));
-    this.socket.on("end", () => this.#push({ type: "close" }));
-    this.socket.on("close", () => this.#push({ type: "close" }));
-    this.socket.on("error", () => this.#push({ type: "close" }));
-    if (this.head.byteLength > 0) this.#onData(this.head);
   }
 
   async receive(): Promise<GatewayWebSocketMessage> {
@@ -64,55 +73,47 @@ export class NodeGatewayWebSocket implements GatewayWebSocket {
   }
 
   async sendText(data: string): Promise<void> {
-    this.#sendFrame(0x1, Buffer.from(data));
+    this.#send(data);
   }
 
   async sendBinary(data: Uint8Array): Promise<void> {
-    this.#sendFrame(0x2, Buffer.from(data));
+    this.#send(data);
   }
 
   async close(code = 1000, reason = ""): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
-    const reasonBytes = Buffer.from(reason);
-    const payload = Buffer.allocUnsafe(2 + reasonBytes.byteLength);
-    payload.writeUInt16BE(code, 0);
-    reasonBytes.copy(payload, 2);
-    this.#sendFrame(0x8, payload);
-    this.socket.end();
+    if (this.#websocket && this.#websocket.readyState === this.#websocket.OPEN) {
+      this.#websocket.close(code, reason);
+    } else if (!this.socket.destroyed) {
+      this.socket.end();
+    }
     this.#flushReceivers({ type: "close", code, reason });
   }
 
-  #onData(chunk: Buffer): void {
-    try {
-      this.#buffer = Buffer.concat([this.#buffer, chunk]);
-      while (this.#buffer.byteLength >= 2) {
-        const parsed = parseFrame(this.#buffer);
-        if (!parsed) return;
-        this.#buffer = this.#buffer.subarray(parsed.consumed);
-
-        if (parsed.opcode === 0x1) {
-          this.#push({ type: "text", data: parsed.payload.toString("utf8") });
-        } else if (parsed.opcode === 0x2) {
-          this.#push({ type: "binary", data: new Uint8Array(parsed.payload) });
-        } else if (parsed.opcode === 0x8) {
-          const code = parsed.payload.byteLength >= 2 ? parsed.payload.readUInt16BE(0) : undefined;
-          const reason = parsed.payload.byteLength > 2 ? parsed.payload.subarray(2).toString("utf8") : undefined;
-          this.#closed = true;
-          if (!this.socket.destroyed) this.#sendFrame(0x8, parsed.payload);
-          this.socket.end();
-          this.#push({ type: "close", code, reason });
-        } else if (parsed.opcode === 0x9) {
-          this.#sendFrame(0xa, parsed.payload);
-        }
+  #attachWebSocket(websocket: WsWebSocket): void {
+    websocket.on("message", (data, isBinary) => {
+      const buffer = rawDataToBuffer(data);
+      if (isBinary) {
+        this.#push({ type: "binary", data: new Uint8Array(buffer) });
+        return;
       }
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : "Invalid WebSocket frame.";
-      void this.close(1002, reason);
-    }
+      this.#push({ type: "text", data: buffer.toString("utf8") });
+    });
+    websocket.on("close", (code, reason) => {
+      this.#push({
+        type: "close",
+        code,
+        reason: reason.byteLength > 0 ? reason.toString("utf8") : undefined,
+      });
+    });
+    websocket.on("error", () => {
+      this.#push({ type: "close" });
+    });
   }
 
   #push(message: GatewayWebSocketMessage): void {
+    if (message.type === "close" && this.#closed) return;
     if (message.type === "close") this.#closed = true;
     const receiver = this.#receivers.shift();
     if (receiver) {
@@ -126,10 +127,9 @@ export class NodeGatewayWebSocket implements GatewayWebSocket {
     for (const receiver of this.#receivers.splice(0)) receiver(message);
   }
 
-  #sendFrame(opcode: number, payload: Buffer): void {
-    if (!this.#accepted || this.socket.destroyed) return;
-    const header = createServerFrameHeader(opcode, payload.byteLength);
-    this.socket.write(Buffer.concat([header, payload]));
+  #send(data: string | Uint8Array): void {
+    if (!this.#websocket || this.#websocket.readyState !== this.#websocket.OPEN) return;
+    this.#websocket.send(data);
   }
 }
 
@@ -154,72 +154,27 @@ export function writeUpgradeError(socket: Socket, status: number, message: strin
   socket.destroy();
 }
 
-function createAcceptKey(key: string): string {
-  return createHash("sha1")
-    .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
-    .digest("base64");
-}
-
-function parseFrame(buffer: Buffer): { opcode: number; payload: Buffer; consumed: number } | undefined {
-  const first = buffer[0] ?? 0;
-  const second = buffer[1] ?? 0;
-  const opcode = first & 0x0f;
-  const masked = (second & 0x80) !== 0;
-  let payloadLength = second & 0x7f;
-  let offset = 2;
-
-  if (payloadLength === 126) {
-    if (buffer.byteLength < offset + 2) return undefined;
-    payloadLength = buffer.readUInt16BE(offset);
-    offset += 2;
-  } else if (payloadLength === 127) {
-    if (buffer.byteLength < offset + 8) return undefined;
-    const longLength = buffer.readBigUInt64BE(offset);
-    if (longLength > BigInt(Number.MAX_SAFE_INTEGER)) {
-      throw new WebSocketUpgradeError(1009, "WebSocket frame is too large.");
-    }
-    payloadLength = Number(longLength);
-    offset += 8;
-  }
-
-  const maskOffset = offset;
-  if (masked) offset += 4;
-  if (buffer.byteLength < offset + payloadLength) return undefined;
-
-  const payload = Buffer.from(buffer.subarray(offset, offset + payloadLength));
-  if (masked) {
-    const mask = buffer.subarray(maskOffset, maskOffset + 4);
-    for (let index = 0; index < payload.byteLength; index += 1) {
-      payload[index] = (payload[index] ?? 0) ^ (mask[index % 4] ?? 0);
-    }
-  }
-  return { opcode, payload, consumed: offset + payloadLength };
-}
-
-function createServerFrameHeader(opcode: number, length: number): Buffer {
-  if (length < 126) {
-    return Buffer.from([0x80 | opcode, length]);
-  }
-  if (length <= 0xffff) {
-    const header = Buffer.allocUnsafe(4);
-    header[0] = 0x80 | opcode;
-    header[1] = 126;
-    header.writeUInt16BE(length, 2);
-    return header;
-  }
-  const header = Buffer.allocUnsafe(10);
-  header[0] = 0x80 | opcode;
-  header[1] = 127;
-  header.writeBigUInt64BE(BigInt(length), 2);
-  return header;
-}
-
 function statusText(status: number): string {
   if (status === 400) return "Bad Request";
   if (status === 404) return "Not Found";
   if (status === 429) return "Too Many Requests";
   if (status === 501) return "Not Implemented";
   return "Internal Server Error";
+}
+
+function toResponseHeaderLines(headers: HeadersInit | undefined): string[] {
+  if (!headers) return [];
+  const result: string[] = [];
+  new Headers(headers).forEach((value, key) => {
+    result.push(`${key}: ${value}`);
+  });
+  return result;
+}
+
+function rawDataToBuffer(data: RawData): Buffer {
+  if (Buffer.isBuffer(data)) return data;
+  if (data instanceof ArrayBuffer) return Buffer.from(data);
+  return Buffer.concat(data);
 }
 
 function toWebHeaders(headers: IncomingMessage["headers"]): Headers {

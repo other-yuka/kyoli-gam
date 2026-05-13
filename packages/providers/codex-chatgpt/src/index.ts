@@ -12,6 +12,7 @@ import {
   stripProviderPrefix,
   type SelectedCredential,
 } from "@kyoli-gam/core";
+import { WebSocket as WsWebSocket } from "ws";
 
 const CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses";
 const CODEX_WEBSOCKET_ENDPOINT = "wss://chatgpt.com/backend-api/codex/responses";
@@ -248,16 +249,15 @@ async function handleResponsesWebSocket(input: {
   const websocketFactory = options.webSocketFactory ?? createGlobalWebSocket;
   const turnState = context.request.headers.get("x-codex-turn-state") ?? crypto.randomUUID();
 
-  const credential = await readOAuthCredential({
-    accounts: options.accounts,
-    sessionKey: context.sessionKey,
-    excludeAccountIds: [],
-    tokenRefresh: options.tokenRefresh ?? refreshCodexToken,
-  });
-
   await context.websocket.accept({ "x-codex-turn-state": turnState });
 
-  if (!credential) {
+  const upstreamResult = await openResponsesWebSocketWithFailover({
+    context,
+    options,
+    websocketFactory,
+  });
+
+  if (!upstreamResult.credential) {
     await sendWebSocketError(
       context,
       "missing_oauth_account",
@@ -267,48 +267,91 @@ async function handleResponsesWebSocket(input: {
     return;
   }
 
-  let upstream: CodexWebSocketLike | undefined;
-  try {
-    upstream = websocketFactory(CODEX_WEBSOCKET_ENDPOINT, [], {
-      headers: buildUpstreamWebSocketHeaders(
-        context.request.headers,
-        credential.value,
-        (credential as CodexCredential).chatgptAccountId,
-      ),
-    });
-    upstream.binaryType = "arraybuffer";
-    await waitForWebSocketOpen(upstream);
-    if (credential.accountId) await options.accounts?.recordSuccess(credential.accountId);
-  } catch (error) {
-    if (credential.accountId) {
-      await options.accounts?.recordFailure(credential.accountId, {
-        status: 502,
-        message: error instanceof Error ? error.message : String(error),
-      });
-    }
+  if (!upstreamResult.upstream) {
     await sendWebSocketError(
       context,
       "upstream_unavailable",
-      error instanceof Error ? error.message : "Codex WebSocket upstream connection failed.",
+      upstreamResult.error?.message ?? "Codex WebSocket upstream connection failed.",
     );
     await context.websocket.close(1011, "Upstream unavailable");
     return;
   }
 
-  relayUpstreamMessages(upstream, context);
+  relayUpstreamMessages(upstreamResult.upstream, context);
 
   while (true) {
     const message = await context.websocket.receive();
     if (message.type === "close") {
-      upstream.close(message.code, message.reason);
+      upstreamResult.upstream.close(message.code, message.reason);
       return;
     }
     if (message.type === "text") {
-      upstream.send(message.data);
+      upstreamResult.upstream.send(message.data);
     } else {
-      upstream.send(message.data);
+      upstreamResult.upstream.send(message.data);
     }
   }
+}
+
+async function openResponsesWebSocketWithFailover(input: {
+  context: GatewayWebSocketContext;
+  options: CodexChatGPTProviderOptions;
+  websocketFactory: CodexWebSocketFactory;
+}): Promise<{
+  credential?: CodexCredential;
+  upstream?: CodexWebSocketLike;
+  error?: Error;
+}> {
+  const excludedAccountIds: string[] = [];
+  const maxAttempts = Math.max(1, input.options.maxAccountAttempts ?? 10);
+  let lastCredential: CodexCredential | undefined;
+  let lastError: Error | undefined;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const credential = await readOAuthCredential({
+      accounts: input.options.accounts,
+      sessionKey: input.context.sessionKey,
+      excludeAccountIds: excludedAccountIds,
+      tokenRefresh: input.options.tokenRefresh ?? refreshCodexToken,
+    }).catch((error) => {
+      if (error instanceof CredentialUnavailableError) {
+        excludedAccountIds.push(error.accountId);
+        return undefined;
+      }
+      throw error;
+    });
+    if (!credential) {
+      if (excludedAccountIds.length > 0) continue;
+      return {};
+    }
+
+    lastCredential = credential;
+    const upstream = input.websocketFactory(CODEX_WEBSOCKET_ENDPOINT, [], {
+      headers: buildUpstreamWebSocketHeaders(
+        input.context.request.headers,
+        credential.value,
+        credential.chatgptAccountId,
+      ),
+    });
+    upstream.binaryType = "arraybuffer";
+
+    try {
+      await waitForWebSocketOpen(upstream);
+      if (credential.accountId) await input.options.accounts?.recordSuccess(credential.accountId);
+      return { credential, upstream };
+    } catch (error) {
+      upstream.close();
+      lastError = error instanceof Error ? error : new Error(String(error));
+      if (!credential.accountId) return { credential, error: lastError };
+      await input.options.accounts?.recordFailure(credential.accountId, {
+        status: 502,
+        message: lastError.message,
+      });
+      excludedAccountIds.push(credential.accountId);
+    }
+  }
+
+  return { credential: lastCredential, error: lastError };
 }
 
 async function handleResponsesRequest(input: {
@@ -1768,17 +1811,7 @@ function createGlobalWebSocket(
   protocols: string[],
   init: { headers: Record<string, string> },
 ): CodexWebSocketLike {
-  const WebSocketCtor = (globalThis as typeof globalThis & {
-    WebSocket?: new (
-      url: string,
-      protocols?: string[],
-      init?: { headers?: Record<string, string> },
-    ) => CodexWebSocketLike;
-  }).WebSocket;
-  if (!WebSocketCtor) {
-    throw new Error("This Node.js runtime does not expose a global WebSocket implementation.");
-  }
-  return new WebSocketCtor(url, protocols, init);
+  return new WsWebSocket(url, protocols, { headers: init.headers });
 }
 
 function waitForWebSocketOpen(websocket: CodexWebSocketLike): Promise<void> {
