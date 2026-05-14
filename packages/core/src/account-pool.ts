@@ -2,8 +2,14 @@ import type {
   AccountFailureInput,
   AccountRecord,
   AccountStore,
+  AccountSuccessInput,
   AccountUpdateInput,
 } from "./accounts";
+import {
+  isCurrentlyAuthCoolingDown,
+  isCurrentlyRateLimited,
+  shouldRecoverRateLimitBlock,
+} from "./account-state";
 import {
   MemoryStickySessionStore,
   type StickySessionRecord,
@@ -33,7 +39,7 @@ export interface AccountPool {
   listByProvider(provider: ProviderId): Promise<AccountRecord[]>;
   select(input: AccountSelectionInput): Promise<AccountRecord | undefined>;
   update(accountId: string, input: AccountUpdateInput): Promise<AccountRecord | undefined>;
-  recordSuccess(accountId: string): Promise<void>;
+  recordSuccess(accountId: string, input?: AccountSuccessInput): Promise<void>;
   recordFailure(accountId: string, input: AccountFailureInput): Promise<void>;
 }
 
@@ -161,8 +167,8 @@ export class StickyAccountPool implements AccountPool {
     return this.store.update(accountId, input);
   }
 
-  async recordSuccess(accountId: string): Promise<void> {
-    await this.store.recordSuccess(accountId);
+  async recordSuccess(accountId: string, input: AccountSuccessInput = {}): Promise<void> {
+    await this.store.recordSuccess(accountId, input);
   }
 
   async recordFailure(accountId: string, input: AccountFailureInput): Promise<void> {
@@ -198,7 +204,7 @@ export class StickyAccountPool implements AccountPool {
     const recovered = [];
 
     for (const account of accounts) {
-      if (shouldRecoverExpiredRateLimit(account, now)) {
+      if (shouldRecoverRateLimitBlock(account, now)) {
         recovered.push(await this.store.resetState(account.id));
       } else {
         recovered.push(account);
@@ -207,19 +213,6 @@ export class StickyAccountPool implements AccountPool {
 
     return recovered.filter((account): account is AccountRecord => Boolean(account));
   }
-}
-
-function isRateLimited(account: AccountRecord): boolean {
-  return Boolean(
-    account.rateLimitResetAt && new Date(account.rateLimitResetAt).getTime() > Date.now(),
-  );
-}
-
-function shouldRecoverExpiredRateLimit(account: AccountRecord, now: number): boolean {
-  if (!account.rateLimitResetAt || account.reauthRequiredReason) return false;
-
-  const resetAt = new Date(account.rateLimitResetAt).getTime();
-  return Number.isFinite(resetAt) && resetAt <= now;
 }
 
 function parseStickyKey(key: string): Pick<StickySessionRecord, "provider" | "kind" | "sessionKey"> {
@@ -245,16 +238,10 @@ function isEligible(account: AccountRecord, input: AccountSelectionInput): boole
   return Boolean(
     account.enabled &&
       !account.reauthRequiredReason &&
-      !isRateLimited(account) &&
-      !isAuthCoolingDown(account) &&
+      !isCurrentlyRateLimited(account) &&
+      !isCurrentlyAuthCoolingDown(account) &&
       !input.excludeAccountIds?.includes(account.id) &&
       (!input.kind || account.kind === input.kind),
-  );
-}
-
-function isAuthCoolingDown(account: AccountRecord): boolean {
-  return Boolean(
-    account.authCooldownUntil && new Date(account.authCooldownUntil).getTime() > Date.now(),
   );
 }
 
@@ -294,8 +281,9 @@ function readUsageTiers(account: AccountRecord): Array<{ utilization: number }> 
   const usage = readRecord(account.metadata.cachedUsage) ?? readRecord(account.metadata.usage);
   if (!usage) return [];
 
-  return ["five_hour", "seven_day", "seven_day_sonnet"]
-    .map((key) => readRecord(usage[key]))
+  return Object.entries(usage)
+    .filter(([key]) => key === "five_hour" || key === "seven_day" || key.startsWith("seven_day_"))
+    .map(([, value]) => readRecord(value))
     .filter((tier): tier is Record<string, unknown> => Boolean(tier))
     .map((tier) => ({ utilization: readNumber(tier.utilization) ?? 0 }));
 }
@@ -328,7 +316,12 @@ function readRecord(value: unknown): Record<string, unknown> | undefined {
 }
 
 function readNumber(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function clampPercent(value: number): number {

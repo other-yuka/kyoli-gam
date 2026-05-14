@@ -1,6 +1,8 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type {
   AccountExecutionTraceEvent,
+  AccountExecutionResult,
+  AccountFailureSignal,
   AccountPool,
   ModelInfo,
   ProviderAdapter,
@@ -34,6 +36,10 @@ import {
   loadClaudeCodeIdentity,
   type ClaudeCodeIdentity,
 } from "./identity";
+import {
+  classifyClaudeCodeSseStartupFailure,
+  isClaudeCodeStartupOutputFrame,
+} from "./failures";
 
 const CLAUDE_CODE_API_BASE_URL = "https://api.anthropic.com";
 const templateMetadata = getClaudeCodeTemplateMetadata();
@@ -54,6 +60,7 @@ const DEFAULT_USAGE_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const BILLABLE_BETA_PREFIXES = ["extended-cache-ttl-"];
 const CONTEXT_1M_BETA = "context-1m-2025-08-07";
 const BILLING_SEED = "59cf53e54c78";
+const CLAUDE_STARTUP_PROBE_MAX_BYTES = 64 * 1024;
 const CLAUDE_CODE_AGENT_IDENTITY =
   templateMetadata.agentIdentity ?? "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
 const CLAUDE_CODE_SYSTEM_PROMPT =
@@ -289,21 +296,27 @@ export function createClaudeCodeProvider(
             trustClientFingerprint: options.trustClientFingerprint ?? false,
             url: createUpstreamUrl(baseUrl, context.route),
           });
+          const upstream = await normalizeClaudeCodeStartupFailure(response);
           await refreshUsageMetadataIfNeeded({
             accounts: options.accounts,
             credential: claudeCredential,
-            response,
+            response: upstream.response,
             usageRefresh,
             usageRefreshIntervalMs,
           });
-          return transformResponse(response, transformed.reverseLookup, {
+          const transformedResponse = await transformResponse(upstream.response, transformed.reverseLookup, {
             drainOnCancel,
             drainTimeoutMs,
           });
+          return {
+            ...upstream,
+            response: transformedResponse,
+          };
         },
         failureMessage: (status) => `Claude Code upstream returned ${status}`,
         onTrace: options.onTrace,
         readRateLimitResetAt: readClaudeCodeRateLimitResetAt,
+        sameAccountMaxRetries: 1,
         traceModel: context.model ? stripProviderPrefix(context.model) : undefined,
         traceRoute: context.route,
       });
@@ -372,6 +385,164 @@ async function dispatchClaudeRequest(
     body: input.body,
     duplex: "half",
   } as RequestInit);
+}
+
+async function normalizeClaudeCodeStartupFailure(response: Response): Promise<AccountExecutionResult> {
+  if (!response.ok || !response.body || !response.headers.get("content-type")?.includes("text/event-stream")) {
+    return { response };
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  const decoder = new TextDecoder();
+  let pendingText = "";
+  let failure: AccountFailureSignal | undefined;
+  let downstreamVisible = false;
+  let done = false;
+
+  while (byteLength(chunks) < CLAUDE_STARTUP_PROBE_MAX_BYTES && !failure && !downstreamVisible) {
+    const next = await reader.read();
+    if (next.done) {
+      done = true;
+      break;
+    }
+    chunks.push(next.value);
+    pendingText += decoder.decode(next.value, { stream: true });
+    pendingText = drainSseFrames(pendingText, (frame) => {
+      if (failure || downstreamVisible) return;
+      const frameFailure = classifyClaudeCodeSseStartupFailure(frame);
+      if (frameFailure) {
+        failure = withClaudeCodeRateLimitReset(frameFailure, response.headers);
+        return;
+      }
+      if (isClaudeCodeStartupOutputFrame(frame)) downstreamVisible = true;
+    });
+  }
+
+  if (done && !failure && !downstreamVisible) {
+    pendingText += decoder.decode();
+    if (pendingText.trim()) {
+      const pendingFailure = classifyClaudeCodeSseStartupFailure(pendingText);
+      if (pendingFailure) {
+        failure = withClaudeCodeRateLimitReset(pendingFailure, response.headers);
+      } else if (isClaudeCodeStartupOutputFrame(pendingText)) {
+        downstreamVisible = true;
+      }
+    }
+  }
+
+  if (failure) {
+    await reader.cancel().catch(() => undefined);
+    return {
+      failure,
+      downstreamVisible: false,
+      response: jsonResponse(
+        {
+          error: {
+            type: failure.code ?? "upstream_error",
+            message: failure.message ?? "Claude Code upstream failed before producing output.",
+            upstream_status: "error",
+          },
+        },
+        {
+          status: failure.httpStatus ?? 502,
+          headers: createClaudeCodeFailureHeaders(failure, response.headers),
+        },
+      ),
+    };
+  }
+
+  return {
+    downstreamVisible,
+    response: new Response(replayResponseBody(chunks, reader), {
+      status: response.status,
+      statusText: response.statusText,
+      headers: filterStreamingResponseHeaders(response.headers),
+    }),
+  };
+}
+
+function withClaudeCodeRateLimitReset(
+  failure: AccountFailureSignal,
+  headers: Headers,
+): AccountFailureSignal {
+  if (failure.class !== "rate_limit" && failure.class !== "quota") return failure;
+
+  const resetAt = readClaudeCodeRateLimitResetAt(headers) ?? failure.resetAt;
+  return {
+    ...failure,
+    resetAt,
+    retryAfterSeconds: secondsUntilIso(resetAt) ?? failure.retryAfterSeconds,
+  };
+}
+
+function createClaudeCodeFailureHeaders(
+  failure: AccountFailureSignal,
+  upstreamHeaders: Headers,
+): Record<string, string> {
+  const headers: Record<string, string> = {};
+  for (const [key, value] of upstreamHeaders.entries()) {
+    if (key.startsWith("anthropic-ratelimit") || key.startsWith("x-ratelimit") || key === "request-id") {
+      headers[key] = value;
+    }
+  }
+  if (failure.retryAfterSeconds) headers["retry-after"] = String(failure.retryAfterSeconds);
+  if (failure.resetAt) headers["x-kyoli-account-reset-at"] = failure.resetAt;
+  return headers;
+}
+
+function replayResponseBody(
+  chunks: Uint8Array[],
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+): ReadableStream<Uint8Array> {
+  let index = 0;
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      if (index < chunks.length) {
+        controller.enqueue(chunks[index++]);
+        return;
+      }
+      const next = await reader.read();
+      if (next.done) {
+        controller.close();
+        return;
+      }
+      controller.enqueue(next.value);
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
+  });
+}
+
+function drainSseFrames(buffer: string, onFrame: (frame: string) => void): string {
+  let remainder = buffer;
+
+  while (true) {
+    const normalizedIndex = remainder.indexOf("\n\n");
+    const windowsIndex = remainder.indexOf("\r\n\r\n");
+    const indexes = [normalizedIndex, windowsIndex].filter((index) => index >= 0);
+    if (indexes.length === 0) return remainder;
+
+    const index = Math.min(...indexes);
+    const separatorLength = remainder.startsWith("\r\n\r\n", index) ? 4 : 2;
+    const frame = remainder.slice(0, index);
+    remainder = remainder.slice(index + separatorLength);
+    if (frame.trim()) onFrame(frame);
+  }
+}
+
+function filterStreamingResponseHeaders(headers: Headers): Headers {
+  const filtered = new Headers(headers);
+  filtered.delete("content-encoding");
+  filtered.delete("content-length");
+  filtered.delete("transfer-encoding");
+  filtered.delete("connection");
+  return filtered;
+}
+
+function byteLength(chunks: Uint8Array[]): number {
+  return chunks.reduce((total, chunk) => total + chunk.byteLength, 0);
 }
 
 function parseRejectedBetaFlags(body: string): string[] {
@@ -903,6 +1074,12 @@ function formatMinutesUntil(iso: string): number {
   const timestamp = new Date(iso).getTime();
   if (!Number.isFinite(timestamp)) return 0;
   return Math.max(0, Math.round((timestamp - Date.now()) / 60_000));
+}
+
+function secondsUntilIso(iso: string | undefined): number | undefined {
+  if (!iso) return undefined;
+  const ms = new Date(iso).getTime() - Date.now();
+  return Number.isFinite(ms) && ms > 0 ? Math.ceil(ms / 1000) : undefined;
 }
 
 function transformEventStreamResponse(

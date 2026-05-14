@@ -18,6 +18,38 @@ export interface SelectedCredential {
   accountId?: string;
 }
 
+export type AccountFailureClass =
+  | "rate_limit"
+  | "quota"
+  | "auth"
+  | "permanent"
+  | "transient"
+  | "neutral";
+
+export type AccountFailurePhase =
+  | "connect"
+  | "headers"
+  | "startup"
+  | "mid_stream"
+  | "terminal";
+
+export interface AccountFailureSignal {
+  class: AccountFailureClass;
+  phase: AccountFailurePhase;
+  code?: string;
+  message?: string;
+  httpStatus?: number;
+  retryAfterSeconds?: number;
+  resetAt?: string;
+  retryScope?: "same_account" | "next_account" | "none";
+}
+
+export interface AccountExecutionResult {
+  response: Response;
+  failure?: AccountFailureSignal;
+  downstreamVisible?: boolean;
+}
+
 export type AccountExecutionTraceEvent =
   | (AccountExecutionTraceBase & {
       type: "credential_unavailable";
@@ -44,6 +76,9 @@ export type AccountExecutionTraceEvent =
       attempt: number;
       status: number;
       retryable: boolean;
+      failureClass?: AccountFailureClass;
+      failureCode?: string;
+      failurePhase?: AccountFailurePhase;
     })
   | (AccountExecutionTraceBase & {
       type: "retry";
@@ -53,6 +88,9 @@ export type AccountExecutionTraceEvent =
       accountId: string;
       attempt: number;
       status: number;
+      failureClass?: AccountFailureClass;
+      failureCode?: string;
+      failurePhase?: AccountFailurePhase;
     })
   | (AccountExecutionTraceBase & {
       type: "missing";
@@ -80,9 +118,10 @@ export interface ExecuteWithAccountFailoverInput {
   configuredCredential?: SelectedCredential;
   sessionKey: string;
   maxAttempts?: number;
+  sameAccountMaxRetries?: number;
   missingCredentialResponse: () => Response;
   selectCredential: (excludeAccountIds: string[]) => Promise<SelectedCredential | undefined>;
-  execute: (credential: SelectedCredential) => Promise<Response>;
+  execute: (credential: SelectedCredential) => Promise<Response | AccountExecutionResult>;
   failureMessage: (status: number) => string;
   readRateLimitResetAt?: (headers: Headers) => string | undefined;
   onTrace?: (event: AccountExecutionTraceEvent) => void;
@@ -152,9 +191,15 @@ export async function executeWithAccountFailover(
       route: input.traceRoute,
       model: input.traceModel,
     });
-    const response = await input.execute(credential);
-    await recordAccountResult(input, credential.accountId, response);
-    const retryable = shouldRetryWithNextAccount(response.status, credential.accountId);
+    const result = await executeWithSameAccountRetry(input, credential);
+    const response = result.response;
+    await recordAccountResult(input, credential.accountId, response, result.failure);
+    const retryable = shouldRetryWithNextAccount({
+      status: response.status,
+      accountId: credential.accountId,
+      failure: result.failure,
+      downstreamVisible: result.downstreamVisible,
+    });
     input.onTrace?.({
       requestId,
       type: "response",
@@ -165,6 +210,9 @@ export async function executeWithAccountFailover(
       attempt: attempt + 1,
       status: response.status,
       retryable,
+      failureClass: result.failure?.class,
+      failureCode: result.failure?.code,
+      failurePhase: result.failure?.phase,
       route: input.traceRoute,
       model: input.traceModel,
     });
@@ -184,6 +232,9 @@ export async function executeWithAccountFailover(
       accountId: credential.accountId,
       attempt: attempt + 1,
       status: response.status,
+      failureClass: result.failure?.class,
+      failureCode: result.failure?.code,
+      failurePhase: result.failure?.phase,
       route: input.traceRoute,
       model: input.traceModel,
     });
@@ -209,6 +260,17 @@ export async function executeWithAccountFailover(
     : unavailableCredentialResponse(input, excludedAccountIds, Boolean(lastRetryableResponse));
 }
 
+async function executeWithSameAccountRetry(
+  input: ExecuteWithAccountFailoverInput,
+  credential: SelectedCredential,
+): Promise<AccountExecutionResult> {
+  const maxRetries = Math.max(0, input.sameAccountMaxRetries ?? 0);
+  for (let retry = 0; ; retry += 1) {
+    const result = normalizeAccountExecutionResult(await input.execute(credential));
+    if (!shouldRetrySameAccount(result) || retry >= maxRetries) return result;
+  }
+}
+
 async function unavailableCredentialResponse(
   input: ExecuteWithAccountFailoverInput,
   excludedAccountIds: string[],
@@ -221,7 +283,7 @@ async function unavailableCredentialResponse(
   const summary = summarizeAccountStatus(accounts)[0];
   if (!summary) return input.missingCredentialResponse();
 
-  const status = summary.rateLimited > 0 ? 429 : 503;
+  const status = summary.rateLimited > 0 || summary.quotaExceeded > 0 ? 429 : 503;
   const type = status === 429 ? "account_rate_limited" : "account_exhausted";
   const retryAfterSeconds = summary.nextResetAt ? secondsUntil(summary.nextResetAt) : undefined;
   const headers: Record<string, string> = {};
@@ -253,6 +315,7 @@ function toPublicAccountStatusSummary(row: ReturnType<typeof summarizeAccountSta
     total: row.total,
     ready: row.ready,
     rate_limited: row.rateLimited,
+    quota_exceeded: row.quotaExceeded,
     auth_cooldown: row.authCooldown,
     disabled: row.disabled,
     reauth_required: row.reauthRequired,
@@ -270,6 +333,10 @@ function accountExhaustionMessage(
   if (summary.rateLimited > 0) {
     const suffix = summary.nextResetAt ? ` Next reset is ${summary.nextResetAt}.` : "";
     return `All ${provider} ${kind} accounts are currently rate-limited.${suffix}`;
+  }
+  if (summary.quotaExceeded > 0) {
+    const suffix = summary.nextResetAt ? ` Next reset is ${summary.nextResetAt}.` : "";
+    return `All ${provider} ${kind} accounts have exhausted quota.${suffix}`;
   }
   if (summary.authCooldown > 0) {
     const suffix = summary.nextAuthRetryAt ? ` Next auth retry is ${summary.nextAuthRetryAt}.` : "";
@@ -295,16 +362,59 @@ function secondsUntil(iso: string): number | undefined {
   return Math.ceil(ms / 1000);
 }
 
-function shouldRetryWithNextAccount(status: number, accountId: string | undefined): accountId is string {
-  return Boolean(accountId && (status === 401 || status === 403 || status === 429));
+function normalizeAccountExecutionResult(result: Response | AccountExecutionResult): AccountExecutionResult {
+  return result instanceof Response ? { response: result } : result;
+}
+
+function shouldRetryWithNextAccount(input: {
+  status: number;
+  accountId: string | undefined;
+  failure?: AccountFailureSignal;
+  downstreamVisible?: boolean;
+}): boolean {
+  if (!input.accountId) return false;
+  if (input.failure) {
+    if (input.downstreamVisible || input.failure.retryScope === "none") return false;
+    if (input.failure.retryScope === "next_account") return true;
+    if (input.failure.class === "rate_limit" || input.failure.class === "quota" || input.failure.class === "auth") {
+      return true;
+    }
+    return false;
+  }
+  return input.status === 401 || input.status === 403 || input.status === 429;
+}
+
+function shouldRetrySameAccount(result: AccountExecutionResult): boolean {
+  return Boolean(
+    result.failure &&
+    !result.downstreamVisible &&
+    result.failure.retryScope === "same_account",
+  );
 }
 
 async function recordAccountResult(
   input: ExecuteWithAccountFailoverInput,
   accountId: string | undefined,
   response: Response,
+  failure?: AccountFailureSignal,
 ): Promise<void> {
   if (!input.accounts || !accountId) return;
+
+  if (failure && failure.class !== "neutral") {
+    const status = statusFromFailure(failure);
+    if (status === undefined) return;
+    const cooldownUntil = cooldownUntilFromFailure(failure);
+    await input.accounts.recordFailure(accountId, {
+      status,
+      message: failure.message ?? input.failureMessage(status),
+      rateLimitResetAt: status === 429 ? failure.resetAt : undefined,
+      rateLimitCooldownUntil: status === 429 ? cooldownUntil : undefined,
+      failureClass: failure.class,
+      failureCode: failure.code,
+      failurePhase: failure.phase,
+    });
+    return;
+  }
 
   if (response.ok) {
     await input.accounts.recordSuccess(accountId);
@@ -312,14 +422,32 @@ async function recordAccountResult(
   }
 
   if (response.status === 401 || response.status === 403 || response.status === 429) {
+    const resetAt = response.status === 429
+      ? input.readRateLimitResetAt?.(response.headers) ?? readRateLimitResetAt(response.headers)
+      : undefined;
     await input.accounts.recordFailure(accountId, {
       status: response.status,
       message: input.failureMessage(response.status),
-      rateLimitResetAt: response.status === 429
-        ? input.readRateLimitResetAt?.(response.headers) ?? readRateLimitResetAt(response.headers)
-        : undefined,
+      rateLimitResetAt: resetAt,
+      rateLimitCooldownUntil: resetAt,
     });
   }
+}
+
+function statusFromFailure(failure: AccountFailureSignal): number | undefined {
+  if (failure.httpStatus) return failure.httpStatus;
+  if (failure.class === "rate_limit" || failure.class === "quota") return 429;
+  if (failure.class === "auth") return 401;
+  if (failure.class === "permanent") return 403;
+  return undefined;
+}
+
+function cooldownUntilFromFailure(failure: AccountFailureSignal): string | undefined {
+  if (failure.resetAt) return failure.resetAt;
+  if (failure.retryAfterSeconds && failure.retryAfterSeconds > 0) {
+    return new Date(Date.now() + failure.retryAfterSeconds * 1000).toISOString();
+  }
+  return undefined;
 }
 
 function cloneUpstreamResponse(upstream: Response): Response {

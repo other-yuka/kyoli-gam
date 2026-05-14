@@ -56,6 +56,33 @@ describe("AccountStore state reset", () => {
     expect(reset?.reauthRequiredReason).toBeUndefined();
   });
 
+  it("records transport success without clearing rate-limit state", async () => {
+    const store = new MemoryAccountStore();
+    const account = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: { accessToken: "secret" },
+    });
+    const resetAt = new Date(Date.now() + 60_000).toISOString();
+    await store.recordFailure(account.id, {
+      status: 429,
+      message: "usage limit",
+      rateLimitResetAt: resetAt,
+      failureClass: "rate_limit",
+      failureCode: "usage_limit_reached",
+      failurePhase: "startup",
+    });
+
+    const updated = await store.recordSuccess(account.id, { kind: "transport" });
+
+    expect(updated?.lastUsedAt).toBeDefined();
+    expect(updated?.failureCount).toBe(1);
+    expect(updated?.rateLimitResetAt).toBe(resetAt);
+    expect(updated?.rateLimitBlockedAt).toBeDefined();
+    expect(updated?.rateLimitCooldownUntil).toBe(resetAt);
+    expect(updated?.lastFailureCode).toBe("usage_limit_reached");
+  });
+
   it("still supports explicit reauth-required failures", async () => {
     const store = new MemoryAccountStore();
     const account = await store.create({

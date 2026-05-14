@@ -6,8 +6,70 @@ import {
   type GatewayWebSocketMessage,
 } from "@kyoli-gam/core";
 import { createCodexChatGPTProvider } from "../src";
+import { classifyCodexJsonEventFailure, parseCodexRetryAfterSeconds } from "../src/failures";
 
 describe("createCodexChatGPTProvider", () => {
+  it("reads structured Codex reset metadata from rate-limit errors", () => {
+    const resetEpoch = 4_102_444_800;
+
+    const failure = classifyCodexJsonEventFailure(
+      {
+        type: "error",
+        status: 429,
+        error: {
+          code: "usage_limit_reached",
+          message: "usage limit",
+          resets_at: String(resetEpoch),
+        },
+      },
+      "startup",
+    );
+
+    expect(failure?.resetAt).toBe(new Date(resetEpoch * 1000).toISOString());
+    expect(failure?.retryAfterSeconds).toBeGreaterThan(0);
+  });
+
+  it("does not treat Codex retry-at message text as reset metadata", () => {
+    const failure = classifyCodexJsonEventFailure(
+      {
+        type: "error",
+        status: 429,
+        error: {
+          code: "usage_limit_reached",
+          message: "You've hit your usage limit. Upgrade to Plus, or try again at May 21st, 2026 12:55 PM.",
+        },
+      },
+      "startup",
+    );
+
+    expect(failure?.resetAt).toBeUndefined();
+    expect(failure?.retryAfterSeconds).toBeUndefined();
+  });
+
+  it("keeps short Codex retry-in message text as cooldown only", () => {
+    expect(parseCodexRetryAfterSeconds("rate limited, try again in 250ms")).toBe(0.25);
+    expect(parseCodexRetryAfterSeconds("rate limited, try again in 2s")).toBe(2);
+  });
+
+  it("maps Codex auth failures without status to auth account failures", () => {
+    const failure = classifyCodexJsonEventFailure(
+      {
+        type: "error",
+        error: {
+          code: "invalid_api_key",
+          message: "invalid access token",
+        },
+      },
+      "startup",
+    );
+
+    expect(failure).toMatchObject({
+      class: "auth",
+      httpStatus: 401,
+      retryScope: "next_account",
+    });
+  });
+
   it("proxies /backend-api/codex/responses with Codex-compatible OAuth headers", async () => {
     let upstreamUrl = "";
     let upstreamBody: unknown;
@@ -1911,6 +1973,239 @@ describe("createCodexChatGPTProvider", () => {
     expect(resetInMs).toBeLessThanOrEqual(5 * 60_000);
   });
 
+  it("fails over when Codex emits a startup usage-limit response.failed event before output", async () => {
+    const store = new MemoryAccountStore();
+    const first = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "first-access",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-first",
+      },
+    });
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "second-access",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-second",
+      },
+    });
+    const upstreamAuths: string[] = [];
+
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      fetch: async (_input, init) => {
+        const authorization = new Headers(init?.headers).get("authorization") ?? "";
+        upstreamAuths.push(authorization);
+        if (authorization === "Bearer first-access") {
+          return new Response(chunkedTextStream([
+            [
+              "event: response.created",
+              'data: {"type":"response.created","response":{"id":"resp_first","status":"in_progress"}}',
+              "",
+            ].join("\n"),
+            [
+              "event: response.in_progress",
+              'data: {"type":"response.in_progress","response":{"id":"resp_first","status":"in_progress"}}',
+              "",
+            ].join("\n"),
+            [
+              "event: response.failed",
+              'data: {"type":"response.failed","response":{"id":"resp_first","status":"failed","error":{"code":"usage_limit_reached","message":"Youve hit your usage limit. Upgrade to Pro, visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 12:55 PM."}}}',
+              "",
+            ].join("\n"),
+          ]), {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          });
+        }
+
+        return new Response(
+          [
+            "event: response.completed",
+            'data: {"type":"response.completed","response":{"id":"resp_second","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}',
+            "",
+          ].join("\n"),
+          {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          },
+        );
+      },
+    });
+
+    const response = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/v1/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "codex/gpt-5.3-codex", input: "hello" }),
+      }),
+      route: "/v1/responses",
+      sessionKey: "session-a",
+      body: { model: "codex/gpt-5.3-codex", input: "hello" },
+      model: "codex/gpt-5.3-codex",
+    });
+
+    const firstUpdated = await store.get(first.id);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      id: "resp_second",
+      output_text: "ok",
+    });
+    expect(upstreamAuths).toEqual(["Bearer first-access", "Bearer second-access"]);
+    expect(firstUpdated?.rateLimitResetAt).toBeUndefined();
+    expect(firstUpdated?.rateLimitBlockedAt).toBeTruthy();
+  });
+
+  it("fails over when Codex emits a startup usage-limit error event", async () => {
+    const store = new MemoryAccountStore();
+    const first = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "first-access",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-first",
+      },
+    });
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "second-access",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-second",
+      },
+    });
+    const upstreamAuths: string[] = [];
+
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      fetch: async (_input, init) => {
+        const authorization = new Headers(init?.headers).get("authorization") ?? "";
+        upstreamAuths.push(authorization);
+        if (authorization === "Bearer first-access") {
+          return new Response(
+            [
+              "event: error",
+              'data: {"type":"error","status":429,"error":{"type":"invalid_request_error","code":"usage_limit_reached","message":"The usage limit has been reached"}}',
+              "",
+            ].join("\n"),
+            {
+              status: 200,
+              headers: { "content-type": "text/event-stream" },
+            },
+          );
+        }
+
+        return new Response(
+          [
+            "event: response.completed",
+            'data: {"type":"response.completed","response":{"id":"resp_second","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}',
+            "",
+          ].join("\n"),
+          {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          },
+        );
+      },
+    });
+
+    const response = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/v1/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "codex/gpt-5.3-codex", input: "hello" }),
+      }),
+      route: "/v1/responses",
+      sessionKey: "session-a",
+      body: { model: "codex/gpt-5.3-codex", input: "hello" },
+      model: "codex/gpt-5.3-codex",
+    });
+
+    const firstUpdated = await store.get(first.id);
+    expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        id: "resp_second",
+        output_text: "ok",
+      });
+      expect(upstreamAuths).toEqual(["Bearer first-access", "Bearer second-access"]);
+      expect(firstUpdated?.rateLimitResetAt).toBeUndefined();
+      expect(firstUpdated?.rateLimitBlockedAt).toBeTruthy();
+      expect(firstUpdated?.lastFailureClass).toBe("rate_limit");
+      expect(firstUpdated?.lastFailureCode).toBe("usage_limit_reached");
+    });
+
+  it("retries transient Codex startup failures on the same account before failing over", async () => {
+    const store = new MemoryAccountStore();
+    const account = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "first-access",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-first",
+      },
+    });
+    const upstreamAuths: string[] = [];
+
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      fetch: async (_input, init) => {
+        const authorization = new Headers(init?.headers).get("authorization") ?? "";
+        upstreamAuths.push(authorization);
+        if (upstreamAuths.length === 1) {
+          return new Response(
+            [
+              "event: error",
+              'data: {"type":"error","status":502,"error":{"code":"upstream_disconnected","message":"stream disconnected before completion: websocket closed by server before response.completed"}}',
+              "",
+            ].join("\n"),
+            {
+              status: 200,
+              headers: { "content-type": "text/event-stream" },
+            },
+          );
+        }
+
+        return new Response(
+          [
+            "event: response.completed",
+            'data: {"type":"response.completed","response":{"id":"resp_retry_ok","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}',
+            "",
+          ].join("\n"),
+          {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          },
+        );
+      },
+    });
+
+    const response = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/v1/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "codex/gpt-5.3-codex", input: "hello" }),
+      }),
+      route: "/v1/responses",
+      sessionKey: "session-a",
+      body: { model: "codex/gpt-5.3-codex", input: "hello" },
+      model: "codex/gpt-5.3-codex",
+    });
+
+    const updated = await store.get(account.id);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ id: "resp_retry_ok", output_text: "ok" });
+    expect(upstreamAuths).toEqual(["Bearer first-access", "Bearer first-access"]);
+    expect(updated?.failureCount).toBe(0);
+    expect(updated?.lastUsedAt).toBeTruthy();
+  });
+
   it("exposes account execution trace events", async () => {
     const store = new MemoryAccountStore();
     await store.create({
@@ -2221,6 +2516,288 @@ describe("createCodexChatGPTProvider", () => {
     expect(frames.at(-1)).toBe("[DONE]");
   });
 
+  it("terminates streaming chat completions with an error frame on mid-stream Codex failure", async () => {
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+      },
+    });
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      fetch: async () =>
+        new Response(
+          [
+            "event: response.output_text.delta",
+            'data: {"type":"response.output_text.delta","delta":"partial"}',
+            "",
+            "event: response.failed",
+            'data: {"type":"response.failed","response":{"status":"failed","error":{"code":"upstream_disconnected","message":"stream disconnected before completion: websocket closed by server before response.completed"}}}',
+            "",
+          ].join("\n"),
+          {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          },
+        ),
+    });
+
+    const response = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "codex/gpt-5.3-codex",
+          messages: [{ role: "user", content: "hello" }],
+          stream: true,
+        }),
+      }),
+      route: "/v1/chat/completions",
+      sessionKey: "session-a",
+      body: {
+        model: "codex/gpt-5.3-codex",
+        messages: [{ role: "user", content: "hello" }],
+        stream: true,
+      },
+      model: "codex/gpt-5.3-codex",
+    });
+
+    const frames = parseSseData(await response.text());
+    expect(frames.slice(0, -1).map((frame) => JSON.parse(frame))).toMatchObject([
+      {
+        choices: [{ delta: { role: "assistant" }, finish_reason: null }],
+      },
+      {
+        choices: [{ delta: { content: "partial" }, finish_reason: null }],
+      },
+      {
+        error: {
+          code: "upstream_disconnected",
+          message: "stream disconnected before completion: websocket closed by server before response.completed",
+        },
+      },
+    ]);
+    expect(frames.at(-1)).toBe("[DONE]");
+  });
+
+  it("streams chat tool calls through Codex Responses function-call events", async () => {
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+      },
+    });
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      fetch: async () =>
+        new Response(
+          [
+            "event: response.output_item.added",
+            'data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"skill_view","arguments":""}}',
+            "",
+            "event: response.function_call_arguments.delta",
+            'data: {"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_1","delta":"{\\"name\\":\\"hermes-agent\\"}"}',
+            "",
+            "event: response.output_item.done",
+            'data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"skill_view","arguments":"{\\"name\\":\\"hermes-agent\\"}"}}',
+            "",
+            "event: response.completed",
+            'data: {"type":"response.completed","response":{"status":"completed"}}',
+            "",
+          ].join("\n"),
+          {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          },
+        ),
+    });
+
+    const body = {
+      model: "codex/gpt-5.3-codex",
+      messages: [{ role: "user", content: "use skill" }],
+      stream: true,
+      tools: [{
+        type: "function",
+        function: {
+          name: "skill_view",
+          parameters: { type: "object" },
+        },
+      }],
+    };
+    const response = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+      route: "/v1/chat/completions",
+      sessionKey: "session-a",
+      body,
+      model: "codex/gpt-5.3-codex",
+    });
+
+    const chunks = parseSseData(await response.text()).filter((frame) => frame !== "[DONE]").map((frame) => JSON.parse(frame));
+    expect(chunks.some((chunk) => chunk.choices[0].delta.content)).toBe(false);
+    const toolChunks = chunks.filter((chunk) => chunk.choices[0].delta.tool_calls);
+    expect(toolChunks.at(0)).toMatchObject({
+      choices: [{
+        delta: {
+          tool_calls: [{
+            index: 0,
+            id: "call_1",
+            type: "function",
+            function: { name: "skill_view" },
+          }],
+        },
+        finish_reason: null,
+      }],
+    });
+    expect(toolChunks.map((chunk) => chunk.choices[0].delta.tool_calls[0].function.arguments ?? "").join(""))
+      .toBe("{\"name\":\"hermes-agent\"}");
+    expect(chunks.at(-1)).toMatchObject({
+      choices: [{ delta: {}, finish_reason: "tool_calls" }],
+    });
+  });
+
+  it("returns non-stream chat tool calls from Codex Responses output", async () => {
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+      },
+    });
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      fetch: async () =>
+        new Response(
+          [
+            "event: response.completed",
+            'data: {"type":"response.completed","response":{"id":"resp_tool","status":"completed","output":[{"id":"fc_1","type":"function_call","call_id":"call_1","name":"skill_view","arguments":"{\\"name\\":\\"hermes-agent\\"}"}]}}',
+            "",
+          ].join("\n"),
+          {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          },
+        ),
+    });
+
+    const body = {
+      model: "codex/gpt-5.3-codex",
+      messages: [{ role: "user", content: "use skill" }],
+      tools: [{
+        type: "function",
+        function: {
+          name: "skill_view",
+          parameters: { type: "object" },
+        },
+      }],
+    };
+    const response = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+      route: "/v1/chat/completions",
+      sessionKey: "session-a",
+      body,
+      model: "codex/gpt-5.3-codex",
+    });
+
+    expect(await response.json()).toMatchObject({
+      choices: [{
+        message: {
+          role: "assistant",
+          content: "",
+          tool_calls: [{
+            id: "call_1",
+            type: "function",
+            function: {
+              name: "skill_view",
+              arguments: "{\"name\":\"hermes-agent\"}",
+            },
+          }],
+        },
+        finish_reason: "tool_calls",
+      }],
+    });
+  });
+
+  it("handles chat stream_options like codex-lb", async () => {
+    let upstreamBody: Record<string, unknown> = {};
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+      },
+    });
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      fetch: async (_input, init) => {
+        upstreamBody = JSON.parse(String(init?.body));
+        return new Response(
+          [
+            "event: response.output_text.delta",
+            'data: {"type":"response.output_text.delta","delta":"hello"}',
+            "",
+            "event: response.completed",
+            'data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5}}}',
+            "",
+          ].join("\n"),
+          {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          },
+        );
+      },
+    });
+
+    const body = {
+      model: "codex/gpt-5.3-codex",
+      messages: [{ role: "user", content: "hello" }],
+      stream: true,
+      stream_options: { include_usage: true, include_obfuscation: true },
+    };
+    const response = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+      route: "/v1/chat/completions",
+      sessionKey: "session-a",
+      body,
+      model: "codex/gpt-5.3-codex",
+    });
+
+    const chunks = parseSseData(await response.text()).filter((frame) => frame !== "[DONE]").map((frame) => JSON.parse(frame));
+    expect(response.status).toBe(200);
+    expect(upstreamBody.stream_options).toEqual({ include_obfuscation: true });
+    expect(chunks.slice(0, -1).every((chunk) => chunk.usage === null)).toBe(true);
+    expect(chunks.at(-1)).toMatchObject({
+      object: "chat.completion.chunk",
+      choices: [],
+      usage: { input_tokens: 2, output_tokens: 3, total_tokens: 5 },
+    });
+  });
+
   it("proxies native Codex WebSocket requests with Responses beta headers", async () => {
     let upstreamUrl = "";
     let upstreamHeaders: Record<string, string> = {};
@@ -2278,6 +2855,163 @@ describe("createCodexChatGPTProvider", () => {
     expect(upstreamSocket?.sent).toEqual(['{"type":"response.create"}']);
     expect(upstreamSocket?.closed).toEqual({ code: 1000, reason: "done" });
   });
+
+  it("fails over Codex WebSocket startup rate limits and replays the create message", async () => {
+    const store = new MemoryAccountStore();
+    const first = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "first-access",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-first",
+        accountId: "acct_first",
+      },
+    });
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "second-access",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-second",
+        accountId: "acct_second",
+      },
+    });
+    const upstreamSockets: FakeUpstreamWebSocket[] = [];
+    const upstreamHeaders: Array<Record<string, string>> = [];
+
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      webSocketFactory: (_url, _protocols, init) => {
+        const socket = new FakeUpstreamWebSocket();
+        if (upstreamSockets.length === 0) {
+          socket.onSend = () => {
+            queueMicrotask(() => {
+              socket.emit("message", {
+                data: '{"type":"response.created","response":{"id":"resp_first","status":"in_progress"}}',
+              });
+              socket.emit("message", {
+                data: '{"type":"error","status":429,"error":{"code":"usage_limit_reached","message":"Youve hit your usage limit. Upgrade to Plus to continue using Codex (https://chatgpt.com/explore/plus), or try again at May 21st, 2026 12:55 PM."}}',
+              });
+            });
+          };
+        }
+        upstreamSockets.push(socket);
+        upstreamHeaders.push(init.headers);
+        queueMicrotask(() => socket.emit("open", {}));
+        return socket;
+      },
+    });
+    const downstream = new FakeGatewayWebSocket(
+      [{ type: "text", data: '{"type":"response.create"}' }],
+      { waitWhenEmpty: true },
+    );
+
+    const websocketPromise = provider.handleWebSocket?.({
+      request: new Request("http://127.0.0.1:2021/backend-api/codex/responses", {
+        headers: {
+          "sec-websocket-key": "client-key",
+          "sec-websocket-version": "13",
+          originator: "codex_vscode",
+          "user-agent": "codex_vscode/0.0.0",
+        },
+      }),
+      route: "/backend-api/codex/responses",
+      sessionKey: "session-a",
+      websocket: downstream,
+    });
+
+    await waitFor(() => upstreamSockets.length === 2 && upstreamSockets[1]!.sent.length === 1);
+    const firstUpdated = await store.get(first.id);
+    expect(upstreamHeaders.map((headers) => headers.authorization)).toEqual([
+      "Bearer first-access",
+      "Bearer second-access",
+    ]);
+    expect(upstreamSockets[0]?.sent).toEqual(['{"type":"response.create"}']);
+    expect(upstreamSockets[1]?.sent).toEqual(['{"type":"response.create"}']);
+    expect(downstream.sentText).toEqual([]);
+    expect(firstUpdated?.lastFailureClass).toBe("rate_limit");
+    expect(firstUpdated?.lastFailureCode).toBe("usage_limit_reached");
+    expect(firstUpdated?.rateLimitResetAt).toBeUndefined();
+    expect(firstUpdated?.rateLimitBlockedAt).toBeTruthy();
+
+    downstream.pushMessage({ type: "close", code: 1000, reason: "done" });
+    await websocketPromise;
+    expect(upstreamSockets[1]?.closed).toEqual({ code: 1000, reason: "done" });
+  });
+
+  it("does not replay Codex WebSocket usage limits with previous_response_id to another account", async () => {
+    const store = new MemoryAccountStore();
+    const first = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "first-access",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-first",
+        accountId: "acct_first",
+      },
+    });
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "second-access",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-second",
+        accountId: "acct_second",
+      },
+    });
+    const upstreamSockets: FakeUpstreamWebSocket[] = [];
+
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      webSocketFactory: () => {
+        const socket = new FakeUpstreamWebSocket();
+        socket.onSend = () => {
+          queueMicrotask(() => {
+            socket.emit("message", {
+              data: '{"type":"error","status":429,"error":{"code":"usage_limit_reached","message":"The usage limit has been reached"}}',
+            });
+          });
+        };
+        upstreamSockets.push(socket);
+        queueMicrotask(() => socket.emit("open", {}));
+        return socket;
+      },
+    });
+    const downstream = new FakeGatewayWebSocket(
+      [{ type: "text", data: '{"type":"response.create","previous_response_id":"resp_anchor"}' }],
+      { waitWhenEmpty: true },
+    );
+
+    const websocketPromise = provider.handleWebSocket?.({
+      request: new Request("http://127.0.0.1:2021/backend-api/codex/responses", {
+        headers: {
+          "sec-websocket-key": "client-key",
+          "sec-websocket-version": "13",
+          originator: "codex_vscode",
+          "user-agent": "codex_vscode/0.0.0",
+        },
+      }),
+      route: "/backend-api/codex/responses",
+      sessionKey: "session-a",
+      websocket: downstream,
+    });
+
+    await waitFor(() => downstream.sentText.length === 1);
+    const firstUpdated = await store.get(first.id);
+    expect(upstreamSockets).toHaveLength(1);
+    expect(JSON.parse(downstream.sentText[0] ?? "{}")).toMatchObject({
+      type: "error",
+      error: { code: "usage_limit_reached" },
+    });
+    expect(firstUpdated?.lastFailureClass).toBe("rate_limit");
+
+    downstream.pushMessage({ type: "close", code: 1000, reason: "done" });
+    await websocketPromise;
+  });
 });
 
 function parseSseData(value: string): string[] {
@@ -2288,20 +3022,39 @@ function parseSseData(value: string): string[] {
     .map((frame) => frame.replace(/^data:\s*/, ""));
 }
 
+function chunkedTextStream(chunks: string[]): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) {
+        controller.enqueue(encoder.encode(chunk.endsWith("\n\n") ? chunk : `${chunk}\n`));
+      }
+      controller.close();
+    },
+  });
+}
+
 class FakeGatewayWebSocket {
   acceptedHeaders = new Headers();
   sentText: string[] = [];
   sentBinary: Uint8Array[] = [];
   closed: { code?: number; reason?: string } | undefined;
+  private readonly waiters: Array<(message: GatewayWebSocketMessage) => void> = [];
 
-  constructor(private readonly messages: GatewayWebSocketMessage[]) {}
+  constructor(
+    private readonly messages: GatewayWebSocketMessage[],
+    private readonly options: { waitWhenEmpty?: boolean } = {},
+  ) {}
 
   async accept(headers?: HeadersInit): Promise<void> {
     this.acceptedHeaders = new Headers(headers);
   }
 
   async receive(): Promise<GatewayWebSocketMessage> {
-    return this.messages.shift() ?? { type: "close" };
+    const message = this.messages.shift();
+    if (message) return message;
+    if (!this.options.waitWhenEmpty) return { type: "close" };
+    return new Promise((resolve) => this.waiters.push(resolve));
   }
 
   async sendText(data: string): Promise<void> {
@@ -2315,6 +3068,15 @@ class FakeGatewayWebSocket {
   async close(code?: number, reason?: string): Promise<void> {
     this.closed = { code, reason };
   }
+
+  pushMessage(message: GatewayWebSocketMessage): void {
+    const waiter = this.waiters.shift();
+    if (waiter) {
+      waiter(message);
+      return;
+    }
+    this.messages.push(message);
+  }
 }
 
 class FakeUpstreamWebSocket {
@@ -2322,10 +3084,12 @@ class FakeUpstreamWebSocket {
   binaryType = "";
   sent: Array<string | Uint8Array | ArrayBuffer | Buffer> = [];
   closed: { code?: number; reason?: string } | undefined;
+  onSend: ((data: string | Uint8Array | ArrayBuffer | Buffer) => void) | undefined;
   private readonly listeners = new Map<string, Array<(event: unknown) => void>>();
 
   send(data: string | Uint8Array | ArrayBuffer | Buffer): void {
     this.sent.push(data);
+    this.onSend?.(data);
   }
 
   close(code?: number, reason?: string): void {
@@ -2339,5 +3103,13 @@ class FakeUpstreamWebSocket {
   emit(type: "open" | "message" | "error" | "close", event: unknown): void {
     if (type === "open") this.readyState = 1;
     for (const listener of this.listeners.get(type) ?? []) listener(event);
+  }
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 1000): Promise<void> {
+  const startedAt = Date.now();
+  while (!predicate()) {
+    if (Date.now() - startedAt > timeoutMs) throw new Error("Timed out waiting for condition.");
+    await new Promise((resolve) => setTimeout(resolve, 5));
   }
 }

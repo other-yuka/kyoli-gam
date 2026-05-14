@@ -11,6 +11,8 @@ import {
   listFailedAccounts,
   listRateLimitedAccounts,
   listReadyAccounts,
+  readAccountAvailabilityState,
+  readRateLimitRetryAt,
   summarizeAccountStatus,
   type AccountExecutionTraceEvent,
   type AccountRecord,
@@ -899,8 +901,8 @@ function printAccountStatus(
   const rateLimitedRows = payload.rate_limited.map((account) => ({
     id: account.id,
     provider: account.provider,
-    reset_in: account.reset_in,
-    reset_at: account.reset_at,
+    reset_in: account.reset_in ?? "-",
+    reset_at: account.reset_at ?? account.retry_at ?? "-",
     failures: String(account.failure_count),
     last_error: formatRelativeTime(account.last_error_at),
     name: account.name,
@@ -996,6 +998,8 @@ function createAccountStatusPayload(
       id: account.id,
       provider: account.provider,
       reset_at: account.rateLimitResetAt,
+      retry_at: readRateLimitRetryAt(account),
+      blocked_at: account.rateLimitBlockedAt,
       failure_count: account.failureCount,
       name: account.name,
     })),
@@ -1034,6 +1038,8 @@ function toPublicRateLimitedAccount(row: ReturnType<typeof listRateLimitedAccoun
     id: row.id,
     provider: row.provider,
     reset_at: row.resetAt,
+    retry_at: row.retryAt,
+    blocked_at: row.blockedAt,
     reset_in: row.resetIn,
     failure_count: row.failureCount,
     last_error_at: row.lastErrorAt,
@@ -1112,6 +1118,8 @@ function printAccountDetails(account: AccountRecord): void {
     last_used_at: account.lastUsedAt,
     last_error_at: account.lastErrorAt,
     rate_limit_reset_at: account.rateLimitResetAt,
+    rate_limit_retry_at: readRateLimitRetryAt(account),
+    rate_limit_blocked_at: account.rateLimitBlockedAt,
     auth_cooldown_until: account.authCooldownUntil,
     consecutive_auth_failures: account.consecutiveAuthFailures,
     reauth_required_reason: account.reauthRequiredReason,
@@ -1993,15 +2001,7 @@ function hasClaudeCodeBodyFieldOrder(body: Record<string, unknown>): boolean {
 }
 
 function formatAccountState(account: AccountRecord): string {
-  if (account.reauthRequiredReason) return "reauth_required";
-  if (!account.enabled) return "disabled";
-  if (account.rateLimitResetAt && new Date(account.rateLimitResetAt).getTime() > Date.now()) {
-    return "rate-limited";
-  }
-  if (account.authCooldownUntil && new Date(account.authCooldownUntil).getTime() > Date.now()) {
-    return "auth-cooldown";
-  }
-  return "ready";
+  return readAccountAvailabilityState(account);
 }
 
 function formatUsage(value: unknown): string {

@@ -82,13 +82,14 @@ export class NodeGatewayWebSocket implements GatewayWebSocket {
 
   async close(code = 1000, reason = ""): Promise<void> {
     if (this.#closed) return;
+    const closeCode = normalizeCloseCode(code);
     this.#closed = true;
     if (this.#websocket && this.#websocket.readyState === this.#websocket.OPEN) {
-      this.#websocket.close(code, reason);
+      this.#websocket.close(closeCode, reason);
     } else if (!this.socket.destroyed) {
       this.socket.end();
     }
-    this.#flushReceivers({ type: "close", code, reason });
+    this.#flushReceivers({ type: "close", code: closeCode, reason });
   }
 
   #attachWebSocket(websocket: WsWebSocket): void {
@@ -131,6 +132,14 @@ export class NodeGatewayWebSocket implements GatewayWebSocket {
     if (!this.#websocket || this.#websocket.readyState !== this.#websocket.OPEN) return;
     this.#websocket.send(data);
   }
+}
+
+function normalizeCloseCode(code: number): number {
+  return Number.isInteger(code) &&
+    ((code >= 1000 && code <= 1014 && code !== 1004 && code !== 1005 && code !== 1006) ||
+      (code >= 3000 && code <= 4999))
+    ? code
+    : 1000;
 }
 
 export function createUpgradeRequest(request: IncomingMessage): Request {

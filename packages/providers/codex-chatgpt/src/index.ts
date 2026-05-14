@@ -1,7 +1,10 @@
 import type {
+  AccountExecutionResult,
+  AccountFailureSignal,
   AccountExecutionTraceEvent,
   AccountPool,
   GatewayWebSocketContext,
+  GatewayWebSocketMessage,
   ModelInfo,
   ProviderAdapter,
 } from "@kyoli-gam/core";
@@ -13,6 +16,13 @@ import {
   type SelectedCredential,
 } from "@kyoli-gam/core";
 import { WebSocket as WsWebSocket } from "ws";
+import {
+  classifyCodexJsonEventFailure,
+  classifyCodexSseStartupFailure,
+  CODEX_UNKNOWN_RATE_LIMIT_BACKOFF_MS,
+  isCodexStartupOutputEvent,
+  isCodexStartupOutputFrame,
+} from "./failures";
 
 const CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses";
 const CODEX_WEBSOCKET_ENDPOINT = "wss://chatgpt.com/backend-api/codex/responses";
@@ -27,7 +37,7 @@ const CODEX_BRIDGE_ORIGINATOR = "codex_chatgpt_desktop";
 const CODEX_USER_AGENT = "codex_cli_rs/0.0.0";
 const TOKEN_EXPIRY_BUFFER_MS = 60_000;
 const TOKEN_REFRESH_TIMEOUT_MS = 30_000;
-const CODEX_UNKNOWN_RATE_LIMIT_BACKOFF_MS = 5 * 60 * 1000;
+const CODEX_STARTUP_PROBE_MAX_BYTES = 64 * 1024;
 const MAX_CODEX_FILE_SIZE_BYTES = 512 * 1024 * 1024;
 const MAX_CHAT_IMAGE_DATA_URL_BYTES = 8 * 1024 * 1024;
 const STREAM_TEXT_DECODER = new TextDecoder();
@@ -122,6 +132,24 @@ export type CodexWebSocketFactory = (
   protocols: string[],
   init: { headers: Record<string, string> },
 ) => CodexWebSocketLike;
+
+interface ActiveCodexWebSocket {
+  upstream: CodexWebSocketLike;
+  credential: CodexCredential;
+}
+
+interface WebSocketRelayState {
+  active: ActiveCodexWebSocket;
+  context: GatewayWebSocketContext;
+  options: CodexChatGPTProviderOptions;
+  websocketFactory: CodexWebSocketFactory;
+  excludedAccountIds: string[];
+  replayableMessages: GatewayWebSocketMessage[];
+  upstreamStartupText: string[];
+  downstreamVisible: boolean;
+  replayAttempts: number;
+  retiredUpstreams: Set<CodexWebSocketLike>;
+}
 
 export function createCodexChatGPTProvider(
   options: CodexChatGPTProviderOptions = {},
@@ -234,8 +262,8 @@ export function createCodexChatGPTProvider(
             excludeAccountIds,
             tokenRefresh: options.tokenRefresh ?? refreshCodexToken,
           }),
-        execute: (credential) =>
-          fetchImpl(createUpstreamUrl(context.route), {
+        execute: async (credential) =>
+          normalizeCodexStartupFailure(await fetchImpl(createUpstreamUrl(context.route), {
             method: context.request.method,
             headers: buildUpstreamHeaders(
               context.request.headers,
@@ -245,7 +273,7 @@ export function createCodexChatGPTProvider(
             ),
             body: body === undefined ? context.request.body : JSON.stringify(body),
             duplex: "half",
-          } as RequestInit),
+          } as RequestInit)),
         failureMessage: (status) => `Codex upstream returned ${status}`,
         readRateLimitResetAt: readCodexRateLimitResetAt,
         onTrace: options.onTrace,
@@ -274,6 +302,7 @@ async function handleResponsesWebSocket(input: {
   const { context, options } = input;
   const websocketFactory = options.webSocketFactory ?? createGlobalWebSocket;
   const turnState = context.request.headers.get("x-codex-turn-state") ?? crypto.randomUUID();
+  const excludedAccountIds: string[] = [];
 
   await context.websocket.accept({ "x-codex-turn-state": turnState });
 
@@ -281,6 +310,7 @@ async function handleResponsesWebSocket(input: {
     context,
     options,
     websocketFactory,
+    excludeAccountIds: excludedAccountIds,
   });
 
   if (!upstreamResult.credential) {
@@ -303,18 +333,32 @@ async function handleResponsesWebSocket(input: {
     return;
   }
 
-  relayUpstreamMessages(upstreamResult.upstream, context);
+  const relayState: WebSocketRelayState = {
+    active: { upstream: upstreamResult.upstream, credential: upstreamResult.credential },
+    context,
+    options,
+    websocketFactory,
+    excludedAccountIds,
+    replayableMessages: [],
+    upstreamStartupText: [],
+    downstreamVisible: false,
+    replayAttempts: 0,
+    retiredUpstreams: new Set(),
+  };
+  relayUpstreamMessages(relayState, upstreamResult.upstream, upstreamResult.credential);
 
   while (true) {
     const message = await context.websocket.receive();
     if (message.type === "close") {
-      upstreamResult.upstream.close(message.code, message.reason);
+      relayState.active.upstream.close(message.code, message.reason);
       return;
     }
     if (message.type === "text") {
-      upstreamResult.upstream.send(message.data);
+      rememberReplayableWebSocketMessage(relayState, message);
+      relayState.active.upstream.send(message.data);
     } else {
-      upstreamResult.upstream.send(message.data);
+      rememberReplayableWebSocketMessage(relayState, message);
+      relayState.active.upstream.send(message.data);
     }
   }
 }
@@ -323,12 +367,13 @@ async function openResponsesWebSocketWithFailover(input: {
   context: GatewayWebSocketContext;
   options: CodexChatGPTProviderOptions;
   websocketFactory: CodexWebSocketFactory;
+  excludeAccountIds?: string[];
 }): Promise<{
   credential?: CodexCredential;
   upstream?: CodexWebSocketLike;
   error?: Error;
 }> {
-  const excludedAccountIds: string[] = [];
+  const excludedAccountIds = [...(input.excludeAccountIds ?? [])];
   const maxAttempts = Math.max(1, input.options.maxAccountAttempts ?? 10);
   let lastCredential: CodexCredential | undefined;
   let lastError: Error | undefined;
@@ -363,7 +408,9 @@ async function openResponsesWebSocketWithFailover(input: {
 
     try {
       await waitForWebSocketOpen(upstream);
-      if (credential.accountId) await input.options.accounts?.recordSuccess(credential.accountId);
+      if (credential.accountId) {
+        await input.options.accounts?.recordSuccess(credential.accountId, { kind: "transport" });
+      }
       return { credential, upstream };
     } catch (error) {
       upstream.close();
@@ -402,6 +449,7 @@ async function handleResponsesRequest(input: {
     accounts: input.options.accounts,
     sessionKey: input.context.sessionKey,
     maxAttempts: input.options.maxAccountAttempts,
+    sameAccountMaxRetries: 1,
     missingCredentialResponse: () =>
       jsonResponse(
         {
@@ -421,8 +469,8 @@ async function handleResponsesRequest(input: {
         preferredAccountId,
         tokenRefresh: input.options.tokenRefresh ?? refreshCodexToken,
       }),
-    execute: (credential) =>
-      input.fetchImpl(createUpstreamUrl(input.context.route), {
+    execute: async (credential) =>
+      normalizeCodexStartupFailure(await input.fetchImpl(createUpstreamUrl(input.context.route), {
         method: input.context.request.method,
         headers: buildUpstreamHeaders(
           input.context.request.headers,
@@ -432,7 +480,7 @@ async function handleResponsesRequest(input: {
         ),
         body: JSON.stringify(upstreamBody),
         duplex: "half",
-      } as RequestInit),
+      } as RequestInit)),
     failureMessage: (status) => `Codex upstream returned ${status}`,
     readRateLimitResetAt: readCodexRateLimitResetAt,
     onTrace: input.options.onTrace,
@@ -471,6 +519,7 @@ async function handleChatCompletionsRequest(input: {
     accounts: input.options.accounts,
     sessionKey: input.context.sessionKey,
     maxAttempts: input.options.maxAccountAttempts,
+    sameAccountMaxRetries: 1,
     missingCredentialResponse: () =>
       jsonResponse(
         {
@@ -489,8 +538,8 @@ async function handleChatCompletionsRequest(input: {
         excludeAccountIds,
         tokenRefresh: input.options.tokenRefresh ?? refreshCodexToken,
       }),
-    execute: (credential) =>
-      input.fetchImpl(CODEX_API_ENDPOINT, {
+    execute: async (credential) =>
+      normalizeCodexStartupFailure(await input.fetchImpl(CODEX_API_ENDPOINT, {
         method: "POST",
         headers: buildUpstreamHeaders(
           input.context.request.headers,
@@ -500,7 +549,7 @@ async function handleChatCompletionsRequest(input: {
         ),
         body: JSON.stringify(responsesBody),
         duplex: "half",
-      } as RequestInit),
+      } as RequestInit)),
     failureMessage: (status) => `Codex upstream returned ${status}`,
     readRateLimitResetAt: readCodexRateLimitResetAt,
     onTrace: input.options.onTrace,
@@ -538,6 +587,7 @@ async function handleCompactRequest(input: {
     accounts: input.options.accounts,
     sessionKey: input.context.sessionKey,
     maxAttempts: input.options.maxAccountAttempts,
+    sameAccountMaxRetries: 1,
     missingCredentialResponse: () =>
       jsonResponse(
         {
@@ -689,6 +739,7 @@ async function handleTranscriptionRequest(input: {
     accounts: input.options.accounts,
     sessionKey: input.context.sessionKey,
     maxAttempts: input.options.maxAccountAttempts,
+    sameAccountMaxRetries: 1,
     missingCredentialResponse: () =>
       jsonResponse(
         {
@@ -749,6 +800,7 @@ async function handleImagesRequest(input: {
     accounts: input.options.accounts,
     sessionKey: input.context.sessionKey,
     maxAttempts: input.options.maxAccountAttempts,
+    sameAccountMaxRetries: 1,
     missingCredentialResponse: () =>
       jsonResponse(
         {
@@ -767,8 +819,8 @@ async function handleImagesRequest(input: {
         excludeAccountIds,
         tokenRefresh: input.options.tokenRefresh ?? refreshCodexToken,
       }),
-    execute: (credential) =>
-      input.fetchImpl(CODEX_API_ENDPOINT, {
+    execute: async (credential) =>
+      normalizeCodexStartupFailure(await input.fetchImpl(CODEX_API_ENDPOINT, {
         method: "POST",
         headers: buildUpstreamHeaders(
           input.context.request.headers,
@@ -778,7 +830,7 @@ async function handleImagesRequest(input: {
         ),
         body: JSON.stringify(responsesBody),
         duplex: "half",
-      } as RequestInit),
+      } as RequestInit)),
     failureMessage: (status) => `Codex image upstream returned ${status}`,
     readRateLimitResetAt: readCodexRateLimitResetAt,
     onTrace: input.options.onTrace,
@@ -1363,6 +1415,7 @@ function convertResponsesPayloadToChatCompletion(
   requestBody: Record<string, unknown>,
 ): Record<string, unknown> {
   const text = extractResponsesText(payload);
+  const toolCalls = extractChatToolCalls(payload);
   return {
     id: readString(payload.id) ?? `chatcmpl_${crypto.randomUUID()}`,
     object: "chat.completion",
@@ -1374,8 +1427,13 @@ function convertResponsesPayloadToChatCompletion(
         message: {
           role: "assistant",
           content: text,
+          ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
         },
-        finish_reason: readString(payload.status) === "incomplete" ? "length" : "stop",
+        finish_reason: toolCalls.length > 0
+          ? "tool_calls"
+          : readString(payload.status) === "incomplete"
+          ? "length"
+          : "stop",
       },
     ],
     usage: payload.usage,
@@ -1391,6 +1449,8 @@ function convertResponsesStreamToChatCompletions(
   const id = `chatcmpl_${crypto.randomUUID()}`;
   const created = Math.floor(Date.now() / 1000);
   const model = readString(requestBody.model) ?? "unknown";
+  const includeUsage = readRecord(requestBody.stream_options)?.include_usage === true;
+  const state = createChatToolCallState();
   let buffer = "";
   let done = false;
 
@@ -1402,12 +1462,13 @@ function convertResponsesStreamToChatCompletions(
         model,
         delta: { role: "assistant" },
         finishReason: null,
+        includeUsage,
       })));
     },
     transform(chunk, controller) {
       buffer += STREAM_TEXT_DECODER.decode(chunk, { stream: true });
       buffer = drainSseFrames(buffer, (frame) => {
-        for (const output of convertResponsesSseFrame(frame, { id, created, model })) {
+        for (const output of convertResponsesSseFrame(frame, { id, created, model }, { includeUsage, state })) {
           if (output === "[DONE]") {
             if (!done) {
               done = true;
@@ -1421,7 +1482,7 @@ function convertResponsesStreamToChatCompletions(
     },
     flush(controller) {
       if (buffer.trim()) {
-        for (const output of convertResponsesSseFrame(buffer, { id, created, model })) {
+        for (const output of convertResponsesSseFrame(buffer, { id, created, model }, { includeUsage, state })) {
           if (output === "[DONE]") {
             if (!done) {
               done = true;
@@ -1439,6 +1500,7 @@ function convertResponsesStreamToChatCompletions(
           model,
           delta: {},
           finishReason: "stop",
+          includeUsage,
         })));
         controller.enqueue(encodeSseData("[DONE]"));
       }
@@ -1478,8 +1540,9 @@ async function convertResponsesStreamToResponsePayload(
     }
     if (!payload) continue;
 
+    const payloadType = readString(payload.type);
     const delta = readString(payload.delta);
-    if (delta) outputTextParts.push(delta);
+    if (delta && payloadType === "response.output_text.delta") outputTextParts.push(delta);
 
     const outputIndex = readNumber(payload.output_index);
     const item = readRecord(payload.item);
@@ -1492,7 +1555,7 @@ async function convertResponsesStreamToResponsePayload(
       finalResponse = response;
       status = readString(response.status) ?? status;
     }
-    if (readString(payload.type) === "response.incomplete") status = "incomplete";
+    if (payloadType === "response.incomplete") status = "incomplete";
   }
 
   const outputText = outputTextParts.join("") || (finalResponse ? extractResponsesText(finalResponse) : "");
@@ -1554,6 +1617,7 @@ function splitSseFrames(value: string): string[] {
 function convertResponsesSseFrame(
   frame: string,
   chunkBase: { id: string; created: number; model: string },
+  options: { includeUsage?: boolean; state?: ChatToolCallState } = {},
 ): Array<Record<string, unknown> | "[DONE]"> {
   const event = readSseEvent(frame);
   const data = readSseData(frame);
@@ -1567,29 +1631,332 @@ function convertResponsesSseFrame(
   }
   if (!payload) return [];
 
+  const outputs: Array<Record<string, unknown> | "[DONE]"> = [];
+  const state = options.state;
+  const failure = classifyCodexJsonEventFailure(payload, "mid_stream");
+  if (failure) {
+    outputs.push(createChatCompletionError(failure));
+    outputs.push("[DONE]");
+    return outputs;
+  }
+
+  const toolDelta = state ? extractToolCallDelta(payload, state.index) : undefined;
+  if (state && toolDelta) {
+    const toolState = mergeToolCallDelta(state.toolCalls, toolDelta);
+    const streamDelta = buildPendingToolCallStreamDelta(toolState);
+    if (streamDelta) {
+      state.sawToolCall = true;
+      outputs.push(createChatCompletionChunk({
+        ...chunkBase,
+        delta: {
+          tool_calls: [formatChatToolCallDelta(streamDelta)],
+        },
+        finishReason: null,
+        includeUsage: options.includeUsage,
+      }));
+    }
+  }
+
+  const payloadType = readString(payload.type);
   const delta = readString(payload.delta);
-  if (delta) {
-    return [
-      createChatCompletionChunk({
+  if (delta && payloadType === "response.output_text.delta") {
+    outputs.push(createChatCompletionChunk({
         ...chunkBase,
         delta: { content: delta },
         finishReason: null,
-      }),
-    ];
+        includeUsage: options.includeUsage,
+    }));
   }
 
   if (isResponsesCompletionEvent(event, payload)) {
-    return [
-      createChatCompletionChunk({
+    if (state) {
+      for (const toolState of state.toolCalls) {
+        const streamDelta = buildPendingToolCallStreamDelta(toolState);
+        if (!streamDelta) continue;
+        state.sawToolCall = true;
+        outputs.push(createChatCompletionChunk({
+          ...chunkBase,
+          delta: {
+            tool_calls: [formatChatToolCallDelta(streamDelta)],
+          },
+          finishReason: null,
+          includeUsage: options.includeUsage,
+        }));
+      }
+    }
+    outputs.push(createChatCompletionChunk({
         ...chunkBase,
         delta: {},
-        finishReason: readString(payload.status) === "incomplete" ? "length" : "stop",
-      }),
-      "[DONE]",
-    ];
+        finishReason: state?.sawToolCall
+          ? "tool_calls"
+          : readString(payload.status) === "incomplete"
+          ? "length"
+          : "stop",
+        includeUsage: options.includeUsage,
+    }));
+    if (options.includeUsage) {
+      const response = readRecord(payload.response);
+      outputs.push(createChatCompletionUsageChunk({
+        ...chunkBase,
+        usage: response?.usage ?? payload.usage ?? null,
+      }));
+    }
+    outputs.push("[DONE]");
+    return outputs;
   }
 
-  return [];
+  return outputs;
+}
+
+type ChatToolCallState = {
+  index: ToolCallIndexState;
+  toolCalls: ToolCallItemState[];
+  sawToolCall: boolean;
+};
+
+type ToolCallIndexState = {
+  byKey: Map<string, number>;
+  byOutputIndex: Map<number, number>;
+  nextIndex: number;
+};
+
+type ToolCallDeltaState = {
+  index: number;
+  callId?: string;
+  name?: string;
+  arguments?: string;
+  argumentsMode: "append" | "replace";
+  toolType?: string;
+};
+
+type ToolCallItemState = {
+  index: number;
+  callId?: string;
+  name?: string;
+  arguments: string;
+  toolType: string;
+  emittedCallId?: string;
+  emittedName?: string;
+  emittedArguments: string;
+  emittedToolType?: string;
+};
+
+function createChatToolCallState(): ChatToolCallState {
+  return {
+    index: {
+      byKey: new Map(),
+      byOutputIndex: new Map(),
+      nextIndex: 0,
+    },
+    toolCalls: [],
+    sawToolCall: false,
+  };
+}
+
+function extractToolCallDelta(
+  payload: Record<string, unknown>,
+  indexState: ToolCallIndexState,
+): ToolCallDeltaState | undefined {
+  const type = readString(payload.type);
+  const outputIndex = readNumber(payload.output_index);
+
+  if (type === "response.output_item.added" || type === "response.output_item.done") {
+    const item = readRecord(payload.item);
+    if (readString(item?.type) !== "function_call") return undefined;
+    const itemId = readString(item?.id);
+    const routeId = readString(item?.call_id) ?? itemId;
+    const callId = publicToolCallId(readString(item?.call_id) ?? itemId);
+    const name = readString(item?.name);
+    const args = typeof item?.arguments === "string" ? item.arguments : undefined;
+    const index = indexForToolCall(indexState, outputIndex, routeId, name);
+    if (itemId) registerToolCallAlias(indexState, itemId, index);
+    if (readString(item?.call_id)) registerToolCallAlias(indexState, readString(item?.call_id)!, index);
+    if (outputIndex !== undefined) registerToolCallOutputIndex(indexState, outputIndex, index);
+    return {
+      index,
+      callId,
+      name,
+      arguments: args,
+      argumentsMode: "replace",
+      toolType: "function",
+    };
+  }
+
+  if (type === "response.function_call_arguments.delta" || type === "response.function_call_arguments.done") {
+    const itemId = readString(payload.item_id);
+    const routeId = readString(payload.call_id) ?? itemId;
+    const callId = publicToolCallId(readString(payload.call_id));
+    const name = readString(payload.name);
+    const args = type.endsWith(".delta")
+      ? (typeof payload.delta === "string" ? payload.delta : undefined)
+      : (typeof payload.arguments === "string" ? payload.arguments : undefined);
+    return {
+      index: indexForToolCall(indexState, outputIndex, routeId, name),
+      callId,
+      name,
+      arguments: args,
+      argumentsMode: type.endsWith(".delta") ? "append" : "replace",
+      toolType: "function",
+    };
+  }
+
+  if (type === "response.output_tool_call.delta") {
+    const callId = publicToolCallId(readString(payload.call_id));
+    const name = readString(payload.name);
+    return {
+      index: indexForToolCall(indexState, outputIndex, readString(payload.call_id), name),
+      callId,
+      name,
+      arguments: typeof payload.delta === "string" ? payload.delta : undefined,
+      argumentsMode: "append",
+      toolType: "function",
+    };
+  }
+
+  return undefined;
+}
+
+function indexForToolCall(
+  state: ToolCallIndexState,
+  outputIndex: number | undefined,
+  routeId: string | undefined,
+  name: string | undefined,
+): number {
+  const key = toolCallKey(routeId, name);
+  if (outputIndex !== undefined && state.byOutputIndex.has(outputIndex)) {
+    const index = state.byOutputIndex.get(outputIndex)!;
+    if (key && !state.byKey.has(key)) state.byKey.set(key, index);
+    return index;
+  }
+
+  if (!key) {
+    if (outputIndex === undefined) return 0;
+    const index = state.nextIndex++;
+    state.byOutputIndex.set(outputIndex, index);
+    return index;
+  }
+
+  if (!state.byKey.has(key)) state.byKey.set(key, state.nextIndex++);
+  const index = state.byKey.get(key)!;
+  if (outputIndex !== undefined && !state.byOutputIndex.has(outputIndex)) {
+    state.byOutputIndex.set(outputIndex, index);
+  }
+  return index;
+}
+
+function toolCallKey(routeId: string | undefined, name: string | undefined): string | undefined {
+  if (routeId) return `id:${routeId}`;
+  if (name) return `name:${name}`;
+  return undefined;
+}
+
+function registerToolCallAlias(state: ToolCallIndexState, id: string, index: number): void {
+  const key = `id:${id}`;
+  if (!state.byKey.has(key)) state.byKey.set(key, index);
+}
+
+function registerToolCallOutputIndex(state: ToolCallIndexState, outputIndex: number, index: number): void {
+  if (!state.byOutputIndex.has(outputIndex)) state.byOutputIndex.set(outputIndex, index);
+}
+
+function publicToolCallId(id: string | undefined): string | undefined {
+  if (!id) return undefined;
+  return id.startsWith("fc_") ? undefined : id;
+}
+
+function mergeToolCallDelta(toolCalls: ToolCallItemState[], delta: ToolCallDeltaState): ToolCallItemState {
+  let state = toolCalls.find((item) => item.index === delta.index);
+  if (!state) {
+    state = {
+      index: delta.index,
+      arguments: "",
+      toolType: "function",
+      emittedArguments: "",
+    };
+    toolCalls.push(state);
+    toolCalls.sort((left, right) => left.index - right.index);
+  }
+
+  if (delta.callId) state.callId = delta.callId;
+  if (delta.name) state.name = delta.name;
+  if (delta.arguments !== undefined) {
+    state.arguments = delta.argumentsMode === "replace"
+      ? delta.arguments
+      : state.arguments + delta.arguments;
+  }
+  if (delta.toolType) state.toolType = delta.toolType;
+  return state;
+}
+
+function buildPendingToolCallStreamDelta(state: ToolCallItemState): ToolCallDeltaState | undefined {
+  const callId = pendingValue(state.emittedCallId, state.callId);
+  const name = pendingValue(state.emittedName, state.name);
+  const args = pendingArguments(state.emittedArguments, state.arguments);
+  const toolType = state.toolType || "function";
+  const typeChanged = state.emittedToolType !== toolType;
+  if (callId === undefined && name === undefined && args === undefined && !typeChanged) {
+    return undefined;
+  }
+
+  if (callId !== undefined) state.emittedCallId = state.callId;
+  if (name !== undefined) state.emittedName = state.name;
+  if (args !== undefined) state.emittedArguments = state.arguments;
+  state.emittedToolType = toolType;
+
+  return {
+    index: state.index,
+    callId,
+    name,
+    arguments: args,
+    argumentsMode: "append",
+    toolType,
+  };
+}
+
+function pendingValue(previous: string | undefined, current: string | undefined): string | undefined {
+  return current !== undefined && current !== previous ? current : undefined;
+}
+
+function pendingArguments(previous: string, current: string): string | undefined {
+  return current.length > previous.length && current.startsWith(previous)
+    ? current.slice(previous.length)
+    : current !== previous
+    ? current
+    : undefined;
+}
+
+function formatChatToolCallDelta(delta: ToolCallDeltaState): Record<string, unknown> {
+  const toolCall: Record<string, unknown> = {
+    index: delta.index,
+    type: delta.toolType ?? "function",
+  };
+  if (delta.callId) toolCall.id = delta.callId;
+  const fn: Record<string, unknown> = {};
+  if (delta.name) fn.name = delta.name;
+  if (delta.arguments !== undefined) fn.arguments = delta.arguments;
+  if (Object.keys(fn).length > 0) toolCall.function = fn;
+  return toolCall;
+}
+
+function extractChatToolCalls(payload: Record<string, unknown>): Record<string, unknown>[] {
+  const output = payload.output;
+  if (!Array.isArray(output)) return [];
+  return output.flatMap((item) => {
+    const record = readRecord(item);
+    if (readString(record?.type) !== "function_call") return [];
+    const callId = publicToolCallId(readString(record?.call_id) ?? readString(record?.id));
+    const name = readString(record?.name);
+    const args = typeof record?.arguments === "string" ? record.arguments : "";
+    if (!callId && !name) return [];
+    return [{
+      ...(callId ? { id: callId } : {}),
+      type: "function",
+      function: {
+        ...(name ? { name } : {}),
+        arguments: args,
+      },
+    }];
+  });
 }
 
 function readSseEvent(frame: string): string | undefined {
@@ -1626,8 +1993,9 @@ function createChatCompletionChunk(input: {
   model: string;
   delta: Record<string, unknown>;
   finishReason: string | null;
+  includeUsage?: boolean;
 }): Record<string, unknown> {
-  return {
+  const chunk: Record<string, unknown> = {
     id: input.id,
     object: "chat.completion.chunk",
     created: input.created,
@@ -1639,6 +2007,34 @@ function createChatCompletionChunk(input: {
         finish_reason: input.finishReason,
       },
     ],
+  };
+  if (input.includeUsage) chunk.usage = null;
+  return chunk;
+}
+
+function createChatCompletionUsageChunk(input: {
+  id: string;
+  created: number;
+  model: string;
+  usage: unknown;
+}): Record<string, unknown> {
+  return {
+    id: input.id,
+    object: "chat.completion.chunk",
+    created: input.created,
+    model: input.model,
+    choices: [],
+    usage: input.usage,
+  };
+}
+
+function createChatCompletionError(failure: AccountFailureSignal): Record<string, unknown> {
+  return {
+    error: {
+      type: failure.code ?? "upstream_response_failed",
+      message: failure.message ?? "Codex upstream failed while streaming.",
+      code: failure.code,
+    },
   };
 }
 
@@ -1719,6 +2115,115 @@ async function readJsonRecord(response: Response): Promise<Record<string, unknow
   } catch {
     return undefined;
   }
+}
+
+async function normalizeCodexStartupFailure(response: Response): Promise<AccountExecutionResult> {
+  if (!response.ok || !response.body || !response.headers.get("content-type")?.includes("text/event-stream")) {
+    return { response };
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  const decoder = new TextDecoder();
+  let pendingText = "";
+  let failure: AccountFailureSignal | undefined;
+  let downstreamVisible = false;
+  let done = false;
+
+  while (byteLength(chunks) < CODEX_STARTUP_PROBE_MAX_BYTES && !failure && !downstreamVisible) {
+    const next = await reader.read();
+    if (next.done) {
+      done = true;
+      break;
+    }
+    chunks.push(next.value);
+    pendingText += decoder.decode(next.value, { stream: true });
+    pendingText = drainSseFrames(pendingText, (frame) => {
+      if (failure || downstreamVisible) return;
+      const frameFailure = classifyCodexSseStartupFailure(frame);
+      if (frameFailure) {
+        failure = frameFailure;
+        return;
+      }
+      if (isCodexStartupOutputFrame(frame)) downstreamVisible = true;
+    });
+  }
+
+  if (done && !failure && !downstreamVisible) {
+    pendingText += decoder.decode();
+    if (pendingText.trim()) {
+      const pendingFailure = classifyCodexSseStartupFailure(pendingText);
+      if (pendingFailure) {
+        failure = pendingFailure;
+      } else if (isCodexStartupOutputFrame(pendingText)) {
+        downstreamVisible = true;
+      }
+    }
+  }
+
+  if (failure) {
+    await reader.cancel().catch(() => undefined);
+    const headers: Record<string, string> = {};
+    if (failure.retryAfterSeconds) headers["retry-after"] = String(failure.retryAfterSeconds);
+    if (failure.resetAt) headers["x-kyoli-account-reset-at"] = failure.resetAt;
+    return {
+      failure,
+      downstreamVisible: false,
+      response: jsonResponse(
+        {
+          error: {
+            type: failure.code ?? "upstream_response_failed",
+            message: failure.message ?? "Codex upstream failed before producing output.",
+            upstream_status: "response.failed",
+          },
+        },
+        { status: failure.httpStatus ?? 502, headers },
+      ),
+    };
+  }
+
+  return {
+    downstreamVisible,
+    response: new Response(replayResponseBody(chunks, reader), {
+      status: response.status,
+      statusText: response.statusText,
+      headers: filterStreamingResponseHeaders(response.headers),
+    }),
+  };
+}
+
+function replayResponseBody(chunks: Uint8Array[], reader: ReadableStreamDefaultReader<Uint8Array>): ReadableStream<Uint8Array> {
+  let index = 0;
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      if (index < chunks.length) {
+        controller.enqueue(chunks[index++]);
+        return;
+      }
+      const next = await reader.read();
+      if (next.done) {
+        controller.close();
+        return;
+      }
+      controller.enqueue(next.value);
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
+  });
+}
+
+function filterStreamingResponseHeaders(headers: Headers): Headers {
+  const filtered = new Headers(headers);
+  filtered.delete("content-encoding");
+  filtered.delete("content-length");
+  filtered.delete("transfer-encoding");
+  filtered.delete("connection");
+  return filtered;
+}
+
+function byteLength(chunks: Uint8Array[]): number {
+  return chunks.reduce((total, chunk) => total + chunk.byteLength, 0);
 }
 
 function readFileIdFromPath(pathname: string): string | undefined {
@@ -1963,6 +2468,7 @@ function normalizeMaxTokens(record: Record<string, unknown>): void {
 }
 
 function stripCodexUnsupportedFields(record: Record<string, unknown>): void {
+  normalizeCodexStreamOptions(record);
   delete record.max_output_tokens;
   delete record.max_completion_tokens;
   delete record.max_tokens;
@@ -1974,6 +2480,20 @@ function stripCodexUnsupportedFields(record: Record<string, unknown>): void {
   delete record.truncation;
   delete record.context_management;
   delete record.user;
+}
+
+function normalizeCodexStreamOptions(record: Record<string, unknown>): void {
+  const streamOptions = readRecord(record.stream_options);
+  if (!streamOptions) {
+    delete record.stream_options;
+    return;
+  }
+  const includeObfuscation = streamOptions.include_obfuscation;
+  if (includeObfuscation === undefined) {
+    delete record.stream_options;
+    return;
+  }
+  record.stream_options = { include_obfuscation: includeObfuscation };
 }
 
 function normalizeReasoningEffort(value: string): string {
@@ -2122,27 +2642,196 @@ function waitForWebSocketOpen(websocket: CodexWebSocketLike): Promise<void> {
 }
 
 function relayUpstreamMessages(
+  state: WebSocketRelayState,
   upstream: CodexWebSocketLike,
-  context: GatewayWebSocketContext,
+  credential: CodexCredential,
 ): void {
   upstream.addEventListener("message", (event) => {
+    if (state.active.upstream !== upstream) return;
     const data = readWebSocketEventData(event);
     if (typeof data === "string") {
-      void context.websocket.sendText(data);
+      void handleUpstreamWebSocketText(state, upstream, credential, data);
       return;
     }
-    if (data) void context.websocket.sendBinary(data);
+    if (data) {
+      void sendWebSocketBinaryDownstream(state, data);
+    }
   });
   upstream.addEventListener("close", (event) => {
+    if (state.retiredUpstreams.has(upstream)) return;
+    if (state.active.upstream !== upstream) return;
     const record = readRecord(event);
     const code = readNumber(record?.code) ?? 1000;
     const reason = readString(record?.reason) ?? "Upstream closed";
-    void context.websocket.close(code, reason);
+    void state.context.websocket.close(code, reason);
   });
   upstream.addEventListener("error", (event) => {
-    void sendWebSocketError(context, "upstream_error", readWebSocketError(event).message)
-      .finally(() => context.websocket.close(1011, "Upstream error"));
+    if (state.retiredUpstreams.has(upstream)) return;
+    if (state.active.upstream !== upstream) return;
+    void sendWebSocketError(state.context, "upstream_error", readWebSocketError(event).message)
+      .finally(() => state.context.websocket.close(1011, "Upstream error"));
   });
+}
+
+async function handleUpstreamWebSocketText(
+  state: WebSocketRelayState,
+  upstream: CodexWebSocketLike,
+  credential: CodexCredential,
+  data: string,
+): Promise<void> {
+  const payload = readJsonRecordFromString(data);
+  const failure = classifyCodexJsonEventFailure(payload, state.downstreamVisible ? "mid_stream" : "startup");
+  if (failure && credential.accountId) {
+    await recordCodexAccountFailure(state.options.accounts, credential.accountId, failure);
+  }
+
+  if (await tryReplayWebSocketFailure(state, upstream, credential, failure)) return;
+
+  if (shouldBufferWebSocketStartupEvent(state, payload, failure)) {
+    rememberWebSocketStartupText(state, data);
+    return;
+  }
+
+  await sendWebSocketTextDownstream(state, data);
+}
+
+async function tryReplayWebSocketFailure(
+  state: WebSocketRelayState,
+  upstream: CodexWebSocketLike,
+  credential: CodexCredential,
+  failure: AccountFailureSignal | undefined,
+): Promise<boolean> {
+  if (!canReplayWebSocketFailure(state, credential, failure)) return false;
+  const accountId = credential.accountId;
+  if (!accountId) return false;
+
+  state.replayAttempts += 1;
+  state.excludedAccountIds.push(accountId);
+  state.retiredUpstreams.add(upstream);
+  state.upstreamStartupText = [];
+  upstream.close(1011, "Retrying with next account");
+
+  const next = await openResponsesWebSocketWithFailover({
+    context: state.context,
+    options: state.options,
+    websocketFactory: state.websocketFactory,
+    excludeAccountIds: state.excludedAccountIds,
+  });
+  if (!next.upstream || !next.credential) return false;
+
+  state.active = { upstream: next.upstream, credential: next.credential };
+  relayUpstreamMessages(state, next.upstream, next.credential);
+  replayWebSocketMessages(next.upstream, state.replayableMessages);
+  return true;
+}
+
+function canReplayWebSocketFailure(
+  state: WebSocketRelayState,
+  credential: CodexCredential,
+  failure: AccountFailureSignal | undefined,
+): boolean {
+  if (!failure || failure.retryScope !== "next_account") return false;
+  if (state.downstreamVisible) return false;
+  if (!credential.accountId) return false;
+  if (state.replayableMessages.length === 0) return false;
+  if (hasPreviousResponseAnchor(state.replayableMessages)) return false;
+
+  const maxReplayAttempts = Math.max(1, state.options.maxAccountAttempts ?? 10) - 1;
+  return state.replayAttempts < maxReplayAttempts;
+}
+
+function replayWebSocketMessages(
+  upstream: CodexWebSocketLike,
+  messages: GatewayWebSocketMessage[],
+): void {
+  for (const message of messages) {
+    if (message.type === "text") upstream.send(message.data);
+    else if (message.type === "binary") upstream.send(message.data);
+  }
+}
+
+function shouldBufferWebSocketStartupEvent(
+  state: WebSocketRelayState,
+  payload: Record<string, unknown> | undefined,
+  failure: AccountFailureSignal | undefined,
+): boolean {
+  return Boolean(!state.downstreamVisible && !failure && payload && !isCodexStartupOutputEvent(payload));
+}
+
+function rememberWebSocketStartupText(state: WebSocketRelayState, data: string): void {
+  state.upstreamStartupText.push(data);
+  if (state.upstreamStartupText.length > 32) state.upstreamStartupText.shift();
+}
+
+async function sendWebSocketTextDownstream(state: WebSocketRelayState, data: string): Promise<void> {
+  state.downstreamVisible = true;
+  await flushWebSocketStartupText(state);
+  await state.context.websocket.sendText(data);
+}
+
+async function sendWebSocketBinaryDownstream(state: WebSocketRelayState, data: Uint8Array): Promise<void> {
+  state.downstreamVisible = true;
+  await flushWebSocketStartupText(state);
+  await state.context.websocket.sendBinary(data);
+}
+
+async function flushWebSocketStartupText(state: WebSocketRelayState): Promise<void> {
+  const pending = state.upstreamStartupText.splice(0);
+  for (const data of pending) {
+    await state.context.websocket.sendText(data);
+  }
+}
+
+function rememberReplayableWebSocketMessage(
+  state: WebSocketRelayState,
+  message: GatewayWebSocketMessage,
+): void {
+  if (state.downstreamVisible || message.type === "close") return;
+  state.replayableMessages.push(message);
+  if (state.replayableMessages.length > 8) state.replayableMessages.shift();
+}
+
+function hasPreviousResponseAnchor(messages: GatewayWebSocketMessage[]): boolean {
+  return messages.some((message) => {
+    if (message.type !== "text") return false;
+    const payload = readJsonRecordFromString(message.data);
+    return typeof payload?.previous_response_id === "string" && payload.previous_response_id.length > 0;
+  });
+}
+
+async function recordCodexAccountFailure(
+  accounts: AccountPool | undefined,
+  accountId: string,
+  failure: AccountFailureSignal,
+): Promise<void> {
+  const status = failure.httpStatus ??
+    (failure.class === "rate_limit" || failure.class === "quota" ? 429 : 502);
+  const cooldownUntil = status === 429 ? cooldownUntilFromFailure(failure) : undefined;
+  await accounts?.recordFailure(accountId, {
+    status,
+    message: failure.message,
+    rateLimitResetAt: status === 429 ? failure.resetAt : undefined,
+    rateLimitCooldownUntil: cooldownUntil,
+    failureClass: failure.class,
+    failureCode: failure.code,
+    failurePhase: failure.phase,
+  });
+}
+
+function cooldownUntilFromFailure(failure: AccountFailureSignal): string | undefined {
+  if (failure.resetAt) return failure.resetAt;
+  if (failure.retryAfterSeconds && failure.retryAfterSeconds > 0) {
+    return new Date(Date.now() + failure.retryAfterSeconds * 1000).toISOString();
+  }
+  return undefined;
+}
+
+function readJsonRecordFromString(value: string): Record<string, unknown> | undefined {
+  try {
+    return readRecord(JSON.parse(value));
+  } catch {
+    return undefined;
+  }
 }
 
 async function sendWebSocketError(

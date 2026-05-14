@@ -1,4 +1,11 @@
 import type { AccountRecord } from "./accounts";
+import {
+  isCurrentlyAuthCoolingDown,
+  isCurrentlyRateLimited,
+  readAccountAvailabilityState,
+  readRateLimitRetryAt,
+  shouldRecoverRateLimitBlock,
+} from "./account-state";
 import type { ProviderId } from "./index";
 
 export interface AccountStatusRow {
@@ -6,6 +13,7 @@ export interface AccountStatusRow {
   total: number;
   ready: number;
   rateLimited: number;
+  quotaExceeded: number;
   authCooldown: number;
   disabled: number;
   reauthRequired: number;
@@ -17,9 +25,13 @@ export interface AccountStatusRow {
 export interface RateLimitedAccountRow {
   id: string;
   provider: ProviderId;
-  resetAt: string;
-  resetIn: string;
+  resetAt?: string;
+  retryAt?: string;
+  blockedAt?: string;
+  resetIn?: string;
   failureCount: number;
+  failureClass?: string;
+  failureCode?: string;
   lastErrorAt?: string;
   name: string;
 }
@@ -46,7 +58,7 @@ export interface BlockedAccountRow {
 export interface FailedAccountRow {
   id: string;
   provider: ProviderId;
-  state: "ready" | "rate-limited" | "auth-cooldown" | "disabled" | "reauth_required";
+  state: "ready" | "rate-limited" | "quota-exceeded" | "auth-cooldown" | "disabled" | "reauth_required";
   failureCount: number;
   lastErrorAt?: string;
   resetAt?: string;
@@ -63,6 +75,7 @@ export function summarizeAccountStatus(accounts: AccountRecord[]): AccountStatus
       total: 0,
       ready: 0,
       rateLimited: 0,
+      quotaExceeded: 0,
       authCooldown: 0,
       disabled: 0,
       reauthRequired: 0,
@@ -78,8 +91,9 @@ export function summarizeAccountStatus(accounts: AccountRecord[]): AccountStatus
       summary.authCooldown += 1;
       summary.nextAuthRetryAt = earlierIso(summary.nextAuthRetryAt, account.authCooldownUntil);
     } else if (isCurrentlyRateLimited(account)) {
-      summary.rateLimited += 1;
-      summary.nextResetAt = earlierIso(summary.nextResetAt, account.rateLimitResetAt);
+      if (account.lastFailureClass === "quota") summary.quotaExceeded += 1;
+      else summary.rateLimited += 1;
+      summary.nextResetAt = earlierIso(summary.nextResetAt, readRateLimitRetryAt(account));
     } else {
       summary.ready += 1;
     }
@@ -102,16 +116,25 @@ export function listRateLimitedAccounts(accounts: AccountRecord[]): RateLimitedA
       !isCurrentlyAuthCoolingDown(account) &&
       isCurrentlyRateLimited(account)
     )
-    .map((account) => ({
-      id: account.id,
-      provider: account.provider,
-      resetAt: account.rateLimitResetAt!,
-      resetIn: formatRelativeFuture(account.rateLimitResetAt!),
-      failureCount: account.failureCount,
-      lastErrorAt: account.lastErrorAt,
-      name: account.name,
-    }))
-    .sort((a, b) => a.resetAt.localeCompare(b.resetAt));
+    .map((account) => {
+      const retryAt = readRateLimitRetryAt(account);
+      return {
+        id: account.id,
+        provider: account.provider,
+        resetAt: account.rateLimitResetAt,
+        retryAt,
+        blockedAt: account.rateLimitBlockedAt,
+        resetIn: retryAt ? formatRelativeFuture(retryAt) : undefined,
+        failureCount: account.failureCount,
+        failureClass: account.lastFailureClass,
+        failureCode: account.lastFailureCode,
+        lastErrorAt: account.lastErrorAt,
+        name: account.name,
+      };
+    })
+    .sort((a, b) =>
+      (a.retryAt ?? a.resetAt ?? a.blockedAt ?? "").localeCompare(b.retryAt ?? b.resetAt ?? b.blockedAt ?? "")
+    );
 }
 
 export function listReadyAccounts(accounts: AccountRecord[]): ReadyAccountRow[] {
@@ -181,23 +204,12 @@ export function listFailedAccounts(accounts: AccountRecord[]): FailedAccountRow[
 export function listExpiredRateLimitAccounts(accounts: AccountRecord[]): AccountRecord[] {
   const now = Date.now();
   return accounts
-    .filter((account) => {
-      if (!account.rateLimitResetAt || account.reauthRequiredReason || isCurrentlyAuthCoolingDown(account)) return false;
-      return new Date(account.rateLimitResetAt).getTime() <= now;
-    })
-    .sort((a, b) => (a.rateLimitResetAt ?? "").localeCompare(b.rateLimitResetAt ?? ""));
-}
-
-function isCurrentlyRateLimited(account: AccountRecord): boolean {
-  return Boolean(
-    account.rateLimitResetAt && new Date(account.rateLimitResetAt).getTime() > Date.now(),
-  );
-}
-
-function isCurrentlyAuthCoolingDown(account: AccountRecord): boolean {
-  return Boolean(
-    account.authCooldownUntil && new Date(account.authCooldownUntil).getTime() > Date.now(),
-  );
+    .filter((account) => shouldRecoverRateLimitBlock(account, now))
+    .sort((a, b) =>
+      (readRateLimitRetryAt(a) ?? a.rateLimitBlockedAt ?? "").localeCompare(
+        readRateLimitRetryAt(b) ?? b.rateLimitBlockedAt ?? "",
+      )
+    );
 }
 
 function readString(value: unknown): string | undefined {
@@ -205,11 +217,7 @@ function readString(value: unknown): string | undefined {
 }
 
 function readAccountState(account: AccountRecord): FailedAccountRow["state"] {
-  if (account.reauthRequiredReason) return "reauth_required";
-  if (!account.enabled) return "disabled";
-  if (isCurrentlyAuthCoolingDown(account)) return "auth-cooldown";
-  if (isCurrentlyRateLimited(account)) return "rate-limited";
-  return "ready";
+  return readAccountAvailabilityState(account);
 }
 
 function readBlockedAccountState(account: AccountRecord): BlockedAccountRow["state"] {

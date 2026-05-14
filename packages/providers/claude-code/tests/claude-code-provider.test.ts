@@ -15,6 +15,7 @@ import {
   getClaudeCodeTemplateTools,
   loadClaudeCodeSharedRequestProfile,
   orderClaudeCodeHeadersForOutbound,
+  refreshClaudeCodeAccountMetadata,
   refreshClaudeCodeOAuthToken,
 } from "../src";
 
@@ -117,6 +118,33 @@ describe("OpenCode shared Claude Code helpers", () => {
 });
 
 describe("createClaudeCodeProvider", () => {
+  it("keeps arbitrary Claude per-model usage buckets from OAuth usage refresh", async () => {
+    const metadata = await refreshClaudeCodeAccountMetadata("access-test", {
+      fetch: async (input) => {
+        if (String(input).includes("/profile")) {
+          return new Response(JSON.stringify({ account: { email: "user@example.com", has_claude_max: true } }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify({
+          five_hour: { utilization: 12, resets_at: null },
+          seven_day_opus: { utilization: 88, resets_at: "2026-05-21T00:00:00.000Z" },
+          seven_day_haiku: { utilization: 34, resets_at: null },
+        }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    expect(metadata.planTier).toBe("max");
+    expect((metadata.cachedUsage as { seven_day_opus?: { utilization: number } }).seven_day_opus?.utilization)
+      .toBe(88);
+    expect((metadata.cachedUsage as { seven_day_haiku?: { utilization: number } }).seven_day_haiku?.utilization)
+      .toBe(34);
+  });
+
   it("proxies /v1/messages with Claude Code OAuth headers", async () => {
     let upstreamUrl = "";
     let upstreamBody: unknown;
@@ -650,6 +678,247 @@ describe("createClaudeCodeProvider", () => {
     expect((firstUpdated?.metadata.cachedUsage as { five_hour?: { utilization: number } }).five_hour?.utilization).toBe(0.92);
     expect((firstUpdated?.metadata.cachedUsage as { seven_day_sonnet?: { utilization: number } }).seven_day_sonnet?.utilization).toBe(0.71);
     expect(secondUpdated?.lastUsedAt).toBeTruthy();
+  });
+
+  it("fails over when a Claude stream starts with a rate limit error", async () => {
+    const store = new MemoryAccountStore();
+    const first = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: {
+        accessToken: "first-access",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-first",
+      },
+    });
+    const second = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: {
+        accessToken: "second-access",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-second",
+      },
+    });
+    const upstreamAuths: string[] = [];
+
+    const provider = createTestClaudeCodeProvider({
+      accounts: new StickyAccountPool(store),
+      baseUrl: "https://example.test",
+      usageRefresh: async () => ({ cachedUsageAt: Date.now() }),
+      fetch: async (_input, init) => {
+        const authorization = new Headers(init?.headers).get("authorization") ?? "";
+        upstreamAuths.push(authorization);
+
+        if (authorization === "Bearer first-access") {
+          return new Response(
+            [
+              "event: error",
+              'data: {"type":"error","error":{"type":"rate_limit_error","message":"rate limited"}}',
+              "",
+              "",
+            ].join("\n"),
+            {
+              status: 200,
+              headers: {
+                "anthropic-ratelimit-unified-representative-claim": "five_hour",
+                "anthropic-ratelimit-unified-reset": String(Math.floor(Date.now() / 1000) + 3600),
+                "anthropic-ratelimit-unified-status": "rejected",
+                "content-type": "text/event-stream",
+                "retry-after": "60",
+              },
+            },
+          );
+        }
+
+        return new Response(JSON.stringify({ id: "msg_second", type: "message" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    const response = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-code/claude-sonnet-4-5",
+          max_tokens: 1024,
+          messages: [{ role: "user", content: "hello" }],
+          stream: true,
+        }),
+      }),
+      route: "/v1/messages",
+      sessionKey: "session-a",
+      body: {
+        model: "claude-code/claude-sonnet-4-5",
+        max_tokens: 1024,
+        messages: [{ role: "user", content: "hello" }],
+        stream: true,
+      },
+      model: "claude-code/claude-sonnet-4-5",
+    });
+
+    const firstUpdated = await store.get(first.id);
+    const secondUpdated = await store.get(second.id);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ id: "msg_second" });
+    expect(upstreamAuths).toEqual(["Bearer first-access", "Bearer second-access"]);
+    expect(firstUpdated?.failureCount).toBe(1);
+    expect(firstUpdated?.rateLimitResetAt).toBeTruthy();
+    expect(firstUpdated?.metadata.rateLimitClaim).toBe("five_hour");
+    expect(firstUpdated?.metadata.rateLimitStatus).toBe("rejected");
+    expect(secondUpdated?.lastUsedAt).toBeTruthy();
+  });
+
+  it("does not synthesize Claude reset timestamps from startup rate-limit messages", async () => {
+    const store = new MemoryAccountStore();
+    const first = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: {
+        accessToken: "first-access",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-first",
+      },
+    });
+    await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: {
+        accessToken: "second-access",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-second",
+      },
+    });
+
+    const provider = createTestClaudeCodeProvider({
+      accounts: new StickyAccountPool(store),
+      baseUrl: "https://example.test",
+      usageRefresh: async () => ({ cachedUsageAt: Date.now() }),
+      fetch: async (_input, init) => {
+        const authorization = new Headers(init?.headers).get("authorization") ?? "";
+        if (authorization === "Bearer first-access") {
+          return new Response([
+            "event: error",
+            'data: {"type":"error","error":{"type":"rate_limit_error","message":"rate limited; try again later"}}',
+            "",
+            "",
+          ].join("\n"), {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          });
+        }
+        return new Response(JSON.stringify({ id: "msg_second", type: "message" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    const response = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-code/claude-sonnet-4-5",
+          max_tokens: 1024,
+          messages: [{ role: "user", content: "hello" }],
+          stream: true,
+        }),
+      }),
+      route: "/v1/messages",
+      sessionKey: "session-a",
+      body: {
+        model: "claude-code/claude-sonnet-4-5",
+        max_tokens: 1024,
+        messages: [{ role: "user", content: "hello" }],
+        stream: true,
+      },
+      model: "claude-code/claude-sonnet-4-5",
+    });
+
+    const firstUpdated = await store.get(first.id);
+    expect(response.status).toBe(200);
+    expect(firstUpdated?.lastFailureClass).toBe("rate_limit");
+    expect(firstUpdated?.rateLimitResetAt).toBeUndefined();
+    expect(firstUpdated?.rateLimitBlockedAt).toBeTruthy();
+  });
+
+  it("does not fail over after a Claude stream has become visible downstream", async () => {
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: {
+        accessToken: "first-access",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-first",
+      },
+    });
+    await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: {
+        accessToken: "second-access",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-second",
+      },
+    });
+    const upstreamAuths: string[] = [];
+
+    const provider = createTestClaudeCodeProvider({
+      accounts: new StickyAccountPool(store),
+      baseUrl: "https://example.test",
+      usageRefresh: async () => ({ cachedUsageAt: Date.now() }),
+      fetch: async (_input, init) => {
+        upstreamAuths.push(new Headers(init?.headers).get("authorization") ?? "");
+        return new Response(
+          [
+            "event: message_start",
+            'data: {"type":"message_start","message":{"id":"msg_first","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}',
+            "",
+            "event: error",
+            'data: {"type":"error","error":{"type":"rate_limit_error","message":"rate limited mid-stream"}}',
+            "",
+            "",
+          ].join("\n"),
+          {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          },
+        );
+      },
+    });
+
+    const response = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-code/claude-sonnet-4-5",
+          max_tokens: 1024,
+          messages: [{ role: "user", content: "hello" }],
+          stream: true,
+        }),
+      }),
+      route: "/v1/messages",
+      sessionKey: "session-a",
+      body: {
+        model: "claude-code/claude-sonnet-4-5",
+        max_tokens: 1024,
+        messages: [{ role: "user", content: "hello" }],
+        stream: true,
+      },
+      model: "claude-code/claude-sonnet-4-5",
+    });
+
+    const text = await response.text();
+    expect(response.status).toBe(200);
+    expect(upstreamAuths).toEqual(["Bearer first-access"]);
+    expect(text).toContain("message_start");
+    expect(text).toContain("rate limited mid-stream");
   });
 
   it("enriches exhausted Claude Code 429 responses with rate limit header details", async () => {

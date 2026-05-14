@@ -157,6 +157,18 @@ describe("admin accounts API", () => {
       message: "rate limited",
       rateLimitResetAt: new Date(Date.now() + 60_000).toISOString(),
     });
+    const quota = await accounts.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: { accessToken: "quota-secret" },
+    });
+    await accounts.recordFailure(quota.id, {
+      status: 429,
+      message: "quota exceeded",
+      rateLimitResetAt: new Date(Date.now() + 60_000).toISOString(),
+      failureClass: "quota",
+      failureCode: "quota_exceeded",
+    });
     await accounts.create({
       provider: "codex",
       kind: "oauth",
@@ -177,7 +189,7 @@ describe("admin accounts API", () => {
     );
     const body = (await response.json()) as {
       object: string;
-      data: Array<{ provider: string; total: number; ready: number; rate_limited: number }>;
+      data: Array<{ provider: string; total: number; ready: number; rate_limited: number; quota_exceeded: number }>;
       ready: Array<{ id: string; provider: string }>;
       rate_limited: Array<{ id: string; provider: string; reset_at: string }>;
       blocked: Array<{ id: string; provider: string }>;
@@ -192,29 +204,38 @@ describe("admin accounts API", () => {
     expect(body.data).toEqual([
       expect.objectContaining({
         provider: "codex",
-        total: 2,
+        total: 3,
         ready: 1,
         rate_limited: 1,
+        quota_exceeded: 1,
       }),
     ]);
-    expect(body.rate_limited).toEqual([
+    expect(body.rate_limited).toEqual(expect.arrayContaining([
       expect.objectContaining({
         id: limited.id,
         provider: "codex",
       }),
-    ]);
+      expect.objectContaining({
+        id: quota.id,
+        provider: "codex",
+      }),
+    ]));
     expect(body.ready).toEqual([
       expect.objectContaining({
         provider: "codex",
       }),
     ]);
     expect(body.blocked).toEqual([]);
-    expect(body.failed).toEqual([
+    expect(body.failed).toEqual(expect.arrayContaining([
       expect.objectContaining({
         id: limited.id,
         provider: "codex",
       }),
-    ]);
+      expect.objectContaining({
+        id: quota.id,
+        provider: "codex",
+      }),
+    ]));
     expect(body.expired_rate_limits).toEqual([]);
     expect(JSON.stringify(body)).not.toContain("secret");
   });

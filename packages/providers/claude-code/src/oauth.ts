@@ -28,7 +28,7 @@ export interface ClaudeCodeOAuthTokens {
 export interface ClaudeCodeUsageLimits {
   five_hour?: ClaudeCodeUsageLimit | null;
   seven_day?: ClaudeCodeUsageLimit | null;
-  seven_day_sonnet?: ClaudeCodeUsageLimit | null;
+  [key: `seven_day_${string}`]: ClaudeCodeUsageLimit | null | undefined;
 }
 
 export interface ClaudeCodeUsageLimit {
@@ -308,11 +308,17 @@ function normalizeUsageLimits(payload: unknown): ClaudeCodeUsageLimits {
   const record = readRecord(payload);
   if (!record) return {};
 
-  return {
+  const usage: ClaudeCodeUsageLimits = {
     five_hour: normalizeUsageLimit(record.five_hour),
     seven_day: normalizeUsageLimit(record.seven_day),
-    seven_day_sonnet: normalizeUsageLimit(record.seven_day_sonnet),
   };
+
+  for (const [key, value] of Object.entries(record)) {
+    if (!key.startsWith("seven_day_")) continue;
+    usage[key as `seven_day_${string}`] = normalizeUsageLimit(value);
+  }
+
+  return usage;
 }
 
 function normalizeUsageLimit(value: unknown): ClaudeCodeUsageLimit | null {

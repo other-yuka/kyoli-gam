@@ -73,7 +73,39 @@ describe("account status", () => {
           authCooldownUntil: new Date(Date.now() + 60_000).toISOString(),
         }),
       ]).map((row) => row.id),
-    ).toEqual(["sooner", "later"]);
+      ).toEqual(["sooner", "later"]);
+    });
+
+  it("lists unknown usage-limit blocks without inventing a reset time", () => {
+    const blockedAt = new Date(Date.now() - 60_000).toISOString();
+
+    const [limited] = listRateLimitedAccounts([
+      account({
+        id: "usage-limit",
+        rateLimitBlockedAt: blockedAt,
+        lastFailureClass: "rate_limit",
+        lastFailureCode: "usage_limit_reached",
+        failureCount: 1,
+      }),
+    ]);
+
+    expect(limited).toMatchObject({
+      id: "usage-limit",
+      resetAt: undefined,
+      retryAt: undefined,
+      blockedAt,
+    });
+    expect(summarizeAccountStatus([
+      account({
+        id: "usage-limit",
+        rateLimitBlockedAt: blockedAt,
+        lastFailureClass: "rate_limit",
+        failureCount: 1,
+      }),
+    ])[0]).toMatchObject({
+      rateLimited: 1,
+      nextResetAt: undefined,
+    });
   });
 
   it("prioritizes auth cooldown over rate-limit state", () => {

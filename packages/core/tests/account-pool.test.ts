@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { MemoryAccountStore } from "../src/accounts";
 import { StickyAccountPool } from "../src/account-pool";
+import { summarizeAccountStatus, listFailedAccounts } from "../src/account-status";
 import { MemoryStickySessionStore } from "../src/sticky-sessions";
 
 describe("StickyAccountPool", () => {
@@ -193,6 +194,102 @@ describe("StickyAccountPool", () => {
     expect((await store.get(limited.id))?.rateLimitResetAt).toBeDefined();
   });
 
+  it("keeps unknown usage-limit blocks out of selection until fresh usage shows capacity", async () => {
+    const store = new MemoryAccountStore();
+    const limited = await store.create({ provider: "codex", kind: "oauth", name: "limited" });
+    const blocked = await store.recordFailure(limited.id, {
+      status: 429,
+      message: "You've hit your usage limit. Upgrade to Plus to continue using Codex.",
+      failureClass: "rate_limit",
+      failureCode: "usage_limit_reached",
+    });
+    const ready = await store.create({ provider: "codex", kind: "oauth", name: "ready" });
+    const pool = new StickyAccountPool(store);
+
+    const selected = await pool.select({
+      provider: "codex",
+      kind: "oauth",
+      sessionKey: "session-a",
+    });
+
+    expect(selected?.id).toBe(ready.id);
+    expect(blocked?.rateLimitResetAt).toBeUndefined();
+    expect((await store.get(limited.id))?.rateLimitBlockedAt).toBeDefined();
+
+    await store.update(limited.id, {
+      metadata: {
+        cachedUsageAt: Date.now() + 1_000,
+        cachedUsage: {
+          five_hour: { utilization: "35" },
+        },
+      },
+    });
+
+    const recovered = await pool.select({
+      provider: "codex",
+      kind: "oauth",
+      sessionKey: "session-b",
+      preferredAccountId: limited.id,
+    });
+
+    expect(recovered?.id).toBe(limited.id);
+    expect((await store.get(limited.id))?.rateLimitBlockedAt).toBeUndefined();
+  });
+
+  it("does not recover unknown usage-limit blocks from blank utilization strings", async () => {
+    const store = new MemoryAccountStore();
+    const limited = await store.create({ provider: "codex", kind: "oauth", name: "limited" });
+    await store.recordFailure(limited.id, {
+      status: 429,
+      message: "You've hit your usage limit. Upgrade to Plus to continue using Codex.",
+      failureClass: "rate_limit",
+      failureCode: "usage_limit_reached",
+    });
+    const ready = await store.create({ provider: "codex", kind: "oauth", name: "ready" });
+    await store.update(limited.id, {
+      metadata: {
+        cachedUsageAt: Date.now() + 1_000,
+        cachedUsage: {
+          five_hour: { utilization: "" },
+        },
+      },
+    });
+    const pool = new StickyAccountPool(store);
+
+    const selected = await pool.select({
+      provider: "codex",
+      kind: "oauth",
+      sessionKey: "session-a",
+      preferredAccountId: limited.id,
+    });
+
+    expect(selected?.id).toBe(ready.id);
+    expect((await store.get(limited.id))?.rateLimitBlockedAt).toBeDefined();
+  });
+
+  it("preserves quota failures separately from rate limits", async () => {
+    const store = new MemoryAccountStore();
+    const limited = await store.create({ provider: "codex", kind: "oauth", name: "quota" });
+    await store.recordFailure(limited.id, {
+      status: 429,
+      message: "quota exceeded",
+      rateLimitResetAt: new Date(Date.now() + 60_000).toISOString(),
+      failureClass: "quota",
+      failureCode: "quota_exceeded",
+      failurePhase: "startup",
+    });
+
+    const account = await store.get(limited.id);
+    const summary = summarizeAccountStatus([account!])[0]!;
+    const failed = listFailedAccounts([account!])[0]!;
+
+    expect(account?.lastFailureClass).toBe("quota");
+    expect(account?.lastFailureCode).toBe("quota_exceeded");
+    expect(summary.quotaExceeded).toBe(1);
+    expect(summary.rateLimited).toBe(0);
+    expect(failed.state).toBe("quota-exceeded");
+  });
+
   it("keeps accounts in auth cooldown out of selection", async () => {
     const store = new MemoryAccountStore();
     const coolingDown = await store.create({ provider: "codex", kind: "oauth", name: "cooldown" });
@@ -249,6 +346,82 @@ describe("StickyAccountPool", () => {
     });
 
     expect(selected?.id).toBe(available.id);
+    expect(selected?.id).not.toBe(saturated.id);
+  });
+
+  it("treats Claude per-model seven-day buckets as soft quota inputs", async () => {
+    const store = new MemoryAccountStore();
+    const saturated = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      name: "opus-saturated",
+      metadata: {
+        cachedUsage: {
+          five_hour: { utilization: 20, resets_at: null },
+          seven_day_opus: { utilization: "96", resets_at: null },
+        },
+      },
+    });
+    const available = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      name: "available",
+      metadata: {
+        cachedUsage: {
+          five_hour: { utilization: 25, resets_at: null },
+          seven_day_opus: { utilization: 30, resets_at: null },
+        },
+      },
+    });
+    const pool = new StickyAccountPool(store, {
+      strategy: "weighted",
+      softQuotaThresholdPercent: 90,
+    });
+
+    const selected = await pool.select({
+      provider: "claude-code",
+      kind: "oauth",
+      sessionKey: "session-a",
+    });
+
+    expect(selected?.id).toBe(available.id);
+    expect(selected?.id).not.toBe(saturated.id);
+  });
+
+  it("ignores blank utilization strings for soft quota inputs", async () => {
+    const store = new MemoryAccountStore();
+    const blankUsage = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      name: "blank-usage",
+      metadata: {
+        cachedUsage: {
+          five_hour: { utilization: "" },
+        },
+      },
+    });
+    const saturated = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      name: "saturated",
+      metadata: {
+        cachedUsage: {
+          five_hour: { utilization: 95 },
+        },
+      },
+    });
+    const pool = new StickyAccountPool(store, {
+      strategy: "weighted",
+      softQuotaThresholdPercent: 90,
+    });
+
+    const selected = await pool.select({
+      provider: "claude-code",
+      kind: "oauth",
+      sessionKey: "session-a",
+    });
+
+    expect(selected?.id).toBe(blankUsage.id);
     expect(selected?.id).not.toBe(saturated.id);
   });
 

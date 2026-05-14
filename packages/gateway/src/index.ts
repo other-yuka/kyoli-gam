@@ -19,12 +19,16 @@ import {
   createDefaultGatewayConfig,
   createSessionKey,
   inferProviderFromModel,
+  isCurrentlyAuthCoolingDown,
+  isCurrentlyRateLimited,
   jsonResponse,
   listBlockedAccounts,
   listExpiredRateLimitAccounts,
   listFailedAccounts,
   listRateLimitedAccounts,
   listReadyAccounts,
+  readAccountAvailabilityState,
+  readRateLimitRetryAt,
   SQLiteAccountStore,
   summarizeAccountStatus,
   toPublicAccount,
@@ -521,6 +525,8 @@ function createAccountStatusResponse(records: Awaited<ReturnType<AccountStore["l
       id: account.id,
       provider: account.provider,
       reset_at: account.rateLimitResetAt,
+      retry_at: readRateLimitRetryAt(account),
+      blocked_at: account.rateLimitBlockedAt,
       failure_count: account.failureCount,
       name: account.name,
     })),
@@ -533,6 +539,7 @@ function toPublicAccountStatusSummary(row: ReturnType<typeof summarizeAccountSta
     total: row.total,
     ready: row.ready,
     rate_limited: row.rateLimited,
+    quota_exceeded: row.quotaExceeded,
     auth_cooldown: row.authCooldown,
     disabled: row.disabled,
     reauth_required: row.reauthRequired,
@@ -547,7 +554,8 @@ function createCodexUsageResponse(records: Awaited<ReturnType<AccountStore["list
     (account) =>
       account.enabled &&
       !account.reauthRequiredReason &&
-      !(account.rateLimitResetAt && new Date(account.rateLimitResetAt).getTime() > Date.now()),
+      !isCurrentlyRateLimited(account) &&
+      !isCurrentlyAuthCoolingDown(account),
   );
   const summaries = readyAccounts
     .map((account) => readRecord(account.metadata.cachedUsage) ?? readRecord(account.metadata.usage))
@@ -566,16 +574,12 @@ function createCodexUsageResponse(records: Awaited<ReturnType<AccountStore["list
     ].filter(Boolean),
     accounts: records.map((account) => ({
       id: account.id,
-      state: account.rateLimitResetAt && new Date(account.rateLimitResetAt).getTime() > Date.now()
-        ? "rate_limited"
-        : account.reauthRequiredReason
-          ? "reauth_required"
-          : account.enabled
-            ? "ready"
-            : "disabled",
+      state: readAccountAvailabilityState(account).replaceAll("-", "_"),
       plan_type: readString(account.metadata.planType) ?? readString(account.metadata.plan_type),
       cached_usage_at: account.metadata.cachedUsageAt,
       rate_limit_reset_at: account.rateLimitResetAt,
+      rate_limit_retry_at: readRateLimitRetryAt(account),
+      rate_limit_blocked_at: account.rateLimitBlockedAt,
     })),
   };
 }
@@ -653,6 +657,8 @@ function toPublicRateLimitedAccount(row: ReturnType<typeof listRateLimitedAccoun
     id: row.id,
     provider: row.provider,
     reset_at: row.resetAt,
+    retry_at: row.retryAt,
+    blocked_at: row.blockedAt,
     reset_in: row.resetIn,
     failure_count: row.failureCount,
     last_error_at: row.lastErrorAt,
