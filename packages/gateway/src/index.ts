@@ -90,7 +90,7 @@ const routeByPath = new Map<string, GatewayRoute>([
   ["/api/codex/usage", "/api/codex/usage"],
 ]);
 
-const DEFAULT_MAX_BODY_BYTES = 10 * 1024 * 1024;
+const DEFAULT_MAX_BODY_BYTES = 64 * 1024 * 1024;
 const DEFAULT_BODY_READ_TIMEOUT_MS = 30_000;
 
 export function createGateway(options: GatewayOptions): Gateway {
@@ -798,30 +798,55 @@ function readRequestBody(
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let total = 0;
+    let settled = false;
     const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
       request.destroy();
       reject(new BodyReadError("Request body read timed out.", 408, "request_timeout"));
     }, options.timeoutMs);
 
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      reject(error);
+    };
+
+    const contentLength = readContentLength(request.headers["content-length"]);
+    if (contentLength !== undefined && contentLength > options.maxBodyBytes) {
+      request.resume();
+      fail(new BodyReadError("Request body is too large.", 413, "payload_too_large"));
+      return;
+    }
+
     request.on("data", (chunk: Buffer) => {
+      if (settled) return;
       total += chunk.byteLength;
       if (total > options.maxBodyBytes) {
-        clearTimeout(timeout);
-        request.destroy();
-        reject(new BodyReadError("Request body is too large.", 413, "payload_too_large"));
+        request.resume();
+        fail(new BodyReadError("Request body is too large.", 413, "payload_too_large"));
         return;
       }
       chunks.push(chunk);
     });
     request.on("end", () => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timeout);
       resolve(Buffer.concat(chunks, total));
     });
     request.on("error", (error) => {
-      clearTimeout(timeout);
-      reject(error);
+      fail(error);
     });
   });
+}
+
+function readContentLength(value: string | string[] | undefined): number | undefined {
+  const raw = Array.isArray(value) ? value[0] : value;
+  if (!raw) return undefined;
+  const length = Number.parseInt(raw, 10);
+  return Number.isFinite(length) && length >= 0 ? length : undefined;
 }
 
 function toWebHeaders(headers: IncomingHttpHeaders): Headers {

@@ -100,6 +100,7 @@ export interface CodexChatGPTProviderOptions {
   fileFinalizePollDelayMs?: number;
   fileFinalizeBudgetMs?: number;
   compactTimeoutMs?: number;
+  compactRequestBudgetMs?: number;
   compactRetryDelayMs?: number;
 }
 
@@ -581,6 +582,8 @@ async function handleCompactRequest(input: {
 }): Promise<Response> {
   const body = rewriteCompactBody(input.context.body);
   const bodyText = JSON.stringify(body);
+  const budgetMs = input.options.compactRequestBudgetMs ?? input.options.compactTimeoutMs ?? 75_000;
+  const deadline = Date.now() + Math.max(1, budgetMs);
   return executeWithAccountFailover({
     provider: "codex",
     kind: "oauth",
@@ -607,25 +610,31 @@ async function handleCompactRequest(input: {
         tokenRefresh: input.options.tokenRefresh ?? refreshCodexToken,
       }),
     execute: async (credential) => {
-      const request = {
-        method: input.context.request.method,
-        headers: buildUpstreamHeaders(
-          input.context.request.headers,
-          credential.value,
-          (credential as CodexCredential).chatgptAccountId,
-          { bridge: input.context.route.startsWith("/v1/") },
-        ),
-        body: bodyText,
-        signal: AbortSignal.timeout(input.options.compactTimeoutMs ?? 75_000),
-        duplex: "half",
-      } as RequestInit;
-      const response = await input.fetchImpl(CODEX_COMPACT_ENDPOINT, request);
+      const postCompact = (selected: SelectedCredential) =>
+        postCompactRequest({
+          context: input.context,
+          fetchImpl: input.fetchImpl,
+          credential: selected as CodexCredential,
+          bodyText,
+          deadline,
+        });
+
+      let currentCredential = credential;
+      let response = await postCompact(currentCredential);
+      if (response.status === 401 && currentCredential.accountId) {
+        const refreshed = await refreshOAuthCredentialForAccount({
+          accounts: input.options.accounts,
+          accountId: currentCredential.accountId,
+          tokenRefresh: input.options.tokenRefresh ?? refreshCodexToken,
+        });
+        if (refreshed) {
+          currentCredential = refreshed;
+          response = await postCompact(currentCredential);
+        }
+      }
       if (!isRetryableCompactStatus(response.status)) return response;
       await sleep(input.options.compactRetryDelayMs ?? 250);
-      return input.fetchImpl(CODEX_COMPACT_ENDPOINT, {
-        ...request,
-        signal: AbortSignal.timeout(input.options.compactTimeoutMs ?? 75_000),
-      } as RequestInit);
+      return postCompact(currentCredential);
     },
     failureMessage: (status) => `Codex compact upstream returned ${status}`,
     readRateLimitResetAt: readCodexRateLimitResetAt,
@@ -635,6 +644,41 @@ async function handleCompactRequest(input: {
       ? readString((body as Record<string, unknown>).model)
       : input.context.model,
   });
+}
+
+async function postCompactRequest(input: {
+  context: Parameters<ProviderAdapter["handleRequest"]>[0];
+  fetchImpl: typeof fetch;
+  credential: CodexCredential;
+  bodyText: string;
+  deadline: number;
+}): Promise<Response> {
+  const remainingMs = input.deadline - Date.now();
+  if (remainingMs <= 0) {
+    return jsonResponse(
+      {
+        error: {
+          type: "upstream_timeout",
+          message: "Codex compact request budget was exhausted before upstream completed.",
+          retryable: true,
+        },
+      },
+      { status: 504 },
+    );
+  }
+
+  return input.fetchImpl(CODEX_COMPACT_ENDPOINT, {
+    method: input.context.request.method,
+    headers: buildUpstreamHeaders(
+      input.context.request.headers,
+      input.credential.value,
+      input.credential.chatgptAccountId,
+      { bridge: input.context.route.startsWith("/v1/") },
+    ),
+    body: input.bodyText,
+    signal: AbortSignal.timeout(Math.max(1, remainingMs)),
+    duplex: "half",
+  } as RequestInit);
 }
 
 async function handleCodexFileRequest(input: {
@@ -1011,6 +1055,46 @@ async function readOAuthCredential(input: {
 
   return {
     value: accessToken,
+    accountId: account.id,
+    chatgptAccountId,
+  };
+}
+
+async function refreshOAuthCredentialForAccount(input: {
+  accounts: AccountPool | undefined;
+  accountId: string;
+  tokenRefresh: CodexTokenRefresh;
+}): Promise<CodexCredential | undefined> {
+  const account = (await input.accounts?.listByProvider("codex"))
+    ?.find((candidate) => candidate.id === input.accountId && candidate.kind === "oauth");
+  if (!account) return undefined;
+
+  const refreshToken = readString(account.credentials.refreshToken);
+  if (!refreshToken) return undefined;
+
+  const refreshed = await input.tokenRefresh(refreshToken).catch(async (error) => {
+    await input.accounts?.recordFailure(account.id, {
+      status: 401,
+      message: error instanceof Error ? error.message : String(error),
+      reauthRequiredReason: "Codex OAuth token refresh failed",
+    });
+    return undefined;
+  });
+  if (!refreshed) return undefined;
+
+  const chatgptAccountId = refreshed.accountId ?? readString(account.credentials.accountId);
+  await input.accounts?.update(account.id, {
+    credentials: {
+      ...account.credentials,
+      accessToken: refreshed.accessToken,
+      expiresAt: refreshed.expiresAt,
+      refreshToken: refreshed.refreshToken ?? refreshToken,
+      accountId: chatgptAccountId,
+    },
+  });
+
+  return {
+    value: refreshed.accessToken,
     accountId: account.id,
     chatgptAccountId,
   };

@@ -14,6 +14,7 @@ export interface CliConfig {
   planWeights?: Record<string, number>;
   usageRefreshIntervalMs?: number;
   maxConcurrentRequests?: number;
+  maxBodyBytes?: number;
   adminToken?: string;
   logLevel?: LogLevel;
 }
@@ -49,6 +50,10 @@ export async function loadCliConfig(
       readInteger(env.KYOLI_MAX_CONCURRENT_REQUESTS) ??
       fileConfig.maxConcurrentRequests ??
       defaults.maxConcurrentRequests,
+    maxBodyBytes:
+      readInteger(env.KYOLI_MAX_BODY_BYTES) ??
+      fileConfig.maxBodyBytes ??
+      defaults.maxBodyBytes,
     adminToken: env.KYOLI_ADMIN_TOKEN ?? fileConfig.adminToken,
     logLevel: readLogLevel(env.KYOLI_LOG_LEVEL) ?? fileConfig.logLevel ?? defaults.logLevel,
   };
@@ -80,6 +85,7 @@ export function createDefaultCliConfig(): Required<CliConfig> {
     },
     usageRefreshIntervalMs: 300_000,
     maxConcurrentRequests: 0,
+    maxBodyBytes: 64 * 1024 * 1024,
     adminToken: "",
     logLevel: "info",
   };
@@ -120,6 +126,7 @@ function normalizeConfig(value: unknown): CliConfig {
     planWeights: readPlanWeightsObject(record.planWeights),
     usageRefreshIntervalMs: readNumber(record.usageRefreshIntervalMs),
     maxConcurrentRequests: readInteger(record.maxConcurrentRequests),
+    maxBodyBytes: readInteger(record.maxBodyBytes),
     adminToken: readString(record.adminToken),
     logLevel: readLogLevel(record.logLevel),
   };

@@ -8,7 +8,7 @@ import type {
   ProviderId,
 } from "@kyoli-gam/core";
 import { MemoryAccountStore } from "@kyoli-gam/core";
-import { createGateway } from "../src";
+import { createGateway, serveGateway } from "../src";
 
 describe("gateway routing", () => {
   it("routes Anthropic-prefixed Claude messages to the Claude Code adapter", async () => {
@@ -607,6 +607,40 @@ describe("gateway routing", () => {
 
     releaseFirstRequest?.();
     await expect(first).resolves.toMatchObject({ status: 200 });
+  });
+
+  it("returns JSON for oversized HTTP request bodies instead of resetting the connection", async () => {
+    const codex = fakeProvider({
+      id: "codex",
+      routes: ["/v1/responses"],
+      models: [],
+    });
+    const server = await serveGateway({
+      config: { host: "127.0.0.1", port: 0 },
+      accounts: new MemoryAccountStore(),
+      providers: [codex],
+      maxBodyBytes: 32,
+    });
+
+    try {
+      const response = await fetch(`http://${server.hostname}:${server.port}/v1/responses`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ model: "openai/gpt-5.3-codex", input: "x".repeat(128) }),
+      });
+
+      expect(response.status).toBe(413);
+      await expect(response.json()).resolves.toMatchObject({
+        error: {
+          type: "payload_too_large",
+          message: "Request body is too large.",
+        },
+      });
+    } finally {
+      server.stop(true);
+    }
   });
 });
 

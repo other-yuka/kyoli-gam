@@ -1283,6 +1283,114 @@ describe("createCodexChatGPTProvider", () => {
     expect(statuses).toEqual([503, 200]);
   });
 
+  it("refreshes OAuth credentials and retries compact 401 with the same contract", async () => {
+    const upstreamAuths: string[] = [];
+    const upstreamAccountIds: string[] = [];
+    let refreshTokenSeen = "";
+    const store = new MemoryAccountStore();
+    const account = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "stale-access",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-old",
+        accountId: "acct_old",
+      },
+    });
+
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      tokenRefresh: async (refreshToken) => {
+        refreshTokenSeen = refreshToken;
+        return {
+          accessToken: "fresh-access",
+          refreshToken: "refresh-new",
+          expiresAt: Date.now() + 60 * 60 * 1000,
+          accountId: "acct_new",
+        };
+      },
+      fetch: async (_input, init) => {
+        const headers = new Headers(init?.headers);
+        upstreamAuths.push(headers.get("authorization") ?? "");
+        upstreamAccountIds.push(headers.get("ChatGPT-Account-ID") ?? "");
+        return new Response(JSON.stringify({ object: "response.compaction", output: [] }), {
+          status: upstreamAuths.length === 1 ? 401 : 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    const response = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/backend-api/codex/responses/compact", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "gpt-5.3-codex", instructions: "hi", input: [] }),
+      }),
+      route: "/backend-api/codex/responses/compact",
+      sessionKey: "session-a",
+      body: { model: "gpt-5.3-codex", instructions: "hi", input: [] },
+      model: "gpt-5.3-codex",
+    });
+
+    const updated = await store.get(account.id);
+    expect(response.status).toBe(200);
+    expect(refreshTokenSeen).toBe("refresh-old");
+    expect(upstreamAuths).toEqual(["Bearer stale-access", "Bearer fresh-access"]);
+    expect(upstreamAccountIds).toEqual(["acct_old", "acct_new"]);
+    expect(updated?.credentials.accessToken).toBe("fresh-access");
+    expect(updated?.credentials.refreshToken).toBe("refresh-new");
+    expect(updated?.credentials.accountId).toBe("acct_new");
+  });
+
+  it("bounds compact retries by the overall request budget", async () => {
+    let upstreamCalls = 0;
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+      },
+    });
+
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      compactRequestBudgetMs: 5,
+      compactRetryDelayMs: 20,
+      fetch: async () => {
+        upstreamCalls += 1;
+        return new Response(JSON.stringify({ error: { code: "temporary" } }), {
+          status: 503,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    const response = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/backend-api/codex/responses/compact", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "gpt-5.3-codex", instructions: "hi", input: [] }),
+      }),
+      route: "/backend-api/codex/responses/compact",
+      sessionKey: "session-a",
+      body: { model: "gpt-5.3-codex", instructions: "hi", input: [] },
+      model: "gpt-5.3-codex",
+    });
+
+    expect(response.status).toBe(504);
+    await expect(response.json()).resolves.toMatchObject({
+      error: {
+        type: "upstream_timeout",
+        retryable: true,
+      },
+    });
+    expect(upstreamCalls).toBe(1);
+  });
+
   it("proxies transcription multipart requests to the Codex transcribe endpoint", async () => {
     let upstreamUrl = "";
     let upstreamAuth = "";

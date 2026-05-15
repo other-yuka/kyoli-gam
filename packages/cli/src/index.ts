@@ -122,6 +122,7 @@ if (command === "serve") {
     ],
     adminToken: cliConfig.adminToken,
     maxConcurrentRequests: cliConfig.maxConcurrentRequests,
+    maxBodyBytes: cliConfig.maxBodyBytes,
   });
 
   console.log(`kyoli-gam gateway listening on http://${server.hostname}:${server.port}`);
