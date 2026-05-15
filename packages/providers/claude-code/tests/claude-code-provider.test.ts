@@ -221,7 +221,9 @@ describe("createClaudeCodeProvider", () => {
     const systemText = (upstreamBody as { system: Array<{ text: string }> }).system[2]?.text ?? "";
     expect(systemText).toBe(getClaudeCodeTemplateMetadata().systemPrompt);
     expect(systemText.length).toBeGreaterThan(10_000);
-    expect((upstreamBody as { tools: Array<{ name: string; input_schema?: unknown }> }).tools).toHaveLength(26);
+    expect((upstreamBody as { tools: Array<{ name: string; input_schema?: unknown }> }).tools).toHaveLength(
+      getClaudeCodeTemplateMetadata().toolNames.length,
+    );
     expect((upstreamBody as { tools: Array<{ name: string; input_schema?: unknown }> }).tools[0]).toMatchObject({
       name: "Agent",
     });
