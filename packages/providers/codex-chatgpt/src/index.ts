@@ -32,6 +32,7 @@ const CODEX_TRANSCRIBE_ENDPOINT = "https://chatgpt.com/backend-api/transcribe";
 const DEFAULT_IMAGE_HOST_MODEL = "gpt-5.5";
 const OPENAI_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const OPENAI_TOKEN_ENDPOINT = "https://auth.openai.com/oauth/token";
+const OPENAI_OAUTH_SCOPE = "openid profile email";
 const CODEX_ORIGINATOR = "codex_cli_rs";
 const CODEX_BRIDGE_ORIGINATOR = "codex_chatgpt_desktop";
 const CODEX_USER_AGENT = "codex_cli_rs/0.0.0";
@@ -150,6 +151,8 @@ interface WebSocketRelayState {
   downstreamVisible: boolean;
   replayAttempts: number;
   retiredUpstreams: Set<CodexWebSocketLike>;
+  traceRequestId: string;
+  traceModel?: string;
 }
 
 export function createCodexChatGPTProvider(
@@ -264,17 +267,16 @@ export function createCodexChatGPTProvider(
             tokenRefresh: options.tokenRefresh ?? refreshCodexToken,
           }),
         execute: async (credential) =>
-          normalizeCodexStartupFailure(await fetchImpl(createUpstreamUrl(context.route), {
-            method: context.request.method,
-            headers: buildUpstreamHeaders(
-              context.request.headers,
-              credential.value,
-              (credential as CodexCredential).chatgptAccountId,
-              { bridge: context.route.startsWith("/v1/") },
-            ),
+          fetchCodexJsonWithAuthRefresh({
+            context,
+            fetchImpl,
+            options,
+            credential: credential as CodexCredential,
+            url: createUpstreamUrl(context.route),
             body: body === undefined ? context.request.body : JSON.stringify(body),
-            duplex: "half",
-          } as RequestInit)),
+            bridge: context.route.startsWith("/v1/"),
+            normalizeStartupFailure: true,
+          }),
         failureMessage: (status) => `Codex upstream returned ${status}`,
         readRateLimitResetAt: readCodexRateLimitResetAt,
         onTrace: options.onTrace,
@@ -303,6 +305,8 @@ async function handleResponsesWebSocket(input: {
   const { context, options } = input;
   const websocketFactory = options.webSocketFactory ?? createGlobalWebSocket;
   const turnState = context.request.headers.get("x-codex-turn-state") ?? crypto.randomUUID();
+  const traceRequestId = crypto.randomUUID();
+  const traceModel = readWebSocketTraceModel(context.request.headers) ?? context.model;
   const excludedAccountIds: string[] = [];
 
   await context.websocket.accept({ "x-codex-turn-state": turnState });
@@ -311,6 +315,8 @@ async function handleResponsesWebSocket(input: {
     context,
     options,
     websocketFactory,
+    traceRequestId,
+    traceModel,
     excludeAccountIds: excludedAccountIds,
   });
 
@@ -345,6 +351,8 @@ async function handleResponsesWebSocket(input: {
     downstreamVisible: false,
     replayAttempts: 0,
     retiredUpstreams: new Set(),
+    traceRequestId,
+    traceModel,
   };
   relayUpstreamMessages(relayState, upstreamResult.upstream, upstreamResult.credential);
 
@@ -368,6 +376,8 @@ async function openResponsesWebSocketWithFailover(input: {
   context: GatewayWebSocketContext;
   options: CodexChatGPTProviderOptions;
   websocketFactory: CodexWebSocketFactory;
+  traceRequestId: string;
+  traceModel?: string;
   excludeAccountIds?: string[];
 }): Promise<{
   credential?: CodexCredential;
@@ -388,16 +398,49 @@ async function openResponsesWebSocketWithFailover(input: {
     }).catch((error) => {
       if (error instanceof CredentialUnavailableError) {
         excludedAccountIds.push(error.accountId);
+        input.options.onTrace?.({
+          requestId: input.traceRequestId,
+          type: "credential_unavailable",
+          provider: "codex",
+          kind: "oauth",
+          sessionKey: input.context.sessionKey,
+          accountId: error.accountId,
+          message: error.message,
+          route: input.context.route,
+          model: input.traceModel,
+        });
         return undefined;
       }
       throw error;
     });
     if (!credential) {
       if (excludedAccountIds.length > 0) continue;
+      input.options.onTrace?.({
+        requestId: input.traceRequestId,
+        type: "missing",
+        provider: "codex",
+        kind: "oauth",
+        sessionKey: input.context.sessionKey,
+        excludedAccountIds,
+        hadRetryableResponse: false,
+        route: input.context.route,
+        model: input.traceModel,
+      });
       return {};
     }
 
     lastCredential = credential;
+    input.options.onTrace?.({
+      requestId: input.traceRequestId,
+      type: "selected",
+      provider: "codex",
+      kind: "oauth",
+      sessionKey: input.context.sessionKey,
+      accountId: credential.accountId,
+      attempt: attempt + 1,
+      route: input.context.route,
+      model: input.traceModel,
+    });
     const upstream = input.websocketFactory(CODEX_WEBSOCKET_ENDPOINT, [], {
       headers: buildUpstreamWebSocketHeaders(
         input.context.request.headers,
@@ -412,6 +455,19 @@ async function openResponsesWebSocketWithFailover(input: {
       if (credential.accountId) {
         await input.options.accounts?.recordSuccess(credential.accountId, { kind: "transport" });
       }
+      input.options.onTrace?.({
+        requestId: input.traceRequestId,
+        type: "response",
+        provider: "codex",
+        kind: "oauth",
+        sessionKey: input.context.sessionKey,
+        accountId: credential.accountId,
+        attempt: attempt + 1,
+        status: 101,
+        retryable: false,
+        route: input.context.route,
+        model: input.traceModel,
+      });
       return { credential, upstream };
     } catch (error) {
       upstream.close();
@@ -420,6 +476,19 @@ async function openResponsesWebSocketWithFailover(input: {
       await input.options.accounts?.recordFailure(credential.accountId, {
         status: 502,
         message: lastError.message,
+      });
+      input.options.onTrace?.({
+        requestId: input.traceRequestId,
+        type: "response",
+        provider: "codex",
+        kind: "oauth",
+        sessionKey: input.context.sessionKey,
+        accountId: credential.accountId,
+        attempt: attempt + 1,
+        status: 502,
+        retryable: true,
+        route: input.context.route,
+        model: input.traceModel,
       });
       excludedAccountIds.push(credential.accountId);
     }
@@ -471,17 +540,16 @@ async function handleResponsesRequest(input: {
         tokenRefresh: input.options.tokenRefresh ?? refreshCodexToken,
       }),
     execute: async (credential) =>
-      normalizeCodexStartupFailure(await input.fetchImpl(createUpstreamUrl(input.context.route), {
-        method: input.context.request.method,
-        headers: buildUpstreamHeaders(
-          input.context.request.headers,
-          credential.value,
-          (credential as CodexCredential).chatgptAccountId,
-          { bridge: true },
-        ),
+      fetchCodexJsonWithAuthRefresh({
+        context: input.context,
+        fetchImpl: input.fetchImpl,
+        options: input.options,
+        credential: credential as CodexCredential,
+        url: createUpstreamUrl(input.context.route),
         body: JSON.stringify(upstreamBody),
-        duplex: "half",
-      } as RequestInit)),
+        bridge: true,
+        normalizeStartupFailure: true,
+      }),
     failureMessage: (status) => `Codex upstream returned ${status}`,
     readRateLimitResetAt: readCodexRateLimitResetAt,
     onTrace: input.options.onTrace,
@@ -540,17 +608,17 @@ async function handleChatCompletionsRequest(input: {
         tokenRefresh: input.options.tokenRefresh ?? refreshCodexToken,
       }),
     execute: async (credential) =>
-      normalizeCodexStartupFailure(await input.fetchImpl(CODEX_API_ENDPOINT, {
+      fetchCodexJsonWithAuthRefresh({
+        context: input.context,
+        fetchImpl: input.fetchImpl,
+        options: input.options,
+        credential: credential as CodexCredential,
+        url: CODEX_API_ENDPOINT,
         method: "POST",
-        headers: buildUpstreamHeaders(
-          input.context.request.headers,
-          credential.value,
-          (credential as CodexCredential).chatgptAccountId,
-          { bridge: true },
-        ),
         body: JSON.stringify(responsesBody),
-        duplex: "half",
-      } as RequestInit)),
+        bridge: true,
+        normalizeStartupFailure: true,
+      }),
     failureMessage: (status) => `Codex upstream returned ${status}`,
     readRateLimitResetAt: readCodexRateLimitResetAt,
     onTrace: input.options.onTrace,
@@ -677,6 +745,57 @@ async function postCompactRequest(input: {
     ),
     body: input.bodyText,
     signal: AbortSignal.timeout(Math.max(1, remainingMs)),
+    duplex: "half",
+  } as RequestInit);
+}
+
+async function fetchCodexJsonWithAuthRefresh(input: {
+  context: Parameters<ProviderAdapter["handleRequest"]>[0];
+  fetchImpl: typeof fetch;
+  options: CodexChatGPTProviderOptions;
+  credential: CodexCredential;
+  url: string;
+  body?: BodyInit | null;
+  method?: string;
+  bridge?: boolean;
+  normalizeStartupFailure?: boolean;
+}): Promise<Response | AccountExecutionResult> {
+  let currentCredential = input.credential;
+  let response = await fetchCodexJsonRequest(input, currentCredential);
+  if (response.status === 401 && currentCredential.accountId) {
+    const refreshed = await refreshOAuthCredentialForAccount({
+      accounts: input.options.accounts,
+      accountId: currentCredential.accountId,
+      tokenRefresh: input.options.tokenRefresh ?? refreshCodexToken,
+    });
+    if (refreshed) {
+      currentCredential = refreshed;
+      response = await fetchCodexJsonRequest(input, currentCredential);
+    }
+  }
+  return input.normalizeStartupFailure ? normalizeCodexStartupFailure(response) : response;
+}
+
+function fetchCodexJsonRequest(
+  input: {
+    context: Parameters<ProviderAdapter["handleRequest"]>[0];
+    fetchImpl: typeof fetch;
+    url: string;
+    body?: BodyInit | null;
+    method?: string;
+    bridge?: boolean;
+  },
+  credential: CodexCredential,
+): Promise<Response> {
+  return input.fetchImpl(input.url, {
+    method: input.method ?? input.context.request.method,
+    headers: buildUpstreamHeaders(
+      input.context.request.headers,
+      credential.value,
+      credential.chatgptAccountId,
+      { bridge: input.bridge },
+    ),
+    body: input.body,
     duplex: "half",
   } as RequestInit);
 }
@@ -864,17 +983,17 @@ async function handleImagesRequest(input: {
         tokenRefresh: input.options.tokenRefresh ?? refreshCodexToken,
       }),
     execute: async (credential) =>
-      normalizeCodexStartupFailure(await input.fetchImpl(CODEX_API_ENDPOINT, {
+      fetchCodexJsonWithAuthRefresh({
+        context: input.context,
+        fetchImpl: input.fetchImpl,
+        options: input.options,
+        credential: credential as CodexCredential,
+        url: CODEX_API_ENDPOINT,
         method: "POST",
-        headers: buildUpstreamHeaders(
-          input.context.request.headers,
-          credential.value,
-          (credential as CodexCredential).chatgptAccountId,
-          { bridge: true },
-        ),
         body: JSON.stringify(responsesBody),
-        duplex: "half",
-      } as RequestInit)),
+        bridge: true,
+        normalizeStartupFailure: true,
+      }),
     failureMessage: (status) => `Codex image upstream returned ${status}`,
     readRateLimitResetAt: readCodexRateLimitResetAt,
     onTrace: input.options.onTrace,
@@ -1108,17 +1227,20 @@ async function refreshCodexToken(refreshToken: string): Promise<CodexTokenRefres
     const startedAt = Date.now();
     const response = await fetch(OPENAI_TOKEN_ENDPOINT, {
       method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
         grant_type: "refresh_token",
         refresh_token: refreshToken,
         client_id: OPENAI_CLIENT_ID,
+        scope: OPENAI_OAUTH_SCOPE,
       }),
       signal: controller.signal,
     });
 
     if (!response.ok) {
-      throw new Error(`Codex token refresh failed with ${response.status}`);
+      const payload = await response.json().catch(() => undefined);
+      const message = readOAuthErrorMessage(payload) ?? `Codex token refresh failed with ${response.status}`;
+      throw new Error(message);
     }
 
     const payload = (await response.json()) as Record<string, unknown>;
@@ -2799,6 +2921,8 @@ async function tryReplayWebSocketFailure(
     context: state.context,
     options: state.options,
     websocketFactory: state.websocketFactory,
+    traceRequestId: state.traceRequestId,
+    traceModel: state.traceModel,
     excludeAccountIds: state.excludedAccountIds,
   });
   if (!next.upstream || !next.credential) return false;
@@ -2870,9 +2994,32 @@ function rememberReplayableWebSocketMessage(
   state: WebSocketRelayState,
   message: GatewayWebSocketMessage,
 ): void {
+  updateWebSocketTraceModelFromMessage(state, message);
   if (state.downstreamVisible || message.type === "close") return;
   state.replayableMessages.push(message);
   if (state.replayableMessages.length > 8) state.replayableMessages.shift();
+}
+
+function updateWebSocketTraceModelFromMessage(
+  state: WebSocketRelayState,
+  message: GatewayWebSocketMessage,
+): void {
+  if (state.traceModel || message.type !== "text") return;
+  const model = readWebSocketPayloadModel(readJsonRecordFromString(message.data));
+  if (!model) return;
+
+  state.traceModel = model;
+  state.options.onTrace?.({
+    requestId: state.traceRequestId,
+    type: "metadata",
+    provider: "codex",
+    kind: "oauth",
+    sessionKey: state.context.sessionKey,
+    accountId: state.active.credential.accountId,
+    route: state.context.route,
+    model,
+    message: "WebSocket response.create model discovered after account selection.",
+  });
 }
 
 function hasPreviousResponseAnchor(messages: GatewayWebSocketMessage[]): boolean {
@@ -2970,6 +3117,20 @@ function createUpstreamUrl(route: string): string {
   return CODEX_API_ENDPOINT;
 }
 
+function readWebSocketTraceModel(headers: Headers): string | undefined {
+  const metadata = headers.get("x-codex-turn-metadata");
+  if (!metadata) return undefined;
+  const record = readJsonRecordValue(metadata);
+  return readWebSocketPayloadModel(record);
+}
+
+function readWebSocketPayloadModel(record: Record<string, unknown> | undefined): string | undefined {
+  return readString(record?.model) ??
+    readString(readRecord(record?.request)?.model) ??
+    readString(readRecord(record?.response)?.model) ??
+    readString(readRecord(record?.value)?.model);
+}
+
 function readString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
@@ -2982,6 +3143,14 @@ function readRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
+}
+
+function readJsonRecordValue(value: string): Record<string, unknown> | undefined {
+  try {
+    return readRecord(JSON.parse(value));
+  } catch {
+    return undefined;
+  }
 }
 
 function readCodexRateLimitResetAt(headers: Headers): string | undefined {
@@ -3041,6 +3210,15 @@ function findAccountId(claims: IdTokenClaims | undefined): string | undefined {
     return claims["https://api.openai.com/auth"].chatgpt_account_id;
   }
   return claims.organizations?.[0]?.id;
+}
+
+function readOAuthErrorMessage(value: unknown): string | undefined {
+  const record = readRecord(value);
+  if (!record) return undefined;
+  const description = readString(record.error_description);
+  const error = readString(record.error);
+  if (description && error) return `${error}: ${description}`;
+  return description ?? error;
 }
 
 function base64UrlDecode(value: string): string {

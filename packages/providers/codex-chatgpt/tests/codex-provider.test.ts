@@ -142,6 +142,67 @@ describe("createCodexChatGPTProvider", () => {
     });
   });
 
+  it("refreshes OAuth credentials and retries /backend-api/codex/responses 401 on the same account", async () => {
+    const upstreamAuths: string[] = [];
+    const upstreamAccountIds: string[] = [];
+    let refreshTokenSeen = "";
+    const store = new MemoryAccountStore();
+    const account = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "stale-access",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-old",
+        accountId: "acct_old",
+      },
+    });
+
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      tokenRefresh: async (refreshToken) => {
+        refreshTokenSeen = refreshToken;
+        return {
+          accessToken: "fresh-access",
+          refreshToken: "refresh-new",
+          expiresAt: Date.now() + 60 * 60 * 1000,
+          accountId: "acct_new",
+        };
+      },
+      fetch: async (_input, init) => {
+        const headers = new Headers(init?.headers);
+        upstreamAuths.push(headers.get("authorization") ?? "");
+        upstreamAccountIds.push(headers.get("ChatGPT-Account-ID") ?? "");
+        return new Response(JSON.stringify({ id: "resp_test" }), {
+          status: upstreamAuths.length === 1 ? 401 : 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    const response = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/backend-api/codex/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "gpt-5.3-codex", input: "hello" }),
+      }),
+      route: "/backend-api/codex/responses",
+      sessionKey: "session-a",
+      body: { model: "gpt-5.3-codex", input: "hello" },
+      model: "gpt-5.3-codex",
+    });
+
+    const updated = await store.get(account.id);
+    expect(response.status).toBe(200);
+    expect(refreshTokenSeen).toBe("refresh-old");
+    expect(upstreamAuths).toEqual(["Bearer stale-access", "Bearer fresh-access"]);
+    expect(upstreamAccountIds).toEqual(["acct_old", "acct_new"]);
+    expect(updated?.failureCount).toBe(0);
+    expect(updated?.credentials.accessToken).toBe("fresh-access");
+    expect(updated?.credentials.refreshToken).toBe("refresh-new");
+    expect(updated?.credentials.accountId).toBe("acct_new");
+  });
+
   it("preserves native Codex originator and user-agent headers", async () => {
     let upstreamOriginator = "";
     let upstreamUserAgent = "";
