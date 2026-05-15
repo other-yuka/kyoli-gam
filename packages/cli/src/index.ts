@@ -37,6 +37,7 @@ import {
 } from "@kyoli-gam/provider-claude-code";
 import {
   createCodexChatGPTProvider,
+  refreshCodexOAuthToken,
   startCodexOAuthLogin,
 } from "@kyoli-gam/provider-codex-chatgpt";
 import { createGateway, serveGateway } from "@kyoli-gam/gateway";
@@ -153,6 +154,7 @@ if (command === "serve") {
       metadata: {
         email: tokens.email,
         accountId: tokens.accountId,
+        planTier: tokens.planTier,
       },
     });
 
@@ -774,8 +776,11 @@ async function refreshAccountMetadata(
   store: AccountStore,
   account: AccountRecord,
 ): Promise<AccountRecord> {
+  if (account.provider === "codex") {
+    return refreshCodexAccountMetadata(store, account);
+  }
   if (account.provider !== "claude-code") {
-    throw new Error("Only claude-code accounts support metadata refresh for now.");
+    throw new Error("Only codex and claude-code accounts support metadata refresh for now.");
   }
 
   const refreshToken = readString(account.credentials.refreshToken);
@@ -813,6 +818,35 @@ async function refreshAccountMetadata(
       planTier: accountMetadata.planTier ?? metadata.planTier,
       cachedUsage: accountMetadata.cachedUsage ?? metadata.cachedUsage,
       cachedUsageAt: accountMetadata.cachedUsageAt ?? metadata.cachedUsageAt,
+    },
+  });
+  if (!updated) throw new Error(`Account not found: ${account.id}`);
+  return updated;
+}
+
+async function refreshCodexAccountMetadata(
+  store: AccountStore,
+  account: AccountRecord,
+): Promise<AccountRecord> {
+  const refreshToken = readString(account.credentials.refreshToken);
+  if (!refreshToken) {
+    throw new Error("Codex account has no refresh token and cannot be refreshed.");
+  }
+
+  const refreshed = await refreshCodexOAuthToken(refreshToken);
+  const updated = await store.update(account.id, {
+    credentials: {
+      ...account.credentials,
+      accessToken: refreshed.accessToken,
+      refreshToken: refreshed.refreshToken ?? refreshToken,
+      expiresAt: refreshed.expiresAt,
+      accountId: refreshed.accountId ?? account.credentials.accountId,
+    },
+    metadata: {
+      ...account.metadata,
+      email: refreshed.email ?? account.metadata.email,
+      accountId: refreshed.accountId ?? account.metadata.accountId,
+      planTier: refreshed.planTier ?? account.metadata.planTier,
     },
   });
   if (!updated) throw new Error(`Account not found: ${account.id}`);

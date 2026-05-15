@@ -167,6 +167,8 @@ describe("createCodexChatGPTProvider", () => {
           refreshToken: "refresh-new",
           expiresAt: Date.now() + 60 * 60 * 1000,
           accountId: "acct_new",
+          email: "fresh@example.com",
+          planTier: "pro",
         };
       },
       fetch: async (_input, init) => {
@@ -201,6 +203,9 @@ describe("createCodexChatGPTProvider", () => {
     expect(updated?.credentials.accessToken).toBe("fresh-access");
     expect(updated?.credentials.refreshToken).toBe("refresh-new");
     expect(updated?.credentials.accountId).toBe("acct_new");
+    expect(updated?.metadata.email).toBe("fresh@example.com");
+    expect(updated?.metadata.accountId).toBe("acct_new");
+    expect(updated?.metadata.planTier).toBe("pro");
   });
 
   it("preserves native Codex originator and user-agent headers", async () => {
@@ -1369,6 +1374,8 @@ describe("createCodexChatGPTProvider", () => {
           refreshToken: "refresh-new",
           expiresAt: Date.now() + 60 * 60 * 1000,
           accountId: "acct_new",
+          email: "fresh@example.com",
+          planTier: "pro",
         };
       },
       fetch: async (_input, init) => {
@@ -1402,6 +1409,9 @@ describe("createCodexChatGPTProvider", () => {
     expect(updated?.credentials.accessToken).toBe("fresh-access");
     expect(updated?.credentials.refreshToken).toBe("refresh-new");
     expect(updated?.credentials.accountId).toBe("acct_new");
+    expect(updated?.metadata.email).toBe("fresh@example.com");
+    expect(updated?.metadata.accountId).toBe("acct_new");
+    expect(updated?.metadata.planTier).toBe("pro");
   });
 
   it("bounds compact retries by the overall request budget", async () => {

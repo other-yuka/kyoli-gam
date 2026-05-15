@@ -112,11 +112,13 @@ interface CodexCredential extends SelectedCredential {
   chatgptAccountId?: string;
 }
 
-interface CodexTokenRefreshResult {
+export interface CodexTokenRefreshResult {
   accessToken: string;
   expiresAt: number;
   refreshToken?: string;
   accountId?: string;
+  email?: string;
+  planTier?: string;
 }
 
 type CodexTokenRefresh = (refreshToken: string) => Promise<CodexTokenRefreshResult>;
@@ -1169,6 +1171,12 @@ async function readOAuthCredential(input: {
         refreshToken: refreshed.refreshToken ?? refreshToken,
         accountId: chatgptAccountId,
       },
+      metadata: {
+        ...account.metadata,
+        email: refreshed.email ?? account.metadata.email,
+        accountId: refreshed.accountId ?? account.metadata.accountId,
+        planTier: refreshed.planTier ?? account.metadata.planTier,
+      },
     });
   }
 
@@ -1210,6 +1218,12 @@ async function refreshOAuthCredentialForAccount(input: {
       refreshToken: refreshed.refreshToken ?? refreshToken,
       accountId: chatgptAccountId,
     },
+    metadata: {
+      ...account.metadata,
+      email: refreshed.email ?? account.metadata.email,
+      accountId: refreshed.accountId ?? account.metadata.accountId,
+      planTier: refreshed.planTier ?? account.metadata.planTier,
+    },
   });
 
   return {
@@ -1219,7 +1233,7 @@ async function refreshOAuthCredentialForAccount(input: {
   };
 }
 
-async function refreshCodexToken(refreshToken: string): Promise<CodexTokenRefreshResult> {
+export async function refreshCodexOAuthToken(refreshToken: string): Promise<CodexTokenRefreshResult> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), TOKEN_REFRESH_TIMEOUT_MS);
 
@@ -1255,11 +1269,15 @@ async function refreshCodexToken(refreshToken: string): Promise<CodexTokenRefres
       expiresAt: startedAt + expiresIn * 1000,
       refreshToken: readString(payload.refresh_token),
       accountId: extractAccountId(payload),
+      email: extractEmail(payload),
+      planTier: extractPlanTier(payload),
     };
   } finally {
     clearTimeout(timeout);
   }
 }
+
+const refreshCodexToken = refreshCodexOAuthToken;
 
 async function fetchCodexFile(input: {
   fetchImpl: typeof fetch;
@@ -3186,10 +3204,28 @@ function extractAccountId(payload: Record<string, unknown>): string | undefined 
   return findAccountId(parseJwtClaims(idToken)) ?? findAccountId(parseJwtClaims(accessToken));
 }
 
+function extractEmail(payload: Record<string, unknown>): string | undefined {
+  const idToken = readString(payload.id_token);
+  return parseJwtClaims(idToken)?.email;
+}
+
+function extractPlanTier(payload: Record<string, unknown>): string | undefined {
+  const idToken = readString(payload.id_token);
+  const accessToken = readString(payload.access_token);
+  return normalizePlanTier(
+    findPlanTier(parseJwtClaims(idToken)) ?? findPlanTier(parseJwtClaims(accessToken)),
+  );
+}
+
 interface IdTokenClaims {
   chatgpt_account_id?: string;
+  chatgpt_plan_type?: string;
+  email?: string;
   organizations?: Array<{ id: string }>;
-  "https://api.openai.com/auth"?: { chatgpt_account_id?: string };
+  "https://api.openai.com/auth"?: {
+    chatgpt_account_id?: string;
+    chatgpt_plan_type?: string;
+  };
 }
 
 function parseJwtClaims(token: string | undefined): IdTokenClaims | undefined {
@@ -3210,6 +3246,16 @@ function findAccountId(claims: IdTokenClaims | undefined): string | undefined {
     return claims["https://api.openai.com/auth"].chatgpt_account_id;
   }
   return claims.organizations?.[0]?.id;
+}
+
+function findPlanTier(claims: IdTokenClaims | undefined): string | undefined {
+  if (!claims) return undefined;
+  return claims["https://api.openai.com/auth"]?.chatgpt_plan_type ?? claims.chatgpt_plan_type;
+}
+
+function normalizePlanTier(value: string | undefined): string | undefined {
+  const cleaned = value?.trim();
+  return cleaned ? cleaned.toLowerCase() : undefined;
 }
 
 function readOAuthErrorMessage(value: unknown): string | undefined {

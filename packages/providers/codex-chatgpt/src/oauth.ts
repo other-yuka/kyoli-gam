@@ -11,6 +11,7 @@ export interface CodexOAuthTokens {
   expiresAt: number;
   accountId?: string;
   email?: string;
+  planTier?: string;
 }
 
 type PKCE = { verifier: string; challenge: string };
@@ -213,6 +214,7 @@ async function exchangeCodeForTokens(
     expiresAt: startedAt + expiresIn * 1000,
     accountId: extractAccountId(payload),
     email: extractEmail(payload),
+    planTier: extractPlanTier(payload),
   };
 }
 
@@ -276,11 +278,23 @@ function extractEmail(payload: Record<string, unknown>): string | undefined {
   return parseJwtClaims(idToken)?.email;
 }
 
+function extractPlanTier(payload: Record<string, unknown>): string | undefined {
+  const idToken = readString(payload.id_token);
+  const accessToken = readString(payload.access_token);
+  return normalizePlanTier(
+    findPlanTier(parseJwtClaims(idToken)) ?? findPlanTier(parseJwtClaims(accessToken)),
+  );
+}
+
 interface IdTokenClaims {
   chatgpt_account_id?: string;
+  chatgpt_plan_type?: string;
   email?: string;
   organizations?: Array<{ id: string }>;
-  "https://api.openai.com/auth"?: { chatgpt_account_id?: string };
+  "https://api.openai.com/auth"?: {
+    chatgpt_account_id?: string;
+    chatgpt_plan_type?: string;
+  };
 }
 
 function parseJwtClaims(token: string | undefined): IdTokenClaims | undefined {
@@ -301,6 +315,16 @@ function findAccountId(claims: IdTokenClaims | undefined): string | undefined {
     return claims["https://api.openai.com/auth"].chatgpt_account_id;
   }
   return claims.organizations?.[0]?.id;
+}
+
+function findPlanTier(claims: IdTokenClaims | undefined): string | undefined {
+  if (!claims) return undefined;
+  return claims["https://api.openai.com/auth"]?.chatgpt_plan_type ?? claims.chatgpt_plan_type;
+}
+
+function normalizePlanTier(value: string | undefined): string | undefined {
+  const cleaned = value?.trim();
+  return cleaned ? cleaned.toLowerCase() : undefined;
 }
 
 function base64UrlEncode(bytes: ArrayBuffer | Uint8Array): string {
