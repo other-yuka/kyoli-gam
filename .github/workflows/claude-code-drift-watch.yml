@@ -90,7 +90,6 @@ jobs:
     outputs:
       exit_code: ${{ steps.drift.outputs.exit_code }}
       cc_version: ${{ steps.version.outputs.cc_version }}
-      should_create_pr: ${{ steps.classify.outputs.should_create_pr }}
       should_open_issue: ${{ steps.classify.outputs.should_open_issue }}
     steps:
       - uses: actions/checkout@v6
@@ -134,14 +133,7 @@ jobs:
         id: classify
         run: |
           node packages/anthropic-multi-account/scripts/auto-draft-static-oauth-drift-fix.mjs
-          SHOULD_CREATE_PR=$(node -e "console.log(JSON.parse(require('fs').readFileSync('auto-draft-result.json','utf8')).shouldCreatePr ? 'true' : 'false')")
-          if [ "$SHOULD_CREATE_PR" = "true" ]; then
-            echo "should_create_pr=true" >> "$GITHUB_OUTPUT"
-            echo "should_open_issue=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "should_create_pr=false" >> "$GITHUB_OUTPUT"
-            echo "should_open_issue=true" >> "$GITHUB_OUTPUT"
-          fi
+          echo "should_open_issue=true" >> "$GITHUB_OUTPUT"
           cat auto-draft-result.json
 
       - name: Upload drift artifacts
@@ -153,86 +145,8 @@ jobs:
             drift-report.json
             drift-log.txt
             auto-draft-result.json
-            auto-draft-pr-body.md
           if-no-files-found: ignore
           retention-days: 30
-
-  compat_pr:
-    needs: drift
-    if: needs.drift.outputs.should_create_pr == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      actions: read
-      contents: write
-      pull-requests: write
-    outputs:
-      pr_url: ${{ steps.pr.outputs.pr_url }}
-    steps:
-      - name: Require drift bot PAT
-        env:
-          DRIFT_BOT_PAT: ${{ secrets.DARIO_DRIFT_BOT_PAT }}
-        run: |
-          if [ -z "$DRIFT_BOT_PAT" ]; then
-            echo "::error::DARIO_DRIFT_BOT_PAT is required so auto-opened drift PRs trigger normal pull_request checks."
-            exit 1
-          fi
-
-      - uses: actions/checkout@v6
-        with:
-          token: ${{ secrets.DARIO_DRIFT_BOT_PAT }}
-
-      - uses: actions/download-artifact@v8
-        with:
-          name: claude-code-drift-report
-
-      - name: Prepare compat-range patch
-        id: autopatch
-        run: |
-          node packages/anthropic-multi-account/scripts/auto-draft-static-oauth-drift-fix.mjs
-          cat auto-draft-result.json
-
-      - name: Open or update compat-range PR
-        id: pr
-        env:
-          GH_TOKEN: ${{ secrets.DARIO_DRIFT_BOT_PAT }}
-          CHANGED_FILES_JSON: ${{ steps.autopatch.outputs.changed_files }}
-        run: |
-          set -euo pipefail
-          BRANCH="${{ steps.autopatch.outputs.branch_name }}"
-          COMMIT_MESSAGE="${{ steps.autopatch.outputs.commit_message }}"
-          PR_TITLE="${{ steps.autopatch.outputs.pr_title }}"
-          PR_BODY_PATH="${{ steps.autopatch.outputs.pr_body_path }}"
-
-          git config user.name "claude-code-drift-watch[bot]"
-          git config user.email "actions@github.com"
-          git fetch origin "$BRANCH:refs/remotes/origin/$BRANCH" || true
-          git checkout -B "$BRANCH"
-
-          node <<'NODE' > changed-files.txt
-          const files = JSON.parse(process.env.CHANGED_FILES_JSON || "[]");
-          for (const file of files) console.log(file);
-          NODE
-
-          while IFS= read -r file; do
-            git add "$file"
-          done < changed-files.txt
-
-          git commit -m "$COMMIT_MESSAGE"
-          git push --force-with-lease origin "$BRANCH"
-
-          PR_URL=$(gh pr view "$BRANCH" --json url --jq .url 2>/dev/null || true)
-          if [ -z "$PR_URL" ]; then
-            PR_URL=$(gh pr create \
-              --base "${GITHUB_REF_NAME}" \
-              --head "$BRANCH" \
-              --title "$PR_TITLE" \
-              --body-file "$PR_BODY_PATH")
-          else
-            gh pr edit "$PR_URL" --title "$PR_TITLE" --body-file "$PR_BODY_PATH"
-          fi
-
-          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
-          echo "Auto-drafted compatibility PR: $PR_URL"
 
   manual_issue:
     needs: drift
@@ -288,8 +202,7 @@ jobs:
   close_resolved_issues:
     needs:
       - drift
-      - compat_pr
-    if: always() && (needs.drift.outputs.exit_code == '0' || (needs.drift.outputs.should_create_pr == 'true' && needs.compat_pr.result == 'success'))
+    if: always() && needs.drift.outputs.exit_code == '0'
     runs-on: ubuntu-latest
     permissions:
       issues: write
@@ -297,7 +210,6 @@ jobs:
       - name: Close resolved drift issues
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          COMPAT_PR_URL: ${{ needs.compat_pr.outputs.pr_url }}
         run: |
           CC_VERSION="${{ needs.drift.outputs.cc_version }}"
           TITLE_MATCH="Claude Code drift detected: v${CC_VERSION}"
@@ -306,11 +218,7 @@ jobs:
             gh issue list --label claude-code-drift --state open --search "in:title \"${TITLE_MATCH}\"" --json number --jq '.[].number'
             gh issue list --label fingerprint-drift --state open --search "in:title \"${LEGACY_TITLE_MATCH}\"" --json number --jq '.[].number' 2>/dev/null || true
           } | sort -u > drift-issue-numbers.txt
-          if [ -n "$COMPAT_PR_URL" ]; then
-            COMMENT="Handled by automated compatibility PR: $COMPAT_PR_URL"
-          else
-            COMMENT="Resolved: static Claude Code drift scan is clean for v${CC_VERSION}."
-          fi
+          COMMENT="Resolved: static Claude Code drift scan is clean for v${CC_VERSION}."
           while IFS= read -r n; do
             if [ -z "$n" ]; then
               continue

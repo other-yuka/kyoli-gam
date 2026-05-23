@@ -21,8 +21,6 @@
     "check:fingerprint-drift": "pnpm run build && node scripts/check-live-fingerprint-drift.mjs",
     "check:cc-authorize-probe": "pnpm run build && node scripts/check-cc-authorize-probe.mjs",
     "check:cc-authorize-probe-headless": "node scripts/check-cc-authorize-probe-headless.mjs",
-    "fix:static-oauth-drift": "node scripts/auto-draft-static-oauth-drift-fix.mjs",
-    "fix:claude-code-drift": "node scripts/auto-draft-static-oauth-drift-fix.mjs",
     "bake:fingerprint": "pnpm run build && ALLOW_FINGERPRINT_OVERWRITE=1 node scripts/rebake-bundled-fingerprint.mjs",
     "prepack": "pnpm run build",
     "dev": "tsup --watch"

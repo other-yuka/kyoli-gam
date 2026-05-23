@@ -1,19 +1,8 @@
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 
 const reportPath = process.argv[2] ?? "drift-report.json";
 const resultPath = process.argv[3] ?? "auto-draft-result.json";
-const repoRoot = process.env.KYOLI_GAM_REPO_ROOT
-  ? resolve(process.env.KYOLI_GAM_REPO_ROOT)
-  : resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
-const capturePath = "packages/anthropic-multi-account/src/claude-code/fingerprint/capture.ts";
-const packageName = "opencode-anthropic-multi-account";
-const workflowName = "claude-code-drift-watch.yml";
-
-function sanitizeVersionForPath(version) {
-  return version.replace(/[^0-9A-Za-z.-]/g, "-");
-}
 
 function writeGithubOutputs(result) {
   if (!process.env.GITHUB_OUTPUT) {
@@ -21,11 +10,11 @@ function writeGithubOutputs(result) {
   }
 
   appendFileSync(process.env.GITHUB_OUTPUT, `should_create_pr=${result.shouldCreatePr}\n`);
-  appendFileSync(process.env.GITHUB_OUTPUT, `changed_files=${JSON.stringify(result.changedFiles)}\n`);
-  appendFileSync(process.env.GITHUB_OUTPUT, `branch_name=${result.branchName ?? ""}\n`);
-  appendFileSync(process.env.GITHUB_OUTPUT, `commit_message=${result.commitMessage ?? ""}\n`);
-  appendFileSync(process.env.GITHUB_OUTPUT, `pr_title=${result.prTitle ?? ""}\n`);
-  appendFileSync(process.env.GITHUB_OUTPUT, `pr_body_path=${result.prBodyPath ?? ""}\n`);
+  appendFileSync(process.env.GITHUB_OUTPUT, "changed_files=[]\n");
+  appendFileSync(process.env.GITHUB_OUTPUT, "branch_name=\n");
+  appendFileSync(process.env.GITHUB_OUTPUT, "commit_message=\n");
+  appendFileSync(process.env.GITHUB_OUTPUT, "pr_title=\n");
+  appendFileSync(process.env.GITHUB_OUTPUT, "pr_body_path=\n");
 }
 
 function writeResult(result) {
@@ -33,131 +22,39 @@ function writeResult(result) {
   writeGithubOutputs(result);
 }
 
-function createSkippedResult(reason) {
-  return { shouldCreatePr: false, changedFiles: [], reason };
-}
-
-function updateCaptureMaxTested(ccVersion) {
-  const absoluteCapturePath = join(repoRoot, capturePath);
-  const capture = readFileSync(absoluteCapturePath, "utf8");
-  const current = capture.match(/maxTested: "([^"]+)"/)?.[1] ?? null;
-
-  if (!current) {
-    return { changed: false, previousVersion: null, found: false };
-  }
-
-  const nextCapture = capture.replace(/maxTested: "[^"]+"/, `maxTested: "${ccVersion}"`);
-
-  if (nextCapture === capture) {
-    return { changed: false, previousVersion: current, found: true };
-  }
-
-  writeFileSync(absoluteCapturePath, nextCapture);
-  return { changed: true, previousVersion: current, found: true };
-}
-
-function writeChangeset(ccVersion) {
-  const changesetPath = `.changeset/claude-code-drift-${sanitizeVersionForPath(ccVersion)}.md`;
-  const absoluteChangesetPath = join(repoRoot, changesetPath);
-  mkdirSync(dirname(absoluteChangesetPath), { recursive: true });
-  writeFileSync(
-    absoluteChangesetPath,
-    `---\n"${packageName}": patch\n---\n\nUpdate the tested Claude Code compatibility range to ${ccVersion}.\n`,
-  );
-  return changesetPath;
-}
-
-function formatDriftItems(items) {
-  return items.map((item) => {
-    const category = item?.category ?? "unknown";
-    const severity = item?.severity ?? "unknown";
-    const message = item?.message ?? "No message provided.";
-    return `- **${category}** (${severity}) — ${message}`;
-  }).join("\n");
-}
-
-function writePrBody(report, ccVersion, previousVersion, changesetPath) {
-  const bodyPath = "auto-draft-pr-body.md";
-  const absoluteBodyPath = join(repoRoot, bodyPath);
+function classifyDriftReport(report) {
   const items = Array.isArray(report.items) ? report.items : [];
-  const itemList = formatDriftItems(items) || "- No drift items were included in the report.";
-  const previousText = previousVersion ? `v${previousVersion}` : "the previous maxTested value";
+  const categories = items
+    .map((item) => item?.category)
+    .filter((category) => typeof category === "string");
 
-  writeFileSync(
-    absoluteBodyPath,
-    `## Auto-drafted by ${workflowName}\n\n`
-      + `The drift watcher found Claude Code v${ccVersion} beyond kyoli's tested compatibility range. This PR:\n\n`
-      + `1. Bumps \`SUPPORTED_CC_RANGE.maxTested\` from ${previousText} → \`v${ccVersion}\` in \`${capturePath}\`\n`
-      + `2. Adds a patch changeset at \`${changesetPath}\` for \`${packageName}\`\n\n`
-      + `### Items in the drift report\n\n`
-      + `${itemList}\n\n`
-      + `### What happens when you merge this\n\n`
-      + `Kyoli uses Changesets, so this PR does not bump package versions directly. Merging it records release intent; the release workflow opens or updates the version-packages PR, and publishing happens after that version PR is merged.\n\n`
-      + `### Maintainer checklist before merging\n\n`
-      + `- [ ] Install the new Claude Code locally: \`npm install -g @anthropic-ai/claude-code@${ccVersion}\`\n`
-      + `- [ ] Run \`pnpm --dir packages/cli doctor claude --binary\`.\n`
-      + `- [ ] Run \`pnpm --dir packages/cli doctor claude --template\` and \`pnpm --dir packages/cli doctor claude --wire\`.\n`
-      + `- [ ] Run \`pnpm --filter opencode-anthropic-multi-account test:contract:native\`.\n`
-      + `- [ ] If fingerprint-sensitive fields changed, re-capture the bundled template locally: \`pnpm --dir packages/anthropic-multi-account bake:fingerprint\`.\n`
-      + `- [ ] Confirm \`pnpm --dir packages/anthropic-multi-account check:fingerprint-drift\` and the static drift check both report clean results after any manual template update.\n`
-      + `- [ ] Merge this PR when the compatibility update is verified.\n\n`
-      + `### About this auto-draft\n\n`
-      + `Only \`compat.range\`-only drift reports are auto-patched. OAuth URL/client drift, scanner layout drift, template re-capture, and other fingerprint-sensitive changes stay manual because they can affect Server Mode and OpenCode Plugin Mode traffic.\n\n`
-      + `---\n\n`
-      + `_Generated by \`packages/anthropic-multi-account/scripts/auto-draft-static-oauth-drift-fix.mjs\`._\n`,
-  );
-
-  return bodyPath;
-}
-
-function createCompatRangePatch(report) {
-  const items = Array.isArray(report.items) ? report.items : [];
-  const ccVersion = typeof report.ccVersion === "string" ? report.ccVersion : "";
-
-  if (!ccVersion) {
-    return createSkippedResult("missing ccVersion");
+  if (!report.drift || categories.length === 0) {
+    return {
+      shouldCreatePr: false,
+      changedFiles: [],
+      reason: "drift report has no items to fix",
+    };
   }
 
-  if (items.length !== 1 || items[0]?.category !== "compat.range") {
-    return createSkippedResult("drift is not compat.range-only");
+  if (categories.length === 1 && categories[0] === "compat.range") {
+    return {
+      shouldCreatePr: false,
+      changedFiles: [],
+      reason: "compat.range requires local Claude Code doctor/template validation before patching",
+    };
   }
-
-  const changedFiles = [];
-  const captureUpdate = updateCaptureMaxTested(ccVersion);
-  if (!captureUpdate.found) {
-    return createSkippedResult("maxTested field not found");
-  }
-
-  if (!captureUpdate.changed) {
-    return createSkippedResult("maxTested already up to date");
-  }
-
-  if (captureUpdate.changed) {
-    changedFiles.push(capturePath);
-  }
-
-  const changesetPath = writeChangeset(ccVersion);
-  const prBodyPath = writePrBody(report, ccVersion, captureUpdate.previousVersion, changesetPath);
-  changedFiles.push(changesetPath);
 
   return {
-    shouldCreatePr: changedFiles.length > 0,
-    changedFiles,
-    branchName: `bot/claude-code-drift-v${sanitizeVersionForPath(ccVersion)}`,
-    commitMessage: `chore(claude-code): maxTested → v${ccVersion}`,
-    prTitle: `chore(claude-code): maxTested → v${ccVersion}`,
-    prBodyPath,
-    reason: changedFiles.length > 0 ? "compat.range patched" : "no file changes",
+    shouldCreatePr: false,
+    changedFiles: [],
+    reason: `manual drift review required for categories: ${categories.join(", ")}`,
   };
 }
 
-export {
-  createCompatRangePatch,
-  sanitizeVersionForPath,
-};
+export { classifyDriftReport };
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const report = JSON.parse(readFileSync(reportPath, "utf8"));
-  const result = createCompatRangePatch(report);
+  const result = classifyDriftReport(report);
   writeResult(result);
 }

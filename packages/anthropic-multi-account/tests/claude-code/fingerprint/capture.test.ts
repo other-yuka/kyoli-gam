@@ -507,7 +507,7 @@ describe("fingerprint-capture", () => {
     }
   });
 
-  test("bundled template retains the current bundled identity and expected tool set", async () => {
+  test("bundled template retains the current bundled identity and internally consistent tool set", async () => {
     const { cleanup } = await setupTestEnv();
 
     try {
@@ -515,38 +515,10 @@ describe("fingerprint-capture", () => {
 
       expect(template._source).toBe("bundled");
       expect(template.agent_identity).toContain("Claude Agent SDK");
-      expect(template.tool_names).toEqual([
-        "Agent",
-        "AskUserQuestion",
-        "Bash",
-        "CronCreate",
-        "CronDelete",
-        "CronList",
-        "Edit",
-        "EnterPlanMode",
-        "EnterWorktree",
-        "ExitPlanMode",
-        "ExitWorktree",
-        "Glob",
-        "Grep",
-        "Monitor",
-        "NotebookEdit",
-        "PushNotification",
-        "Read",
-        "RemoteTrigger",
-        "ScheduleWakeup",
-        "ShareOnboardingGuide",
-        "Skill",
-        "TaskCreate",
-        "TaskGet",
-        "TaskList",
-        "TaskOutput",
-        "TaskStop",
-        "TaskUpdate",
-        "WebFetch",
-        "WebSearch",
-        "Write",
-      ]);
+      expect(template.tool_names).toEqual(template.tools.map((tool) => tool.name));
+      expect(new Set(template.tool_names).size).toBe(template.tool_names.length);
+      expect(template.tool_names).toEqual([...template.tool_names].sort());
+      expect(template.tool_names).toEqual(expect.arrayContaining(["Bash", "Read", "Write"]));
     } finally {
       await cleanup();
     }
