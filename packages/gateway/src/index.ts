@@ -5,6 +5,7 @@ import type {
   GatewayConfig,
   GatewayRoute,
   GatewayWebSocket,
+  GatewayWebSocketMessage,
   ModelInfo,
   ProviderAdapter,
   ProviderId,
@@ -12,9 +13,12 @@ import type {
   StickySessionKind,
   StickySessionRegistry,
 } from "@kyoli-gam/core";
+import { readFile } from "node:fs/promises";
 import { createServer, type IncomingHttpHeaders } from "node:http";
 import type { Socket } from "node:net";
+import { dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { Readable } from "node:stream";
+import { fileURLToPath } from "node:url";
 import {
   createDefaultGatewayConfig,
   createSessionKey,
@@ -44,6 +48,12 @@ import {
   WebSocketUpgradeError,
   writeUpgradeError,
 } from "./websocket";
+import {
+  handleCodexClaudeBridgeRequest,
+  handleCodexClaudeBridgeWebSocket,
+  isCodexClaudeModel,
+  toCodexClaudeModelEntry,
+} from "./codex-claude-bridge";
 
 export interface GatewayOptions {
   config?: Partial<GatewayConfig>;
@@ -56,6 +66,7 @@ export interface GatewayOptions {
   maxConcurrentRequests?: number;
   maxBodyBytes?: number;
   bodyReadTimeoutMs?: number;
+  dashboardAssetsDir?: string;
 }
 
 export interface Gateway {
@@ -67,6 +78,7 @@ export interface Gateway {
 export interface GatewayServer {
   readonly hostname: string;
   readonly port: number;
+  readonly alreadyRunning?: boolean;
   stop(closeActiveConnections?: boolean): void;
 }
 
@@ -92,13 +104,11 @@ const routeByPath = new Map<string, GatewayRoute>([
 
 const DEFAULT_MAX_BODY_BYTES = 64 * 1024 * 1024;
 const DEFAULT_BODY_READ_TIMEOUT_MS = 30_000;
+const PROMPT_CACHE_STICKY_TTL_SECONDS = 30 * 60;
+const OLD_ROUTE_PIN_TTL_SECONDS = 24 * 60 * 60;
 
 export function createGateway(options: GatewayOptions): Gateway {
-  const defaults = createDefaultGatewayConfig();
-  const config: GatewayConfig = {
-    host: options.config?.host ?? defaults.host,
-    port: options.config?.port ?? defaults.port,
-  };
+  const config = resolveGatewayConfig(options.config);
   const registry = new ModelRegistry(options.providers, {
     modelsDev: ModelsDevRegistrySource.fromEnv(),
   });
@@ -119,6 +129,9 @@ export function createGateway(options: GatewayOptions): Gateway {
           port: config.port,
         });
       }
+
+      const dashboardResponse = await handleDashboardRequest(request, url, options.dashboardAssetsDir);
+      if (dashboardResponse) return dashboardResponse;
 
       const adminResponse = await handleAdminRequest(
         request,
@@ -151,9 +164,7 @@ export function createGateway(options: GatewayOptions): Gateway {
       if (route === "/backend-api/codex/models") {
         const models = await registry.listModels();
         return jsonResponse({
-          models: models
-            .filter((model) => model.provider === "codex")
-            .map(toCodexCliModelEntry),
+          models: toCodexCliModelList(models),
         });
       }
 
@@ -183,6 +194,26 @@ export function createGateway(options: GatewayOptions): Gateway {
           },
           { status: 400 },
         );
+      }
+
+      if (isCodexClaudeBridgeRoute(route, model)) {
+        const releaseAdmission = localAdmission.acquire();
+        if (!releaseAdmission) return localOverloadResponse();
+
+        try {
+          return await handleCodexClaudeBridgeRequest({
+            context: {
+              request: upstreamRequest,
+              route,
+              sessionKey,
+              body,
+              model,
+            },
+            provider,
+          });
+        } finally {
+          releaseAdmission();
+        }
       }
 
       if (!provider.routes.includes(route)) {
@@ -219,10 +250,43 @@ export function createGateway(options: GatewayOptions): Gateway {
         throw new WebSocketUpgradeError(404, `No WebSocket route registered for ${url.pathname}.`);
       }
 
-      const provider = await resolveProvider(registry, route, undefined);
+      const initialMessage = await peekCodexResponsesWebSocketMessage(route, request, websocket);
+      const model = readWebSocketPayloadModel(initialMessage) ?? readWebSocketTraceModel(request.headers);
+      const provider = await resolveProvider(registry, route, model);
       if (!provider) {
         throw new WebSocketUpgradeError(400, `No provider resolved for ${route}.`);
       }
+      const routedWebSocket = initialMessage
+        ? new PreloadedGatewayWebSocket(websocket, [initialMessage])
+        : websocket;
+
+      if (isCodexClaudeBridgeRoute(route, model)) {
+        const releaseAdmission = localAdmission.acquire();
+        if (!releaseAdmission) {
+          throw new WebSocketUpgradeError(429, "kyoli-gam is temporarily overloaded.");
+        }
+
+        try {
+          await handleCodexClaudeBridgeWebSocket({
+            context: {
+              request,
+              route,
+              sessionKey: createSessionKey({
+                headers: request.headers,
+                model,
+                apiKeyFingerprint: readAuthFingerprint(request.headers),
+              }),
+              model,
+              websocket: routedWebSocket,
+            },
+            provider,
+          });
+        } finally {
+          releaseAdmission();
+        }
+        return;
+      }
+
       if (!provider.routes.includes(route) || !provider.handleWebSocket) {
         throw new WebSocketUpgradeError(501, `${provider.id} does not support WebSocket ${route}.`);
       }
@@ -238,15 +302,75 @@ export function createGateway(options: GatewayOptions): Gateway {
           route,
           sessionKey: createSessionKey({
             headers: request.headers,
+            model,
             apiKeyFingerprint: readAuthFingerprint(request.headers),
           }),
-          websocket,
+          model,
+          websocket: routedWebSocket,
         });
       } finally {
         releaseAdmission();
       }
     },
   };
+}
+
+class PreloadedGatewayWebSocket implements GatewayWebSocket {
+  constructor(
+    private readonly inner: GatewayWebSocket,
+    private readonly messages: GatewayWebSocketMessage[],
+  ) {}
+
+  accept(headers?: HeadersInit): Promise<void> {
+    return this.inner.accept(headers);
+  }
+
+  receive(): Promise<GatewayWebSocketMessage> {
+    const message = this.messages.shift();
+    return message ? Promise.resolve(message) : this.inner.receive();
+  }
+
+  sendText(data: string): Promise<void> {
+    return this.inner.sendText(data);
+  }
+
+  sendBinary(data: Uint8Array): Promise<void> {
+    return this.inner.sendBinary(data);
+  }
+
+  close(code?: number, reason?: string): Promise<void> {
+    return this.inner.close(code, reason);
+  }
+}
+
+async function peekCodexResponsesWebSocketMessage(
+  route: GatewayRoute,
+  request: Request,
+  websocket: GatewayWebSocket,
+): Promise<GatewayWebSocketMessage | undefined> {
+  if (route !== "/backend-api/codex/responses" && route !== "/v1/responses") return undefined;
+
+  await websocket.accept({
+    "x-codex-turn-state": request.headers.get("x-codex-turn-state") ?? crypto.randomUUID(),
+  });
+  return receiveWebSocketMessageWithTimeout(websocket, 2_000);
+}
+
+async function receiveWebSocketMessageWithTimeout(
+  websocket: GatewayWebSocket,
+  timeoutMs: number,
+): Promise<GatewayWebSocketMessage | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      websocket.receive(),
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function createLocalAdmission(maxConcurrentRequests: number): { acquire(): (() => void) | undefined } {
@@ -283,6 +407,134 @@ function localOverloadResponse(): Response {
       headers: { "retry-after": "1" },
     },
   );
+}
+
+async function handleDashboardRequest(
+  request: Request,
+  url: URL,
+  dashboardAssetsDir: string | undefined,
+): Promise<Response | undefined> {
+  if (url.pathname !== "/dashboard" && !url.pathname.startsWith("/dashboard/")) return undefined;
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return jsonResponse(
+      {
+        error: {
+          type: "method_not_allowed",
+          message: `${request.method} is not supported for ${url.pathname}.`,
+        },
+      },
+      { status: 405 },
+    );
+  }
+
+  const isHead = request.method === "HEAD";
+  if (url.pathname === "/dashboard" || url.pathname === "/dashboard/") {
+    return readDashboardAsset("index.html", dashboardAssetsDir, isHead, { cache: "no-store" });
+  }
+
+  if (url.pathname.startsWith("/dashboard/assets/")) {
+    const assetPath = safeDecodeDashboardPath(url.pathname.slice("/dashboard/assets/".length));
+    if (!assetPath) return dashboardNotFound();
+    return readDashboardAsset(join("assets", assetPath), dashboardAssetsDir, isHead, {
+      cache: "public, max-age=31536000, immutable",
+    });
+  }
+
+  return readDashboardAsset("index.html", dashboardAssetsDir, isHead, { cache: "no-store" });
+}
+
+async function readDashboardAsset(
+  relativePath: string,
+  dashboardAssetsDir: string | undefined,
+  headOnly: boolean,
+  options: { cache: string },
+): Promise<Response> {
+  for (const root of dashboardAssetDirs(dashboardAssetsDir)) {
+    const filePath = safeJoin(root, relativePath);
+    if (!filePath) continue;
+    try {
+      const bytes = await readFile(filePath);
+      return new Response(headOnly ? null : bytes, {
+        headers: {
+          "cache-control": options.cache,
+          "content-type": contentTypeFor(filePath),
+        },
+      });
+    } catch {
+      continue;
+    }
+  }
+  return dashboardNotFound();
+}
+
+function safeDecodeDashboardPath(value: string): string | undefined {
+  try {
+    const decoded = decodeURIComponent(value);
+    if (!decoded || decoded.includes("\0") || decoded.includes("\\") || decoded.startsWith("/")) {
+      return undefined;
+    }
+    if (decoded.split("/").some((segment) => segment === "..")) return undefined;
+    return decoded;
+  } catch {
+    return undefined;
+  }
+}
+
+function dashboardAssetDirs(override: string | undefined): string[] {
+  if (override) return [override];
+  const moduleDir = dirname(fileURLToPath(import.meta.url));
+  return uniqueStrings([
+    join(moduleDir, "dashboard"),
+    join(moduleDir, "..", "dist", "dashboard"),
+  ]);
+}
+
+function safeJoin(root: string, relativePath: string): string | undefined {
+  if (isAbsolute(relativePath)) return undefined;
+  const resolvedRoot = resolve(root);
+  const resolvedFile = resolve(resolvedRoot, relativePath);
+  const rootRelative = relative(resolvedRoot, resolvedFile);
+  if (rootRelative.startsWith("..") || isAbsolute(rootRelative)) return undefined;
+  return resolvedFile;
+}
+
+function contentTypeFor(path: string): string {
+  switch (extname(path)) {
+    case ".html":
+      return "text/html; charset=utf-8";
+    case ".css":
+      return "text/css; charset=utf-8";
+    case ".js":
+      return "text/javascript; charset=utf-8";
+    case ".json":
+      return "application/json; charset=utf-8";
+    case ".svg":
+      return "image/svg+xml";
+    case ".png":
+      return "image/png";
+    case ".webp":
+      return "image/webp";
+    case ".ico":
+      return "image/x-icon";
+    default:
+      return "application/octet-stream";
+  }
+}
+
+function dashboardNotFound(): Response {
+  return jsonResponse(
+    {
+      error: {
+        type: "not_found",
+        message: "Dashboard asset not found.",
+      },
+    },
+    { status: 404 },
+  );
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values)];
 }
 
 async function handleAdminRequest(
@@ -323,10 +575,14 @@ async function handleAdminRequest(
     }
 
     const sessions = stickySessions?.listStickySessions() ?? [];
+    const decorated = sessions.map(toAdminStickySession);
+    const filtered = filterStickySessions(decorated, url);
     return jsonResponse({
       object: "list",
-      data: filterStickySessions(sessions, url),
+      data: filtered,
       total: sessions.length,
+      stalePromptCacheCount: decorated.filter((session) => session.kind === "prompt_cache" && session.isStale).length,
+      hasMore: false,
     });
   }
 
@@ -354,10 +610,13 @@ async function handleAdminRequest(
       return validationError("provider must be codex or claude-code.").response;
     }
 
+    const staleOnly = body?.staleOnly === true;
     const deletedCount = stickySessions?.purgeStickySessions({
-      maxAgeSeconds: readNumber(body?.maxAgeSeconds) ?? 7 * 24 * 60 * 60,
+      maxAgeSeconds: readNumber(body?.maxAgeSeconds) ??
+        (staleOnly ? PROMPT_CACHE_STICKY_TTL_SECONDS : 7 * 24 * 60 * 60),
       provider,
-      kind: readStickySessionKindValue(typeof body?.kind === "string" ? body.kind : undefined),
+      kind: readStickySessionKindValue(typeof body?.kind === "string" ? body.kind : undefined) ??
+        (staleOnly ? "prompt_cache" : undefined),
       accountId: typeof body?.accountId === "string" ? body.accountId : undefined,
     }) ?? 0;
     return jsonResponse({
@@ -616,7 +875,7 @@ function summarizeUsageWindow(usages: Record<string, unknown>[], key: string) {
     .filter((value): value is number => typeof value === "number");
   const maxUsedPercent = usedPercents.length > 0 ? Math.max(...usedPercents) : 0;
   const resetAt = windows
-    .map((window) => readString(window.reset_at) ?? readString(window.resetAt))
+    .map((window) => readString(window.reset_at) ?? readString(window.resetAt) ?? readString(window.resets_at) ?? readString(window.resetsAt))
     .filter((value): value is string => Boolean(value))
     .sort()[0];
 
@@ -692,8 +951,21 @@ function toPublicFailedAccount(row: ReturnType<typeof listFailedAccounts>[number
 }
 
 export async function serveGateway(options: GatewayOptions): Promise<GatewayServer> {
-  const gateway = createGateway(options);
+  const config = resolveGatewayConfig(options.config);
+  let gateway: Gateway | undefined;
   const server = createServer(async (request, response) => {
+    if (!gateway) {
+      response.statusCode = 503;
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({
+        error: {
+          type: "gateway_starting",
+          message: "Gateway is still starting.",
+        },
+      }));
+      return;
+    }
+
     try {
       const gatewayResponse = await gateway.fetch(await toWebRequest(request, {
         maxBodyBytes: options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES,
@@ -701,18 +973,15 @@ export async function serveGateway(options: GatewayOptions): Promise<GatewayServ
       }));
       await writeNodeResponse(response, gatewayResponse);
     } catch (error) {
-      response.statusCode = error instanceof BodyReadError ? error.status : 500;
-      response.setHeader("content-type", "application/json");
-      response.end(JSON.stringify({
-        error: {
-          type: error instanceof BodyReadError ? error.type : "internal_error",
-          message: error instanceof Error ? error.message : "Gateway request failed.",
-        },
-      }));
+      writeGatewayErrorResponse(response, error);
     }
   });
   server.on("upgrade", async (request, socket, head) => {
     const networkSocket = socket as Socket;
+    if (!gateway) {
+      writeUpgradeError(networkSocket, 503, "Gateway is still starting.");
+      return;
+    }
     const websocket = new NodeGatewayWebSocket(
       request,
       networkSocket,
@@ -737,31 +1006,138 @@ export async function serveGateway(options: GatewayOptions): Promise<GatewayServ
   server.requestTimeout = (options.idleTimeoutSeconds ?? 255) * 1000;
   server.keepAliveTimeout = (options.idleTimeoutSeconds ?? 255) * 1000;
 
-  await new Promise<void>((resolve, reject) => {
+  const bindResult = await new Promise<"listening" | "already-running">((resolve, reject) => {
     const onError = (error: Error) => {
       server.off("listening", onListening);
+      if (isAddressInUseError(error)) {
+        void probeExistingKyoliGateway(config)
+          .then((alreadyRunning) => {
+            if (alreadyRunning) {
+              resolve("already-running");
+              return;
+            }
+            reject(createPortInUseError(config));
+          })
+          .catch(() => {
+            reject(createPortInUseError(config));
+          });
+        return;
+      }
       reject(error);
     };
     const onListening = () => {
       server.off("error", onError);
-      resolve();
+      try {
+        gateway = createGateway(options);
+      } catch (error) {
+        server.close();
+        reject(error);
+        return;
+      }
+      resolve("listening");
     };
     server.once("error", onError);
     server.once("listening", onListening);
-    server.listen(gateway.config.port, gateway.config.host);
+    server.listen(config.port, config.host);
   });
 
+  if (bindResult === "already-running") {
+    return {
+      hostname: config.host,
+      port: config.port,
+      alreadyRunning: true,
+      stop() {},
+    };
+  }
+
   const address = server.address();
-  const port = typeof address === "object" && address ? address.port : gateway.config.port;
+  const port = typeof address === "object" && address ? address.port : config.port;
 
   return {
-    hostname: gateway.config.host,
+    hostname: config.host,
     port,
     stop(closeActiveConnections = false) {
       if (closeActiveConnections) server.closeAllConnections();
       server.close();
     },
   };
+}
+
+function writeGatewayErrorResponse(
+  response: import("node:http").ServerResponse,
+  error: unknown,
+): void {
+  if (response.destroyed || response.writableEnded) return;
+  if (response.headersSent) {
+    response.destroy(error instanceof Error ? error : undefined);
+    return;
+  }
+
+  response.statusCode = error instanceof BodyReadError ? error.status : 500;
+  response.setHeader("content-type", "application/json");
+  response.end(JSON.stringify({
+    error: {
+      type: error instanceof BodyReadError ? error.type : "internal_error",
+      message: error instanceof Error ? error.message : "Gateway request failed.",
+    },
+  }));
+}
+
+function resolveGatewayConfig(config: Partial<GatewayConfig> | undefined): GatewayConfig {
+  const defaults = createDefaultGatewayConfig();
+  return {
+    host: config?.host ?? defaults.host,
+    port: config?.port ?? defaults.port,
+  };
+}
+
+function isAddressInUseError(error: Error): boolean {
+  return "code" in error && error.code === "EADDRINUSE";
+}
+
+function createPortInUseError(config: GatewayConfig): Error {
+  return new Error(
+    `Port ${config.port} is already in use by another process. Stop it or set KYOLI_PORT/--port to another value.`,
+  );
+}
+
+async function probeExistingKyoliGateway(config: GatewayConfig): Promise<boolean> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 1_000);
+  timeout.unref?.();
+
+  try {
+    const response = await fetch(`http://${toUrlHost(toProbeHost(config.host))}:${config.port}/health`, {
+      signal: controller.signal,
+    });
+    if (!response.ok) return false;
+    return isKyoliGatewayHealth(await response.json().catch(() => undefined));
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function isKyoliGatewayHealth(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return record.service === "kyoli-gam" && record.mode === "gateway";
+}
+
+function toProbeHost(host: string): string {
+  const normalized = host.trim().toLowerCase();
+  if (
+    normalized === "0.0.0.0" ||
+    normalized === "::" ||
+    normalized === "::1" ||
+    normalized === "localhost"
+  ) {
+    return "127.0.0.1";
+  }
+  return host;
+}
+
+function toUrlHost(host: string): string {
+  return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
 }
 
 async function toWebRequest(
@@ -882,31 +1258,124 @@ async function writeNodeResponse(
   }
 
   await new Promise<void>((resolve, reject) => {
-    Readable.fromWeb(gatewayResponse.body as never)
-      .on("error", reject)
-      .on("end", resolve)
-      .pipe(response);
+    const body = Readable.fromWeb(gatewayResponse.body as never);
+    let settled = false;
+
+    const finish = (error?: unknown) => {
+      if (settled) return;
+      settled = true;
+      response.off("error", onResponseError);
+      response.off("close", onResponseClose);
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    };
+    const onResponseError = (error: Error) => finish(error);
+    const onResponseClose = () => {
+      body.destroy();
+      finish();
+    };
+
+    response.on("error", onResponseError);
+    response.on("close", onResponseClose);
+    body.on("error", (error) => {
+      if (writeGatewayStreamFailure(response, gatewayResponse, error)) {
+        finish();
+        return;
+      }
+      finish(error);
+    });
+    body.on("end", () => {
+      if (!response.writableEnded) response.end();
+      finish();
+    });
+    body.pipe(response, { end: false });
   });
 }
 
+function writeGatewayStreamFailure(
+  response: import("node:http").ServerResponse,
+  gatewayResponse: Response,
+  _error: unknown,
+): boolean {
+  if (response.destroyed || response.writableEnded) return false;
+  if (!isEventStreamResponse(gatewayResponse)) return false;
+
+  response.write(formatGatewayStreamFailureEvent());
+  response.write("data: [DONE]\n\n");
+  response.end();
+  return true;
+}
+
+function isEventStreamResponse(response: Response): boolean {
+  return response.headers.get("content-type")?.toLowerCase().includes("text/event-stream") === true;
+}
+
+function formatGatewayStreamFailureEvent(): string {
+  const payload = {
+    type: "response.failed",
+    response: {
+      id: `resp_gateway_stream_${Date.now()}`,
+      object: "response",
+      created_at: Math.floor(Date.now() / 1000),
+      status: "failed",
+      error: {
+        type: "server_error",
+        code: "gateway_stream_error",
+        message: "Gateway stream failed before response.completed.",
+      },
+    },
+  };
+  return `event: response.failed\ndata: ${JSON.stringify(payload)}\n\n`;
+}
+
 function filterStickySessions(
-  sessions: ReturnType<StickySessionRegistry["listStickySessions"]>,
+  sessions: AdminStickySession[],
   url: URL,
-): ReturnType<StickySessionRegistry["listStickySessions"]> {
+): AdminStickySession[] {
   const provider = readProviderQuery(url);
   if (provider === "invalid") return [];
 
   const accountId = url.searchParams.get("accountId");
   const kind = readStickySessionKindValue(url.searchParams.get("kind") ?? undefined);
   const keyQuery = url.searchParams.get("keyQuery")?.toLowerCase();
+  const staleOnly = url.searchParams.get("staleOnly") === "true";
 
   return sessions.filter((session) => {
     if (provider && session.provider !== provider) return false;
     if (kind && session.kind !== kind) return false;
     if (accountId && session.accountId !== accountId) return false;
     if (keyQuery && !session.key.toLowerCase().includes(keyQuery)) return false;
+    if (staleOnly && !(session.kind === "prompt_cache" && session.isStale)) return false;
     return true;
   });
+}
+
+type StickySessionListRecord = ReturnType<StickySessionRegistry["listStickySessions"]>[number];
+
+interface AdminStickySession extends StickySessionListRecord {
+  expiresAt: string | null;
+  isStale: boolean;
+  oldRoutePin: boolean;
+}
+
+function toAdminStickySession(session: StickySessionListRecord): AdminStickySession {
+  const updatedAtMs = Date.parse(session.updatedAt);
+  const ageSeconds = Number.isFinite(updatedAtMs)
+    ? Math.max(0, Math.floor((Date.now() - updatedAtMs) / 1000))
+    : 0;
+  const expiresAt = session.kind === "prompt_cache" && Number.isFinite(updatedAtMs)
+    ? new Date(updatedAtMs + PROMPT_CACHE_STICKY_TTL_SECONDS * 1000).toISOString()
+    : null;
+
+  return {
+    ...session,
+    expiresAt,
+    isStale: session.kind === "prompt_cache" && ageSeconds >= PROMPT_CACHE_STICKY_TTL_SECONDS,
+    oldRoutePin: ageSeconds >= OLD_ROUTE_PIN_TTL_SECONDS,
+  };
 }
 
 function resolveRoute(pathname: string): GatewayRoute | undefined {
@@ -916,9 +1385,36 @@ function resolveRoute(pathname: string): GatewayRoute | undefined {
       : undefined);
 }
 
+const CODEX_FAST_SERVICE_TIER = {
+  id: "priority",
+  name: "Fast",
+  description: "1.5x speed, increased usage",
+};
+
+const CODEX_MODEL_ENTRY_BASE_KEYS = new Set([
+  "slug",
+  "display_name",
+  "description",
+  "base_instructions",
+  "default_reasoning_level",
+  "supported_reasoning_levels",
+  "supported_in_api",
+  "priority",
+  "minimal_client_version",
+  "supports_reasoning_summaries",
+  "support_verbosity",
+  "default_verbosity",
+  "supports_parallel_tool_calls",
+  "context_window",
+  "input_modalities",
+  "available_in_plans",
+  "prefer_websockets",
+  "visibility",
+]);
+
 function toCodexCliModelEntry(model: ModelInfo): Record<string, unknown> {
   const contextWindow = model.upstreamId.includes("gpt-5.4") ? 1_050_000 : 272_000;
-  return {
+  const entry: Record<string, unknown> = {
     slug: model.upstreamId,
     display_name: model.displayName ?? model.upstreamId,
     description: model.displayName ?? model.upstreamId,
@@ -957,6 +1453,71 @@ function toCodexCliModelEntry(model: ModelInfo): Record<string, unknown> {
     prefer_websockets: true,
     visibility: "list",
   };
+
+  Object.assign(entry, codexCliModelMetadata(model));
+  if (shouldExposeFallbackFastServiceTier(model, entry)) {
+    entry.additional_speed_tiers = [
+      ...(Array.isArray(entry.additional_speed_tiers) ? entry.additional_speed_tiers : []),
+      "fast",
+    ];
+    entry.service_tiers = [
+      ...(Array.isArray(entry.service_tiers) ? entry.service_tiers : []),
+      CODEX_FAST_SERVICE_TIER,
+    ];
+  }
+
+  return entry;
+}
+
+function toCodexCliModelList(models: ModelInfo[]): Array<Record<string, unknown>> {
+  return [
+    ...models
+      .filter((model) => model.provider === "codex")
+      .map(toCodexCliModelEntry),
+    ...models.flatMap((model) => {
+      const entry = toCodexClaudeModelEntry(model);
+      return entry ? [entry] : [];
+    }),
+  ];
+}
+
+function codexCliModelMetadata(model: ModelInfo): Record<string, unknown> {
+  const metadata = model.metadata;
+  if (!metadata) return {};
+
+  const extra: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(metadata)) {
+    if (CODEX_MODEL_ENTRY_BASE_KEYS.has(key)) continue;
+    if (isJsonObjectValue(value)) {
+      extra[key] = value;
+    }
+  }
+  return extra;
+}
+
+function shouldExposeFallbackFastServiceTier(
+  model: ModelInfo,
+  entry: Record<string, unknown>,
+): boolean {
+  if (model.provider !== "codex") return false;
+  const slug = model.upstreamId.toLowerCase();
+  if (slug !== "gpt-5.4" && slug !== "gpt-5.5") return false;
+
+  const serviceTiers = Array.isArray(entry.service_tiers) ? entry.service_tiers : [];
+  if (serviceTiers.length > 0) return false;
+
+  const additionalSpeedTiers = Array.isArray(entry.additional_speed_tiers)
+    ? entry.additional_speed_tiers
+    : [];
+  return additionalSpeedTiers.length === 0;
+}
+
+function isJsonObjectValue(value: unknown): boolean {
+  if (value === null) return true;
+  if (["boolean", "number", "string"].includes(typeof value)) return true;
+  if (Array.isArray(value)) return value.every(isJsonObjectValue);
+  if (typeof value !== "object") return false;
+  return Object.values(value as Record<string, unknown>).every(isJsonObjectValue);
 }
 
 async function resolveProvider(
@@ -964,6 +1525,9 @@ async function resolveProvider(
   route: GatewayRoute,
   model: string | undefined,
 ): Promise<ProviderAdapter | undefined> {
+  if (isCodexClaudeBridgeRoute(route, model)) {
+    return registry.getAdapter("claude-code");
+  }
   if (
     route === "/v1/responses" ||
     route === "/backend-api/codex/models" ||
@@ -994,6 +1558,15 @@ async function resolveProvider(
 
   const resolved = await registry.resolve(model);
   return resolved ? registry.getAdapter(resolved.provider) : undefined;
+}
+
+function isCodexClaudeBridgeRoute(route: GatewayRoute, model: string | undefined): boolean {
+  return isCodexClaudeModel(model) &&
+    (
+      route === "/v1/responses" ||
+      route === "/backend-api/codex/responses" ||
+      route === "/backend-api/codex/responses/compact"
+    );
 }
 
 async function readJsonBody(request: Request): Promise<unknown> {
@@ -1108,20 +1681,22 @@ function readStickySessionKindValue(value: string | undefined): StickySessionKin
   return undefined;
 }
 
+type GroupedRequestLog = {
+  requestId: string;
+  provider: ProviderId;
+  route?: GatewayRoute;
+  model?: string;
+  sessionKey: string;
+  accountIds: string[];
+  startedAt: string;
+  completedAt: string;
+  finalStatus?: number;
+  retryCount: number;
+  events: ReturnType<RequestLogStore["listRequestLogs"]>;
+};
+
 function groupRequestLogs(logs: ReturnType<RequestLogStore["listRequestLogs"]>) {
-  const groups = new Map<string, {
-    requestId: string;
-    provider: ProviderId;
-    route?: GatewayRoute;
-    model?: string;
-    sessionKey: string;
-    accountIds: string[];
-    startedAt: string;
-    completedAt: string;
-    finalStatus?: number;
-    retryCount: number;
-    events: typeof logs;
-  }>();
+  const groups = new Map<string, GroupedRequestLog>();
 
   for (const log of logs.slice().sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id - b.id)) {
     const group = groups.get(log.requestId) ?? {
@@ -1141,6 +1716,8 @@ function groupRequestLogs(logs: ReturnType<RequestLogStore["listRequestLogs"]>) 
     if (log.accountId && !group.accountIds.includes(log.accountId)) {
       group.accountIds.push(log.accountId);
     }
+    group.route ??= log.route;
+    group.model ??= log.model;
     if (log.eventType === "response") group.finalStatus = log.status;
     if (log.eventType === "retry") group.retryCount += 1;
     group.completedAt = log.createdAt;
@@ -1148,7 +1725,36 @@ function groupRequestLogs(logs: ReturnType<RequestLogStore["listRequestLogs"]>) 
     groups.set(log.requestId, group);
   }
 
-  return [...groups.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+  return inheritSessionModels([...groups.values()]).sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+}
+
+function inheritSessionModels(groups: GroupedRequestLog[]): GroupedRequestLog[] {
+  const latestModelBySession = new Map<string, string>();
+  const distinctModelsBySession = new Map<string, Set<string>>();
+  const chronologicalGroups = groups.slice().sort((a, b) =>
+    a.startedAt.localeCompare(b.startedAt) || a.completedAt.localeCompare(b.completedAt)
+  );
+
+  for (const group of chronologicalGroups) {
+    if (group.model) {
+      latestModelBySession.set(group.sessionKey, group.model);
+      const models = distinctModelsBySession.get(group.sessionKey) ?? new Set<string>();
+      models.add(group.model);
+      distinctModelsBySession.set(group.sessionKey, models);
+      continue;
+    }
+
+    const inheritedModel = latestModelBySession.get(group.sessionKey);
+    if (inheritedModel) group.model = inheritedModel;
+  }
+
+  for (const group of chronologicalGroups) {
+    if (group.model) continue;
+    const models = distinctModelsBySession.get(group.sessionKey);
+    if (models?.size === 1) group.model = [...models][0];
+  }
+
+  return chronologicalGroups;
 }
 
 function readNumber(value: unknown): number | undefined {
@@ -1185,6 +1791,29 @@ function readModel(body: unknown): string | undefined {
   if (!body || typeof body !== "object") return undefined;
   const model = (body as Record<string, unknown>).model;
   return typeof model === "string" && model.length > 0 ? model : undefined;
+}
+
+function readWebSocketTraceModel(headers: Headers): string | undefined {
+  const metadata = headers.get("x-codex-turn-metadata");
+  if (!metadata) return undefined;
+  return readWebSocketPayloadModel({ type: "text", data: metadata });
+}
+
+function readWebSocketPayloadModel(message: GatewayWebSocketMessage | undefined): string | undefined {
+  if (!message || message.type !== "text") return undefined;
+  const record = readJsonRecordValue(message.data);
+  return readString(record?.model) ??
+    readString(readRecord(record?.request)?.model) ??
+    readString(readRecord(record?.response)?.model) ??
+    readString(readRecord(record?.value)?.model);
+}
+
+function readJsonRecordValue(value: string): Record<string, unknown> | undefined {
+  try {
+    return readRecord(JSON.parse(value));
+  } catch {
+    return undefined;
+  }
 }
 
 function readAuthFingerprint(headers: Headers): string | undefined {

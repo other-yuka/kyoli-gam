@@ -6,6 +6,7 @@ import { Database } from "./sqlite";
 
 export type RequestLogEventType =
   | "selected"
+  | "metadata"
   | "response"
   | "retry"
   | "missing"

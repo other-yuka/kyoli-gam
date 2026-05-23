@@ -29,6 +29,7 @@ export interface ModelInfo {
   displayName?: string;
   aliases?: string[];
   capabilities: ModelCapability[];
+  metadata?: Record<string, unknown>;
 }
 
 export type ModelCapability =
@@ -77,7 +78,25 @@ export interface ProviderAdapter {
   listModels(): Promise<ModelInfo[]>;
   handleRequest(context: GatewayRequestContext): Promise<Response>;
   handleWebSocket?(context: GatewayWebSocketContext): Promise<void>;
+  refreshUsage?(context: ProviderUsageRefreshContext): Promise<ProviderUsageRefreshResult>;
 }
+
+export interface ProviderUsageRefreshContext {
+  account: import("./accounts").AccountRecord;
+}
+
+export type ProviderUsageRefreshResult =
+  | {
+    ok: true;
+    credentials?: Record<string, unknown>;
+    metadata?: Record<string, unknown>;
+  }
+  | {
+    ok: false;
+    status?: number;
+    message: string;
+    reauthRequiredReason?: string;
+  };
 
 export interface GatewayConfig {
   host: string;
@@ -150,6 +169,7 @@ export * from "./account-pool";
 export * from "./sticky-sessions";
 export * from "./request-logs";
 export * from "./provider-executor";
+export * from "./usage-refresh";
 
 export function notImplementedResponse(provider: ProviderId, route: GatewayRoute): Response {
   return jsonResponse(
@@ -206,7 +226,9 @@ function readBodySessionId(body: unknown): string | undefined {
 function readHeaderSessionId(headers: Headers): string | undefined {
   for (const key of [
     "x-kyoli-session-id",
+    "x-codex-turn-state",
     "x-codex-session-id",
+    "x-codex-conversation-id",
     "x-session-id",
     "x-client-session-id",
     "session_id",

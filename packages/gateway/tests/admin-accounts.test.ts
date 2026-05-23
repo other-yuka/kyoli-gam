@@ -465,6 +465,59 @@ describe("admin accounts API", () => {
     expect(stickySessions.listStickySessions()).toEqual([]);
   });
 
+  it("marks stale prompt-cache sticky sessions and supports stale-only filtering", async () => {
+    const oldDate = new Date(Date.now() - 31 * 60 * 1000).toISOString();
+    const freshDate = new Date().toISOString();
+    const stickySessions = {
+      listStickySessions: () => [
+        {
+          key: "codex:any:prompt_cache:old",
+          provider: "codex" as const,
+          kind: "prompt_cache" as const,
+          sessionKey: "prompt_cache:old",
+          accountId: "account-a",
+          createdAt: oldDate,
+          updatedAt: oldDate,
+        },
+        {
+          key: "codex:any:header:fresh",
+          provider: "codex" as const,
+          kind: "codex_session" as const,
+          sessionKey: "header:fresh",
+          accountId: "account-a",
+          createdAt: freshDate,
+          updatedAt: freshDate,
+        },
+      ],
+      deleteStickySession: () => false,
+      clearStickySessions: () => 0,
+      purgeStickySessions: () => 0,
+    };
+    const gateway = createGateway({
+      accounts: new MemoryAccountStore(),
+      stickySessions,
+      providers: [],
+    });
+
+    const response = await gateway.fetch(
+      new Request("http://127.0.0.1:2021/admin/sticky-sessions?staleOnly=true"),
+    );
+    const body = (await response.json()) as {
+      data: Array<{ kind: string; isStale: boolean; expiresAt: string | null }>;
+      stalePromptCacheCount: number;
+    };
+
+    expect(response.status).toBe(200);
+    expect(body.stalePromptCacheCount).toBe(1);
+    expect(body.data).toEqual([
+      expect.objectContaining({
+        kind: "prompt_cache",
+        isStale: true,
+        expiresAt: expect.any(String),
+      }),
+    ]);
+  });
+
   it("lists and clears request logs", async () => {
     const requestLogs = new MemoryRequestLogStore();
     const requestId = "request-a";
@@ -490,6 +543,17 @@ describe("admin accounts API", () => {
       status: 200,
       retryable: false,
     });
+    requestLogs.createRequestLog({
+      requestId: "request-follow-up",
+      provider: "codex",
+      route: "/backend-api/codex/responses",
+      sessionKey: "session-a",
+      accountId: "account-a",
+      eventType: "response",
+      attempt: 1,
+      status: 200,
+      retryable: false,
+    });
     const gateway = createGateway({
       accounts: new MemoryAccountStore(),
       requestLogs,
@@ -503,32 +567,38 @@ describe("admin accounts API", () => {
       data: Array<{ accountId: string; status: number }>;
     };
     expect(listResponse.status).toBe(200);
-    expect(listed.data).toEqual([
+    expect(listed.data).toEqual(expect.arrayContaining([
       expect.objectContaining({
         requestId,
         accountId: "account-a",
         status: 200,
       }),
-    ]);
+    ]));
 
     const groupedResponse = await gateway.fetch(
       new Request("http://127.0.0.1:2021/admin/request-logs?provider=codex&grouped=true"),
     );
     const grouped = (await groupedResponse.json()) as {
       object: string;
-      data: Array<{ requestId: string; finalStatus?: number; events: unknown[] }>;
+      data: Array<{ requestId: string; model?: string; finalStatus?: number; events: unknown[] }>;
     };
     expect(grouped.object).toBe("request_log_group_list");
-    expect(grouped.data).toEqual([
+    expect(grouped.data).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        requestId: "request-follow-up",
+        model: "gpt-5.3-codex",
+        finalStatus: 200,
+      }),
       expect.objectContaining({
         requestId,
+        model: "gpt-5.3-codex",
         finalStatus: 200,
         events: expect.arrayContaining([
           expect.objectContaining({ eventType: "selected" }),
           expect.objectContaining({ eventType: "response" }),
         ]),
       }),
-    ]);
+    ]));
 
     const clearResponse = await gateway.fetch(
       new Request("http://127.0.0.1:2021/admin/request-logs/clear", {
@@ -537,7 +607,7 @@ describe("admin accounts API", () => {
     );
     const cleared = (await clearResponse.json()) as { deleted_count: number };
     expect(clearResponse.status).toBe(200);
-    expect(cleared.deleted_count).toBe(2);
+    expect(cleared.deleted_count).toBe(3);
   });
 
   it("resets transient account failure state", async () => {

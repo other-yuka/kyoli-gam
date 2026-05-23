@@ -4,8 +4,8 @@ CLI for kyoli Server Mode: login, serve, account management, Codex/OpenCode
 install/restore, and doctor checks.
 
 For the product overview, start at the root [README](../../README.md). For no-server
-OpenCode usage, see [OpenCode Plugin Usage](../../docs/opencode-plugin-usage.md).
-For end-to-end setup and operation flows, see [Workflows](../../docs/workflows.md).
+OpenCode usage, use the `opencode-codex-multi-account` and
+`opencode-anthropic-multi-account` package READMEs.
 
 ## 30 seconds
 
@@ -171,6 +171,7 @@ The CLI reads `~/.config/kyoli-gam/config.json` by default. Override it with
   },
   "usageRefreshIntervalMs": 300000,
   "maxConcurrentRequests": 0,
+  "compactMaxConcurrentRequests": 0,
   "adminToken": "",
   "logLevel": "info"
 }
@@ -183,6 +184,7 @@ KYOLI_CONFIG_PATH=~/.config/kyoli-gam/config.json
 KYOLI_HOST=127.0.0.1
 KYOLI_PORT=2021
 KYOLI_ACCOUNT_SELECTION_STRATEGY=sticky|round-robin|weighted
+KYOLI_COMPACT_MAX_CONCURRENT_REQUESTS=0
 KYOLI_SOFT_QUOTA_THRESHOLD_PERCENT=90
 KYOLI_PLAN_WEIGHTS=max=3,pro=2,free=1
 KYOLI_USAGE_REFRESH_INTERVAL_MS=300000
@@ -196,11 +198,10 @@ KYOLI_CLAUDE_ALLOW_LIVE_MESSAGES=0
 Set `KYOLI_ADMIN_TOKEN` before binding outside localhost so `/admin/*` routes require a
 bearer token.
 
-## Docs
+## Related
 
-- [Workflows](../../docs/workflows.md)
-- [Server mode operations](../../docs/server-mode-operations.md)
-- [OpenCode Plugin Usage](../../docs/opencode-plugin-usage.md)
-- [Codex compatibility matrix](../../docs/codex-compatibility.md)
-- [Codex release checklist](../../docs/codex-release-checklist.md)
-- [Claude Code compatibility](../../docs/claude-code-compatibility.md)
+- [Root README](../../README.md)
+- [`@kyoli-gam/gateway`](../gateway)
+- [`@kyoli-gam/core`](../core)
+- [`@kyoli-gam/provider-codex-chatgpt`](../providers/codex-chatgpt)
+- [`@kyoli-gam/provider-claude-code`](../providers/claude-code)

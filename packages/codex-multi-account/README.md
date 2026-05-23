@@ -63,8 +63,8 @@ pnpm --filter opencode-codex-multi-account test
 pnpm --filter opencode-codex-multi-account build
 ```
 
-## Docs
+## Related
 
 - [Root README](../../README.md)
-- [OpenCode Plugin Usage](../../docs/opencode-plugin-usage.md)
-- [Codex compatibility matrix](../../docs/codex-compatibility.md)
+- [`opencode-multi-account-core`](../multi-account-core)
+- [`@kyoli-gam/provider-codex-chatgpt`](../providers/codex-chatgpt)

@@ -6,6 +6,7 @@ import {
   SQLiteAccountStore,
   SQLiteStickySessionStore,
   StickyAccountPool,
+  UsageRefreshService,
   listBlockedAccounts,
   listExpiredRateLimitAccounts,
   listFailedAccounts,
@@ -17,6 +18,7 @@ import {
   type AccountExecutionTraceEvent,
   type AccountRecord,
   type AccountStore,
+  type GatewayRoute,
   type ProviderId,
   type RequestLogStore,
   type StickySessionRegistry,
@@ -79,6 +81,7 @@ import {
   shouldOpenOAuthBrowser,
   type OAuthBrowserMode,
 } from "./oauth-browser";
+import { reconcileCodexOAuthAccount } from "./auth-reconcile";
 import {
   createPoolStatus,
   formatPoolBanner,
@@ -101,6 +104,29 @@ if (command === "serve") {
     stickySessionStore,
   });
 
+  const providers = [
+    createCodexChatGPTProvider({
+      accounts: accountPool,
+      compactMaxConcurrentRequests: cliConfig.compactMaxConcurrentRequests,
+      onTrace: createServeTraceLogger(cliConfig, requestLogStore),
+    }),
+    createClaudeCodeProvider({
+      accounts: accountPool,
+      allowLiveMessages: readBooleanEnv("KYOLI_CLAUDE_ALLOW_LIVE_MESSAGES"),
+      onTrace: createServeTraceLogger(cliConfig, requestLogStore),
+    }),
+  ];
+  const usageRefreshService = new UsageRefreshService({
+    accounts: accountStore,
+    providers,
+    intervalMs: cliConfig.usageRefreshIntervalMs,
+    onError: (event) => {
+      if (cliConfig.logLevel === "debug") {
+        console.warn(`usage refresh failed account=${event.accountId} provider=${event.provider}: ${event.message}`);
+      }
+    },
+  });
+
   const server = await serveGateway({
     config: {
       host: cliConfig.host,
@@ -109,31 +135,28 @@ if (command === "serve") {
     accounts: accountStore,
     stickySessions: accountPool,
     requestLogs: requestLogStore,
-    providers: [
-      createCodexChatGPTProvider({
-        accounts: accountPool,
-        onTrace: createServeTraceLogger(cliConfig, requestLogStore),
-      }),
-      createClaudeCodeProvider({
-        accounts: accountPool,
-        allowLiveMessages: readBooleanEnv("KYOLI_CLAUDE_ALLOW_LIVE_MESSAGES"),
-        onTrace: createServeTraceLogger(cliConfig, requestLogStore),
-        usageRefreshIntervalMs: cliConfig.usageRefreshIntervalMs,
-      }),
-    ],
+    providers,
     adminToken: cliConfig.adminToken,
     maxConcurrentRequests: cliConfig.maxConcurrentRequests,
     maxBodyBytes: cliConfig.maxBodyBytes,
   });
 
-  console.log(`kyoli-gam gateway listening on http://${server.hostname}:${server.port}`);
-  printPoolBanner(await accountStore.list(), {
-    strategy: cliConfig.accountSelectionStrategy ?? "sticky",
-    stickySessions: stickySessionStore,
-    requestLogs: requestLogStore,
-  });
+  if (server.alreadyRunning) {
+    console.log(`kyoli-gam gateway already running on http://${server.hostname}:${server.port}`);
+    console.log(`health: http://${server.hostname}:${server.port}/health`);
+  } else {
+    usageRefreshService.start();
+    console.log(`kyoli-gam gateway listening on http://${server.hostname}:${server.port}`);
+    printPoolBanner(await accountStore.list(), {
+      strategy: cliConfig.accountSelectionStrategy ?? "sticky",
+      stickySessions: stickySessionStore,
+      requestLogs: requestLogStore,
+    });
+  }
 } else if (command === "login" && process.argv[3] === "codex") {
   const accountStore = new SQLiteAccountStore(cliConfig.databasePath);
+  const targetAccountId = readStringFlag(process.argv, "--account") ?? readStringFlag(process.argv, "--account-id");
+  const force = process.argv.includes("--force");
   const login = await startCodexOAuthLogin();
   const browserMode = readOAuthBrowserMode(process.argv);
 
@@ -141,24 +164,16 @@ if (command === "serve") {
 
   try {
     const tokens = await login.waitForTokens;
-    const account = await accountStore.create({
-      provider: "codex",
-      kind: "oauth",
-      name: tokens.email ? `Codex ${tokens.email}` : "Codex OAuth account",
-      credentials: {
-        accessToken: tokens.accessToken,
-        refreshToken: tokens.refreshToken,
-        expiresAt: tokens.expiresAt,
-        accountId: tokens.accountId,
-      },
-      metadata: {
-        email: tokens.email,
-        accountId: tokens.accountId,
-        planTier: tokens.planTier,
-      },
+    const result = await reconcileCodexOAuthAccount(accountStore, tokens, {
+      accountId: targetAccountId,
+      force,
     });
 
-    console.log(`Codex account saved: ${account.name} (${account.id})`);
+    if (result.action === "updated") {
+      console.log(`Codex account re-authenticated: ${result.account.name} (${result.account.id})`);
+    } else {
+      console.log(`Codex account saved: ${result.account.name} (${result.account.id})`);
+    }
   } finally {
     login.stop();
   }
@@ -1340,7 +1355,6 @@ async function runClaudeFingerprintDoctor(): Promise<DoctorReport> {
     accounts: new StickyAccountPool(store),
     allowLiveMessages: true,
     baseUrl: "https://doctor.invalid",
-    usageRefreshIntervalMs: 0,
     usageRefresh: async () => ({ cachedUsageAt: Date.now() }),
     fetch: fetchProbe,
   });
@@ -1527,7 +1541,6 @@ async function captureKyoliClaudeOutbound(
     accounts: new StickyAccountPool(store),
     allowLiveMessages: true,
     baseUrl: "https://doctor.invalid",
-    usageRefreshIntervalMs: 0,
     usageRefresh: async () => ({ cachedUsageAt: Date.now() }),
     fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
       upstreamUrl = String(input);
@@ -1808,7 +1821,6 @@ async function runClaudeSmokeDoctor(
       createClaudeCodeProvider({
         accounts: pool,
         onTrace: (event) => trace.push(event),
-        usageRefreshIntervalMs: config.usageRefreshIntervalMs,
       }),
     ],
   });
@@ -2209,28 +2221,40 @@ function createServeTraceLogger(
       attempt: "attempt" in event ? event.attempt : undefined,
       status: "status" in event ? event.status : undefined,
       retryable: "retryable" in event ? event.retryable : undefined,
-      message: "message" in event ? event.message : undefined,
+      message: traceEventMessage(event),
     });
 
     if (config.logLevel !== "debug") return;
 
     if (event.type === "selected") {
+      const detail = event.selectionDiagnostics
+        ? ` reason=${readString((event.selectionDiagnostics as Record<string, unknown>).selectedReason) ?? "-"} usage=${formatSelectionUsage(event.selectionDiagnostics)}`
+        : "";
       console.debug(
-        `[kyoli] ${event.provider} selected attempt=${event.attempt} account=${formatTraceAccount(event.accountId)} session=${event.sessionKey}`,
+        `[kyoli] ${event.provider} selected attempt=${event.attempt} account=${formatTraceAccount(event.accountId)} session=${event.sessionKey}${detail}`,
+      );
+      return;
+    }
+
+    if (event.type === "metadata") {
+      console.debug(
+        `[kyoli] ${event.provider} metadata model=${event.model ?? "-"} account=${formatTraceAccount(event.accountId)} session=${event.sessionKey}`,
       );
       return;
     }
 
     if (event.type === "response") {
+      const detail = formatTraceFailure(event);
       console.debug(
-        `[kyoli] ${event.provider} response attempt=${event.attempt} status=${event.status} retryable=${event.retryable} account=${formatTraceAccount(event.accountId)} session=${event.sessionKey}`,
+        `[kyoli] ${event.provider} response attempt=${event.attempt} status=${event.status} retryable=${event.retryable} account=${formatTraceAccount(event.accountId)} session=${event.sessionKey}${detail}`,
       );
       return;
     }
 
     if (event.type === "retry") {
+      const detail = formatTraceFailure(event);
       console.debug(
-        `[kyoli] ${event.provider} retry attempt=${event.attempt} status=${event.status} account=${formatTraceAccount(event.accountId)} session=${event.sessionKey}`,
+        `[kyoli] ${event.provider} retry attempt=${event.attempt} status=${event.status} account=${formatTraceAccount(event.accountId)} session=${event.sessionKey}${detail}`,
       );
       return;
     }
@@ -2248,20 +2272,69 @@ function createServeTraceLogger(
   };
 }
 
-function readTraceRoute(value: string | undefined) {
-  if (
-    value === "/v1/models" ||
-    value === "/v1/responses" ||
-    value === "/v1/chat/completions" ||
-    value === "/v1/messages" ||
-    value === "/v1/messages/count_tokens" ||
-    value === "/backend-api/codex/responses" ||
-    value === "/backend-api/files" ||
-    value === "/backend-api/files/uploaded"
-  ) {
-    return value;
+function traceEventMessage(event: AccountExecutionTraceEvent): string | undefined {
+  if (event.type === "selected" && event.selectionDiagnostics) {
+    return JSON.stringify({ selection: event.selectionDiagnostics });
   }
-  return undefined;
+  if ((event.type === "response" || event.type === "retry") && hasTraceFailure(event)) {
+    return JSON.stringify({
+      failure: {
+        class: event.failureClass,
+        code: event.failureCode,
+        phase: event.failurePhase,
+      },
+    });
+  }
+  return "message" in event ? event.message : undefined;
+}
+
+function hasTraceFailure(
+  event: Extract<AccountExecutionTraceEvent, { type: "response" | "retry" }>,
+): boolean {
+  return Boolean(event.failureClass || event.failureCode || event.failurePhase);
+}
+
+function formatTraceFailure(
+  event: Extract<AccountExecutionTraceEvent, { type: "response" | "retry" }>,
+): string {
+  if (!hasTraceFailure(event)) return "";
+  return ` failure=${event.failureClass ?? "-"} code=${event.failureCode ?? "-"} phase=${event.failurePhase ?? "-"}`;
+}
+
+function formatSelectionUsage(value: unknown): string {
+  const diagnostics = readRecord(value);
+  const selected = readRecord(diagnostics?.selectedAccount);
+  const usage = readRecord(selected?.usage);
+  if (!usage) return "-";
+  const five = readOptionalNumber(String(usage.five_hour ?? ""));
+  const seven = readOptionalNumber(String(usage.seven_day ?? ""));
+  const max = readOptionalNumber(String(usage.max ?? ""));
+  return `five=${five ?? "-"} seven=${seven ?? "-"} max=${max ?? "-"}`;
+}
+
+const traceRoutes = new Set<GatewayRoute>([
+  "/v1/models",
+  "/v1/usage",
+  "/v1/audio/transcriptions",
+  "/v1/images/generations",
+  "/v1/images/edits",
+  "/v1/images/variations",
+  "/v1/responses",
+  "/v1/responses/compact",
+  "/v1/chat/completions",
+  "/v1/messages",
+  "/v1/messages/count_tokens",
+  "/backend-api/codex/models",
+  "/backend-api/codex/responses",
+  "/backend-api/codex/responses/compact",
+  "/backend-api/files",
+  "/backend-api/files/uploaded",
+  "/backend-api/transcribe",
+  "/api/codex/usage",
+]);
+
+function readTraceRoute(value: string | undefined): GatewayRoute | undefined {
+  return traceRoutes.has(value as GatewayRoute) ? value as GatewayRoute : undefined;
 }
 
 function formatTraceAccount(accountId: string | undefined): string {
@@ -2278,7 +2351,7 @@ function printHelp(): void {
 Usage:
   # Server Mode
   kyoli serve [--port 2021] [--config ~/.config/kyoli-gam/config.json]
-  kyoli login codex [--manual|--headless|--no-browser]
+  kyoli login codex [--manual|--headless|--no-browser] [--account <id>] [--force]
   kyoli login claude [--manual|--headless|--no-browser]
 
   # Accounts
@@ -2323,12 +2396,12 @@ Modes:
     opencode-anthropic-multi-account to OpenCode's plugin array, then run:
       opencode auth login
 
-Docs:
+Related:
   README.md
-  docs/server-mode-operations.md
-  docs/opencode-plugin-usage.md
-  docs/opencode-plugin-mode.md
-  docs/codex-release-checklist.md
+  packages/cli/README.md
+  packages/gateway/README.md
+  packages/codex-multi-account/README.md
+  packages/anthropic-multi-account/README.md
 
 Environment:
   KYOLI_CONFIG_PATH=~/.config/kyoli-gam/config.json

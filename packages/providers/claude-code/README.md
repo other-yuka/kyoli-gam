@@ -44,8 +44,8 @@ The provider reconstructs the Claude Code request shape:
 - tool-name masking and reverse mapping for custom tool names;
 - beta rejection retry and long-context fallback retry.
 
-See [Claude Code compatibility](../../../docs/claude-code-compatibility.md) for the
-current support matrix.
+Run the Claude doctor commands below to verify the local Claude Code binary, bundled
+template, and outbound wire shape.
 
 ## Live controls
 
@@ -77,8 +77,8 @@ kyoli doctor claude --wire
 kyoli doctor claude --smoke
 ```
 
-## Docs
+## Related
 
-- [Claude Code compatibility](../../../docs/claude-code-compatibility.md)
-- [Claude identity storage](../../../docs/claude-identity-storage.md)
-- [Claude live acceptance](../../../docs/claude-live-acceptance.md)
+- [Root README](../../../README.md)
+- [`@kyoli-gam/gateway`](../../gateway)
+- [`opencode-anthropic-multi-account`](../../anthropic-multi-account)

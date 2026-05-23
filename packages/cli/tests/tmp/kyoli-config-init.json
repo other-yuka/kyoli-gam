@@ -3,7 +3,7 @@
   "port": 2021,
   "databasePath": "~/.local/share/kyoli-gam/kyoli.db",
   "accountSelectionStrategy": "round-robin",
-  "softQuotaThresholdPercent": 100,
+  "softQuotaThresholdPercent": 95,
   "planWeights": {
     "max": 3,
     "pro": 2,
@@ -11,6 +11,8 @@
   },
   "usageRefreshIntervalMs": 300000,
   "maxConcurrentRequests": 0,
+  "compactMaxConcurrentRequests": 0,
+  "maxBodyBytes": 67108864,
   "adminToken": "",
   "logLevel": "info"
 }

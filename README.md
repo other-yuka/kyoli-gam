@@ -16,7 +16,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-blue?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org)
 [![License](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](LICENSE)
 
-[30 seconds](#30-seconds) · [Modes](#modes) · [Workflows](./docs/workflows.md) · [What it does](#what-it-does) · [Docs](#docs)
+[30 seconds](#30-seconds) · [Modes](#modes) · [What it does](#what-it-does) · [Packages](#packages)
 
 </div>
 
@@ -248,8 +248,9 @@ If binding outside localhost, set `KYOLI_ADMIN_TOKEN` so `/admin/*` routes requi
 
 ## OpenCode Plugin Mode
 
-OpenCode Plugin Mode is a pure OpenCode plugin path. It is documented in
-[OpenCode Plugin Usage](./docs/opencode-plugin-usage.md).
+OpenCode Plugin Mode is a pure OpenCode plugin path. Use the published
+`opencode-codex-multi-account` and `opencode-anthropic-multi-account` packages directly
+from OpenCode.
 
 To move OpenCode plugin accounts into Server Mode:
 
@@ -275,23 +276,6 @@ pnpm --dir packages/cli install opencode
 | [`opencode-codex-multi-account`](./packages/codex-multi-account) | OpenCode plugin for ChatGPT/Codex OAuth |
 | [`opencode-anthropic-multi-account`](./packages/anthropic-multi-account) | OpenCode plugin for Claude OAuth |
 | [`opencode-multi-account-core`](./packages/multi-account-core) | Shared OpenCode plugin core |
-
----
-
-## Docs
-
-- [Workflows](./docs/workflows.md)
-- [Server mode operations](./docs/server-mode-operations.md)
-- [OpenCode Plugin Usage](./docs/opencode-plugin-usage.md)
-- [OpenCode Plugin Mode](./docs/opencode-plugin-mode.md)
-- [Codex compatibility matrix](./docs/codex-compatibility.md)
-- [Claude Code compatibility](./docs/claude-code-compatibility.md)
-- [Claude identity storage](./docs/claude-identity-storage.md)
-- [Claude live acceptance](./docs/claude-live-acceptance.md)
-- [Backpressure policy](./docs/backpressure-policy.md)
-- [Dashboard reference analysis](./docs/dashboard-reference-analysis.md)
-- [ADR 0001: v1 Gateway-First Architecture](./docs/decisions/0001-v1-gateway-first-architecture.md)
-- [ADR 0002: Protocol Translator Boundaries](./docs/decisions/0002-protocol-translator-boundaries.md)
 
 ---
 

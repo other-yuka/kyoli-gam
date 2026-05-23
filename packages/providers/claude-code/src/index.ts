@@ -4,8 +4,10 @@ import type {
   AccountExecutionResult,
   AccountFailureSignal,
   AccountPool,
+  AccountRecord,
   ModelInfo,
   ProviderAdapter,
+  ProviderUsageRefreshResult,
   SelectedCredential,
 } from "@kyoli-gam/core";
 import {
@@ -56,9 +58,10 @@ const CLAUDE_CODE_BROWSER_ACCESS =
 const CLAUDE_CODE_TIMEOUT_SECONDS = templateHeaders["x-stainless-timeout"] ?? "600";
 const STAINLESS_PACKAGE_VERSION = "0.81.0";
 const TOKEN_EXPIRY_BUFFER_MS = 60_000;
-const DEFAULT_USAGE_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const BILLABLE_BETA_PREFIXES = ["extended-cache-ttl-"];
 const CONTEXT_1M_BETA = "context-1m-2025-08-07";
+const CONTEXT_MANAGEMENT_BETA = "context-management-2025-06-27";
+const LONG_CONTEXT_BETAS = [CONTEXT_1M_BETA, CONTEXT_MANAGEMENT_BETA] as const;
 const BILLING_SEED = "59cf53e54c78";
 const CLAUDE_STARTUP_PROBE_MAX_BYTES = 64 * 1024;
 const CLAUDE_CODE_AGENT_IDENTITY =
@@ -97,7 +100,6 @@ export interface ClaudeCodeProviderOptions {
   tokenRefresh?: ClaudeCodeTokenRefresh;
   trustClientFingerprint?: boolean;
   usageRefresh?: ClaudeCodeUsageRefresh;
-  usageRefreshIntervalMs?: number;
 }
 
 export {
@@ -199,10 +201,6 @@ export function createClaudeCodeProvider(
   const fingerprint = createClaudeCodeRequestFingerprint(options.fingerprint);
   const usageRefresh = options.usageRefresh ?? ((accessToken: string) =>
     refreshClaudeCodeAccountMetadata(accessToken, { fetch: fetchImpl }));
-  const usageRefreshIntervalMs = Math.max(
-    0,
-    options.usageRefreshIntervalMs ?? DEFAULT_USAGE_REFRESH_INTERVAL_MS,
-  );
   const rejectedBetasByAccount = new Map<string, Set<string>>();
   const pacer = createClaudeCodePacer(resolvePacingOptions(options.pacing));
   const drainOnCancel = options.drainOnCancel ?? readBooleanEnv("KYOLI_CLAUDE_DRAIN_ON_CANCEL");
@@ -220,6 +218,12 @@ export function createClaudeCodeProvider(
     async listModels() {
       return models;
     },
+    refreshUsage: ({ account }) =>
+      refreshClaudeCodeUsageForAccount({
+        account,
+        tokenRefresh: options.tokenRefresh ?? refreshClaudeCodeOAuthToken,
+        usageRefresh,
+      }),
     async handleRequest(context) {
       if (context.route !== "/v1/messages" && context.route !== "/v1/messages/count_tokens") {
         return jsonResponse(
@@ -297,19 +301,14 @@ export function createClaudeCodeProvider(
             url: createUpstreamUrl(baseUrl, context.route),
           });
           const upstream = await normalizeClaudeCodeStartupFailure(response);
-          await refreshUsageMetadataIfNeeded({
-            accounts: options.accounts,
-            credential: claudeCredential,
-            response: upstream.response,
-            usageRefresh,
-            usageRefreshIntervalMs,
-          });
+          const failure = upstream.failure ?? inferClaudeCodeHttpFailure(upstream.response);
           const transformedResponse = await transformResponse(upstream.response, transformed.reverseLookup, {
             drainOnCancel,
             drainTimeoutMs,
           });
           return {
             ...upstream,
+            failure,
             response: transformedResponse,
           };
         },
@@ -348,12 +347,12 @@ async function fetchWithClaudeRetries(input: {
   const rejectedBetas = input.retryRejectedBetas && response.status === 400
     ? parseRejectedBetaFlags(bodyText)
     : [];
-  const shouldRetryContext1m = input.retryContext1m &&
-    !excludedBetas.has(CONTEXT_1M_BETA) &&
-    isLongContextBetaError(bodyText);
+  const longContextRetryBetas = input.retryContext1m && isLongContextBetaError(bodyText)
+    ? LONG_CONTEXT_BETAS.filter((flag) => !excludedBetas.has(flag))
+    : [];
   const retryBetas = [
     ...rejectedBetas.filter((flag) => !excludedBetas.has(flag)),
-    ...(shouldRetryContext1m ? [CONTEXT_1M_BETA] : []),
+    ...longContextRetryBetas,
   ];
 
   if (retryBetas.length === 0) return response;
@@ -471,8 +470,27 @@ function withClaudeCodeRateLimitReset(
   const resetAt = readClaudeCodeRateLimitResetAt(headers) ?? failure.resetAt;
   return {
     ...failure,
+    metadata: {
+      ...failure.metadata,
+      ...readClaudeCodeRateLimitMetadata(headers),
+    },
     resetAt,
     retryAfterSeconds: secondsUntilIso(resetAt) ?? failure.retryAfterSeconds,
+  };
+}
+
+function inferClaudeCodeHttpFailure(response: Response): AccountFailureSignal | undefined {
+  if (response.status !== 429) return undefined;
+  const resetAt = readClaudeCodeRateLimitResetAt(response.headers);
+  return {
+    class: "rate_limit",
+    code: "rate_limit",
+    httpStatus: 429,
+    metadata: readClaudeCodeRateLimitMetadata(response.headers),
+    phase: "startup",
+    resetAt,
+    retryAfterSeconds: secondsUntilIso(resetAt),
+    retryScope: "next_account",
   };
 }
 
@@ -582,12 +600,23 @@ async function readOAuthCredential(input: {
   excludeAccountIds: string[];
   tokenRefresh: ClaudeCodeTokenRefresh;
 }): Promise<ClaudeCodeCredential | undefined> {
-  const account = await input.accounts?.select({
-    provider: "claude-code",
-    kind: "oauth",
-    sessionKey: input.sessionKey,
-    excludeAccountIds: input.excludeAccountIds,
-  });
+  const selection = input.accounts?.selectWithDiagnostics
+    ? await input.accounts.selectWithDiagnostics({
+      provider: "claude-code",
+      kind: "oauth",
+      sessionKey: input.sessionKey,
+      excludeAccountIds: input.excludeAccountIds,
+    })
+    : {
+      account: await input.accounts?.select({
+        provider: "claude-code",
+        kind: "oauth",
+        sessionKey: input.sessionKey,
+        excludeAccountIds: input.excludeAccountIds,
+      }),
+      diagnostics: undefined,
+    };
+  const account = selection?.account;
   if (!account) return undefined;
 
   const refreshToken = readString(account.credentials.refreshToken);
@@ -630,6 +659,7 @@ async function readOAuthCredential(input: {
   return {
     value: accessToken,
     accountId: account.id,
+    selectionDiagnostics: selection?.diagnostics as Record<string, unknown> | undefined,
     metadata: {
       ...account.metadata,
       accountId: account.metadata.accountId ?? account.credentials.accountId,
@@ -637,51 +667,86 @@ async function readOAuthCredential(input: {
   };
 }
 
-async function refreshUsageMetadataIfNeeded(input: {
-  accounts: AccountPool | undefined;
-  credential: ClaudeCodeCredential;
-  response: Response;
+async function refreshClaudeCodeUsageForAccount(input: {
+  account: AccountRecord;
+  tokenRefresh: ClaudeCodeTokenRefresh;
   usageRefresh: ClaudeCodeUsageRefresh;
-  usageRefreshIntervalMs: number;
-}): Promise<void> {
-  if (!input.accounts || !input.credential.accountId) return;
-  if (!shouldRefreshUsage(input.credential.metadata, input.response, input.usageRefreshIntervalMs)) {
-    return;
+}): Promise<ProviderUsageRefreshResult> {
+  const refreshToken = readString(input.account.credentials.refreshToken);
+  let accessToken = readString(input.account.credentials.accessToken);
+  let expiresAt = readNumber(input.account.credentials.expiresAt);
+  let credentials = input.account.credentials;
+  let metadata = input.account.metadata;
+
+  if (!accessToken || !expiresAt || expiresAt <= Date.now() + TOKEN_EXPIRY_BUFFER_MS) {
+    if (!refreshToken) {
+      return {
+        ok: false,
+        status: 401,
+        message: "Claude Code account has no refresh token for usage refresh.",
+        reauthRequiredReason: "Claude Code OAuth token refresh failed",
+      };
+    }
+
+    const refreshed = await input.tokenRefresh(refreshToken).catch((error) => ({
+      error: error instanceof Error ? error.message : String(error),
+    }));
+    if ("error" in refreshed) {
+      return {
+        ok: false,
+        status: 401,
+        message: refreshed.error,
+        reauthRequiredReason: "Claude Code OAuth token refresh failed",
+      };
+    }
+
+    accessToken = refreshed.accessToken;
+    expiresAt = refreshed.expiresAt;
+    credentials = {
+      ...credentials,
+      accessToken,
+      expiresAt,
+      refreshToken: refreshed.refreshToken ?? refreshToken,
+      accountId: refreshed.accountId ?? credentials.accountId,
+    };
+    metadata = {
+      ...metadata,
+      email: refreshed.email ?? metadata.email,
+      accountId: refreshed.accountId ?? metadata.accountId,
+    };
   }
 
-  const refreshed = await input.usageRefresh(input.credential.value).catch(() => undefined);
-  const rateLimitMetadata = readClaudeCodeRateLimitMetadata(input.response.headers);
-  if (!refreshed && Object.keys(rateLimitMetadata).length === 0) return;
+  if (!accessToken) {
+    return {
+      ok: false,
+      status: 401,
+      message: "Claude Code account has no access token for usage refresh.",
+      reauthRequiredReason: "Claude Code OAuth token refresh failed",
+    };
+  }
 
-  await input.accounts.update(input.credential.accountId, {
+  const refreshed = await input.usageRefresh(accessToken).catch((error) => ({
+    error: error instanceof Error ? error.message : String(error),
+  }));
+  if ("error" in refreshed) {
+    return {
+      ok: false,
+      status: 0,
+      message: refreshed.error,
+    };
+  }
+
+  return {
+    ok: true,
+    credentials,
     metadata: {
-      ...input.credential.metadata,
-      ...rateLimitMetadata,
-      email: refreshed?.email ?? input.credential.metadata.email,
-      planTier: refreshed?.planTier ?? input.credential.metadata.planTier,
-      cachedUsage:
-        refreshed?.cachedUsage ??
-        rateLimitMetadata.cachedUsage ??
-        input.credential.metadata.cachedUsage,
-      cachedUsageAt:
-        refreshed?.cachedUsageAt ??
-        rateLimitMetadata.cachedUsageAt ??
-        input.credential.metadata.cachedUsageAt,
+      ...metadata,
+      email: refreshed.email ?? metadata.email,
+      planTier: refreshed.planTier ?? metadata.planTier,
+      cachedUsage: refreshed.cachedUsage ?? metadata.cachedUsage,
+      cachedUsageAt: refreshed.cachedUsageAt ?? metadata.cachedUsageAt,
     },
-  });
-}
-
-function shouldRefreshUsage(
-  metadata: Record<string, unknown>,
-  response: Response,
-  refreshIntervalMs: number,
-): boolean {
-  if (response.status === 429) return true;
-  if (!response.ok) return false;
-  if (refreshIntervalMs === 0) return true;
-
-  const cachedUsageAt = readNumber(metadata.cachedUsageAt);
-  return !cachedUsageAt || Date.now() - cachedUsageAt > refreshIntervalMs;
+  };
 }
 
 function readClaudeCodeRateLimitResetAt(headers: Headers): string | undefined {
@@ -757,12 +822,6 @@ function parseClaudeCodeRateLimitHeaders(headers: Headers): {
     resetAt,
     status: status ?? "unknown",
   };
-}
-
-function readUtilization(value: string | null): number | undefined {
-  if (!value) return undefined;
-  const parsed = Number.parseFloat(value);
-  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function resolvePacingOptions(
@@ -1068,6 +1127,12 @@ function describeClaudeCodeRateLimit(headers: Headers): string {
   if (util7d !== undefined) parts.push(`7d utilization: ${Math.round(util7d * 100)}%`);
   if (resetAt) parts.push(`resets in ${formatMinutesUntil(resetAt)}m`);
   return parts.join(". ");
+}
+
+function readUtilization(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function formatMinutesUntil(iso: string): number {

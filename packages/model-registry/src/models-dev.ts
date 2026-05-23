@@ -172,7 +172,28 @@ function mapProviderModels(
       `${kyoliProvider}/${model.id ?? modelId}`,
     ],
     capabilities: inferCapabilities(providerId, model),
+    metadata: pickModelMetadata(model),
   }));
+}
+
+function pickModelMetadata(model: ModelsDevModel): Record<string, unknown> | undefined {
+  const metadata: Record<string, unknown> = {};
+  for (const key of [
+    "additional_speed_tiers",
+    "service_tiers",
+    "availability_nux",
+    "upgrade",
+    "max_context_window",
+    "auto_compact_token_limit",
+    "effective_context_window_percent",
+    "experimental_supported_tools",
+  ]) {
+    const value = model[key];
+    if (value !== undefined) {
+      metadata[key] = value;
+    }
+  }
+  return Object.keys(metadata).length > 0 ? metadata : undefined;
 }
 
 function toKyoliProviderId(providerId: ModelsDevProviderId): ProviderId {

@@ -16,6 +16,7 @@ interface AccountExecutionTraceBase {
 export interface SelectedCredential {
   value: string;
   accountId?: string;
+  selectionDiagnostics?: Record<string, unknown>;
 }
 
 export type AccountFailureClass =
@@ -39,6 +40,7 @@ export interface AccountFailureSignal {
   code?: string;
   message?: string;
   httpStatus?: number;
+  metadata?: Record<string, unknown>;
   retryAfterSeconds?: number;
   resetAt?: string;
   retryScope?: "same_account" | "next_account" | "none";
@@ -66,6 +68,15 @@ export type AccountExecutionTraceEvent =
       sessionKey: string;
       accountId?: string;
       attempt: number;
+      selectionDiagnostics?: Record<string, unknown>;
+    })
+  | (AccountExecutionTraceBase & {
+      type: "metadata";
+      provider: ProviderId;
+      kind: AccountRecord["kind"];
+      sessionKey: string;
+      accountId?: string;
+      message?: string;
     })
   | (AccountExecutionTraceBase & {
       type: "response";
@@ -188,6 +199,7 @@ export async function executeWithAccountFailover(
       sessionKey: input.sessionKey,
       accountId: credential.accountId,
       attempt: attempt + 1,
+      selectionDiagnostics: credential.selectionDiagnostics,
       route: input.traceRoute,
       model: input.traceModel,
     });
@@ -412,6 +424,7 @@ async function recordAccountResult(
       failureClass: failure.class,
       failureCode: failure.code,
       failurePhase: failure.phase,
+      metadata: failure.metadata,
     });
     return;
   }

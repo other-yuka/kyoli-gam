@@ -8,6 +8,7 @@ import type {
 import {
   isCurrentlyAuthCoolingDown,
   isCurrentlyRateLimited,
+  readAccountAvailabilityState,
   shouldRecoverRateLimitBlock,
 } from "./account-state";
 import {
@@ -27,6 +28,44 @@ export interface AccountSelectionInput {
 
 export type AccountSelectionStrategy = "sticky" | "round-robin" | "weighted";
 
+export interface AccountSelectionDiagnostics {
+  strategy: AccountSelectionStrategy;
+  stickyKey: string;
+  poolKey: string;
+  preferredAccountId?: string;
+  excludedAccountIds: string[];
+  eligibleAccountIds: string[];
+  ineligibleAccounts: Array<{
+    id: string;
+    state: ReturnType<typeof readAccountAvailabilityState>;
+    reason: string;
+  }>;
+  softQuotaThresholdPercent: number;
+  softQuotaSkippedAccountIds: string[];
+  softQuotaFallbackUsed: boolean;
+  poolAccountIds: string[];
+  selectedReason?: string;
+  selectedAccount?: AccountSelectionAccountSnapshot;
+  weightedScores?: Array<{ id: string; score: number; sticky: boolean }>;
+}
+
+export interface AccountSelectionAccountSnapshot {
+  id: string;
+  planTier?: string;
+  failureCount: number;
+  lastUsedAt?: string;
+  usage: {
+    max?: number;
+    five_hour?: number;
+    seven_day?: number;
+  };
+}
+
+export interface AccountSelectionResult {
+  account?: AccountRecord;
+  diagnostics: AccountSelectionDiagnostics;
+}
+
 export interface AccountPoolOptions {
   strategy?: AccountSelectionStrategy;
   softQuotaThresholdPercent?: number;
@@ -38,6 +77,7 @@ export interface AccountPoolOptions {
 export interface AccountPool {
   listByProvider(provider: ProviderId): Promise<AccountRecord[]>;
   select(input: AccountSelectionInput): Promise<AccountRecord | undefined>;
+  selectWithDiagnostics?(input: AccountSelectionInput): Promise<AccountSelectionResult>;
   update(accountId: string, input: AccountUpdateInput): Promise<AccountRecord | undefined>;
   recordSuccess(accountId: string, input?: AccountSuccessInput): Promise<void>;
   recordFailure(accountId: string, input: AccountFailureInput): Promise<void>;
@@ -64,7 +104,7 @@ export class StickyAccountPool implements AccountPool {
   ) {
     this.options = {
       strategy: options.strategy ?? "sticky",
-      softQuotaThresholdPercent: clampPercent(options.softQuotaThresholdPercent ?? 100),
+      softQuotaThresholdPercent: clampPercent(options.softQuotaThresholdPercent ?? 95),
       planWeights: { ...DEFAULT_PLAN_WEIGHTS, ...options.planWeights },
       weightedSwitchMargin: Math.max(0, options.weightedSwitchMargin ?? DEFAULT_WEIGHTED_SWITCH_MARGIN),
     };
@@ -76,42 +116,78 @@ export class StickyAccountPool implements AccountPool {
   }
 
   async select(input: AccountSelectionInput): Promise<AccountRecord | undefined> {
-    const accounts = (await this.listByProvider(input.provider)).filter((account) =>
-      isEligible(account, input)
-    );
-    if (accounts.length === 0) return undefined;
+    return (await this.selectWithDiagnostics(input)).account;
+  }
 
-    const stickyKey = `${input.provider}:${input.kind ?? "any"}:${input.sessionKey}`;
+  async selectWithDiagnostics(input: AccountSelectionInput): Promise<AccountSelectionResult> {
+    const allAccounts = await this.listByProvider(input.provider);
+    const stickyKind = readStickySessionKind(input.sessionKey, input.kind);
+    const stickyKey = `${input.provider}:${stickyKind}:${input.sessionKey}`;
     const poolKey = `${input.provider}:${input.kind ?? "any"}`;
+    const accounts = allAccounts.filter((account) => isEligible(account, input));
     const usable = accounts.filter((account) => !exceedsSoftQuota(account, this.options));
     const pool = usable.length > 0 ? usable : accounts;
+    const diagnostics: AccountSelectionDiagnostics = {
+      strategy: this.options.strategy,
+      stickyKey,
+      poolKey,
+      preferredAccountId: input.preferredAccountId,
+      excludedAccountIds: [...(input.excludeAccountIds ?? [])],
+      eligibleAccountIds: accounts.map((account) => account.id),
+      ineligibleAccounts: allAccounts
+        .filter((account) => !accounts.includes(account))
+        .map((account) => ineligibleAccountDiagnostic(account, input)),
+      softQuotaThresholdPercent: this.options.softQuotaThresholdPercent,
+      softQuotaSkippedAccountIds: accounts
+        .filter((account) => exceedsSoftQuota(account, this.options))
+        .map((account) => account.id),
+      softQuotaFallbackUsed: accounts.length > 0 && usable.length === 0,
+      poolAccountIds: pool.map((account) => account.id),
+    };
+
+    if (accounts.length === 0 || pool.length === 0) return { diagnostics };
+
     const preferred = pool.find((account) => account.id === input.preferredAccountId);
     if (preferred) {
       this.setStickySession(stickyKey, preferred.id);
-      return preferred;
+      diagnostics.selectedReason = "preferred";
+      diagnostics.selectedAccount = accountSelectionSnapshot(preferred);
+      return { account: preferred, diagnostics };
     }
 
     if (this.options.strategy === "round-robin") {
-      return this.selectRoundRobin(pool, poolKey, stickyKey);
+      const selected = this.selectRoundRobin(pool, poolKey, stickyKey);
+      diagnostics.selectedReason = "round_robin";
+      diagnostics.selectedAccount = selected ? accountSelectionSnapshot(selected) : undefined;
+      return { account: selected, diagnostics };
     }
 
     if (this.options.strategy === "weighted") {
-      return this.selectWeighted(pool, stickyKey);
+      const selected = this.selectWeighted(pool, stickyKey, diagnostics);
+      diagnostics.selectedAccount = selected ? accountSelectionSnapshot(selected) : undefined;
+      return { account: selected, diagnostics };
     }
 
-    return this.selectSticky(pool, stickyKey);
+    const selected = this.selectSticky(pool, stickyKey, diagnostics);
+    diagnostics.selectedAccount = selected ? accountSelectionSnapshot(selected) : undefined;
+    return { account: selected, diagnostics };
   }
 
   private selectSticky(
     accounts: AccountRecord[],
     stickyKey: string,
+    diagnostics?: AccountSelectionDiagnostics,
   ): AccountRecord | undefined {
     const stickySession = this.stickySessionStore.getStickySession(stickyKey);
     const stickyAccount = accounts.find((account) => account.id === stickySession?.accountId);
-    if (stickyAccount) return stickyAccount;
+    if (stickyAccount) {
+      if (diagnostics) diagnostics.selectedReason = "sticky_existing";
+      return stickyAccount;
+    }
 
     const selected = accounts[0];
     this.setStickySession(stickyKey, selected.id);
+    if (diagnostics) diagnostics.selectedReason = "sticky_new";
     return selected;
   }
 
@@ -132,15 +208,19 @@ export class StickyAccountPool implements AccountPool {
   private selectWeighted(
     accounts: AccountRecord[],
     stickyKey: string,
+    diagnostics?: AccountSelectionDiagnostics,
   ): AccountRecord | undefined {
     const stickySession = this.stickySessionStore.getStickySession(stickyKey);
     const stickyAccount = accounts.find((account) => account.id === stickySession?.accountId);
 
     let best = accounts[0];
     let bestScore = best ? scoreAccount(best, false, this.options) : Number.NEGATIVE_INFINITY;
+    const scores: Array<{ id: string; score: number; sticky: boolean }> = [];
+    if (best) scores.push({ id: best.id, score: bestScore, sticky: false });
 
     for (const account of accounts.slice(1)) {
       const score = scoreAccount(account, false, this.options);
+      scores.push({ id: account.id, score, sticky: false });
       if (score > bestScore) {
         best = account;
         bestScore = score;
@@ -149,13 +229,22 @@ export class StickyAccountPool implements AccountPool {
 
     if (stickyAccount && best && stickyAccount.id !== best.id) {
       const stickyScore = scoreAccount(stickyAccount, true, this.options);
+      scores.push({ id: stickyAccount.id, score: stickyScore, sticky: true });
       if (bestScore <= stickyScore + this.options.weightedSwitchMargin) {
+        if (diagnostics) {
+          diagnostics.selectedReason = "weighted_sticky";
+          diagnostics.weightedScores = scores;
+        }
         return stickyAccount;
       }
     }
 
     if (best) {
       this.setStickySession(stickyKey, best.id);
+      if (diagnostics) {
+        diagnostics.selectedReason = "weighted_best";
+        diagnostics.weightedScores = scores;
+      }
     }
     return best;
   }
@@ -245,6 +334,17 @@ function isEligible(account: AccountRecord, input: AccountSelectionInput): boole
   );
 }
 
+function ineligibleAccountDiagnostic(
+  account: AccountRecord,
+  input: AccountSelectionInput,
+): AccountSelectionDiagnostics["ineligibleAccounts"][number] {
+  const state = readAccountAvailabilityState(account);
+  let reason: string = state;
+  if (input.excludeAccountIds?.includes(account.id)) reason = "excluded";
+  else if (input.kind && account.kind !== input.kind) reason = "kind_mismatch";
+  return { id: account.id, state, reason };
+}
+
 function exceedsSoftQuota(
   account: AccountRecord,
   options: RuntimeAccountPoolOptions,
@@ -275,6 +375,29 @@ function getMaxUtilization(account: AccountRecord): number {
   const tiers = readUsageTiers(account);
   if (tiers.length === 0) return 65;
   return Math.min(100, Math.max(0, Math.max(...tiers.map((tier) => tier.utilization))));
+}
+
+function accountSelectionSnapshot(account: AccountRecord): AccountSelectionAccountSnapshot {
+  const fiveHour = readUsageUtilization(account, "five_hour");
+  const sevenDay = readUsageUtilization(account, "seven_day");
+  const max = getMaxUtilization(account);
+  return {
+    id: account.id,
+    planTier: typeof account.metadata.planTier === "string" ? account.metadata.planTier : undefined,
+    failureCount: account.failureCount,
+    lastUsedAt: account.lastUsedAt,
+    usage: {
+      ...(Number.isFinite(max) ? { max } : {}),
+      ...(fiveHour !== undefined ? { five_hour: fiveHour } : {}),
+      ...(sevenDay !== undefined ? { seven_day: sevenDay } : {}),
+    },
+  };
+}
+
+function readUsageUtilization(account: AccountRecord, key: string): number | undefined {
+  const usage = readRecord(account.metadata.cachedUsage) ?? readRecord(account.metadata.usage);
+  const window = readRecord(usage?.[key]);
+  return window ? readNumber(window.utilization) : undefined;
 }
 
 function readUsageTiers(account: AccountRecord): Array<{ utilization: number }> {

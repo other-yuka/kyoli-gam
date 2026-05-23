@@ -14,6 +14,7 @@ export interface CliConfig {
   planWeights?: Record<string, number>;
   usageRefreshIntervalMs?: number;
   maxConcurrentRequests?: number;
+  compactMaxConcurrentRequests?: number;
   maxBodyBytes?: number;
   adminToken?: string;
   logLevel?: LogLevel;
@@ -50,6 +51,10 @@ export async function loadCliConfig(
       readInteger(env.KYOLI_MAX_CONCURRENT_REQUESTS) ??
       fileConfig.maxConcurrentRequests ??
       defaults.maxConcurrentRequests,
+    compactMaxConcurrentRequests:
+      readInteger(env.KYOLI_COMPACT_MAX_CONCURRENT_REQUESTS) ??
+      fileConfig.compactMaxConcurrentRequests ??
+      defaults.compactMaxConcurrentRequests,
     maxBodyBytes:
       readInteger(env.KYOLI_MAX_BODY_BYTES) ??
       fileConfig.maxBodyBytes ??
@@ -77,7 +82,7 @@ export function createDefaultCliConfig(): Required<CliConfig> {
     port: 2021,
     databasePath: join("~", ".local", "share", "kyoli-gam", "kyoli.db"),
     accountSelectionStrategy: "round-robin",
-    softQuotaThresholdPercent: 100,
+    softQuotaThresholdPercent: 95,
     planWeights: {
       max: 3,
       pro: 2,
@@ -85,6 +90,7 @@ export function createDefaultCliConfig(): Required<CliConfig> {
     },
     usageRefreshIntervalMs: 300_000,
     maxConcurrentRequests: 0,
+    compactMaxConcurrentRequests: 0,
     maxBodyBytes: 64 * 1024 * 1024,
     adminToken: "",
     logLevel: "info",
@@ -126,6 +132,7 @@ function normalizeConfig(value: unknown): CliConfig {
     planWeights: readPlanWeightsObject(record.planWeights),
     usageRefreshIntervalMs: readNumber(record.usageRefreshIntervalMs),
     maxConcurrentRequests: readInteger(record.maxConcurrentRequests),
+    compactMaxConcurrentRequests: readInteger(record.compactMaxConcurrentRequests),
     maxBodyBytes: readInteger(record.maxBodyBytes),
     adminToken: readString(record.adminToken),
     logLevel: readLogLevel(record.logLevel),

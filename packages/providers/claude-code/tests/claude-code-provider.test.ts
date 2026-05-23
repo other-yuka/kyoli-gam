@@ -527,7 +527,7 @@ describe("createClaudeCodeProvider", () => {
     expect(updated?.credentials.refreshToken).toBe("refresh-new");
   });
 
-  it("refreshes stale usage metadata after a successful request", async () => {
+  it("exposes usage refresh metadata through the provider capability", async () => {
     const store = new MemoryAccountStore();
     const account = await store.create({
       provider: "claude-code",
@@ -549,7 +549,6 @@ describe("createClaudeCodeProvider", () => {
     const provider = createTestClaudeCodeProvider({
       accounts: new StickyAccountPool(store),
       baseUrl: "https://example.test",
-      usageRefreshIntervalMs: 1000,
       usageRefresh: async (accessToken) => {
         expect(accessToken).toBe("access-test");
         return {
@@ -561,37 +560,13 @@ describe("createClaudeCodeProvider", () => {
           },
         };
       },
-      fetch: async () =>
-        new Response(JSON.stringify({ id: "msg_test", type: "message" }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        }),
     });
 
-    const response = await provider.handleRequest({
-      request: new Request("http://127.0.0.1:2021/v1/messages", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-code/claude-sonnet-4-5",
-          max_tokens: 1024,
-          messages: [{ role: "user", content: "hello" }],
-        }),
-      }),
-      route: "/v1/messages",
-      sessionKey: "session-a",
-      body: {
-        model: "claude-code/claude-sonnet-4-5",
-        max_tokens: 1024,
-        messages: [{ role: "user", content: "hello" }],
-      },
-      model: "claude-code/claude-sonnet-4-5",
-    });
+    const refreshed = await provider.refreshUsage?.({ account });
 
-    const updated = await store.get(account.id);
-    expect(response.status).toBe(200);
-    expect(updated?.metadata.planTier).toBe("max");
-    expect((updated?.metadata.cachedUsage as { five_hour?: { utilization: number } }).five_hour?.utilization).toBe(15);
+    expect(refreshed?.ok).toBe(true);
+    expect(refreshed?.metadata?.planTier).toBe("max");
+    expect((refreshed?.metadata?.cachedUsage as { five_hour?: { utilization: number } }).five_hour?.utilization).toBe(15);
   });
 
   it("fails over after upstream rate limits an OAuth account", async () => {
@@ -1168,7 +1143,7 @@ describe("createClaudeCodeProvider", () => {
     expect(retryCounts).toEqual(["0", "1", "0"]);
   });
 
-  it("retries without context-1m after long-context subscription errors", async () => {
+  it("retries without long-context betas after subscription errors", async () => {
     const betas: string[] = [];
     const store = new MemoryAccountStore();
     await store.create({
@@ -1201,12 +1176,16 @@ describe("createClaudeCodeProvider", () => {
       },
     });
 
-    const response = await provider.handleRequest(createMessagesContext("session-context-1m"));
+    const response = await provider.handleRequest(
+      createMessagesContext("session-context-haiku", "anthropic/claude-haiku-4-5"),
+    );
 
     expect(response.status).toBe(200);
     expect(betas).toHaveLength(2);
     expect(betas[0]).toContain("context-1m-2025-08-07");
+    expect(betas[0]).toContain("context-management-2025-06-27");
     expect(betas[1]).not.toContain("context-1m-2025-08-07");
+    expect(betas[1]).not.toContain("context-management-2025-06-27");
   });
 
   it("can rotate Claude Code session IDs by max age", async () => {
@@ -1459,13 +1438,13 @@ await new Promise((resolve) => socket.on("close", resolve));
   });
 });
 
-function createMessagesContext(sessionKey: string) {
+function createMessagesContext(sessionKey: string, model = "claude-code/claude-sonnet-4-5") {
   return {
     request: new Request("http://127.0.0.1:2021/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        model: "claude-code/claude-sonnet-4-5",
+        model,
         max_tokens: 1024,
         messages: [{ role: "user", content: "hello" }],
       }),
@@ -1473,10 +1452,10 @@ function createMessagesContext(sessionKey: string) {
     route: "/v1/messages" as const,
     sessionKey,
     body: {
-      model: "claude-code/claude-sonnet-4-5",
+      model,
       max_tokens: 1024,
       messages: [{ role: "user", content: "hello" }],
     },
-    model: "claude-code/claude-sonnet-4-5",
+    model,
   };
 }

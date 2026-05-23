@@ -17,17 +17,23 @@ import {
 } from "@kyoli-gam/core";
 import { WebSocket as WsWebSocket } from "ws";
 import {
+  classifyCodexFailure,
   classifyCodexJsonEventFailure,
   classifyCodexSseStartupFailure,
   CODEX_UNKNOWN_RATE_LIMIT_BACKOFF_MS,
   isCodexStartupOutputEvent,
   isCodexStartupOutputFrame,
+  parseCodexRetryAfterSeconds,
 } from "./failures";
+import { canReplayCodexWebSocketFailure } from "./websocket/replay-policy";
+import { CodexWebSocketTurnRouter, type CodexWebSocketRoutePlan } from "./websocket/turn-router";
+import { readCodexWebSocketTurn } from "./websocket/turn-state";
 
 const CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses";
 const CODEX_WEBSOCKET_ENDPOINT = "wss://chatgpt.com/backend-api/codex/responses";
 const CODEX_COMPACT_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses/compact";
 const CODEX_BACKEND_API_BASE = "https://chatgpt.com/backend-api";
+const CODEX_USAGE_ENDPOINT = "https://chatgpt.com/backend-api/wham/usage";
 const CODEX_TRANSCRIBE_ENDPOINT = "https://chatgpt.com/backend-api/transcribe";
 const DEFAULT_IMAGE_HOST_MODEL = "gpt-5.5";
 const OPENAI_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -39,6 +45,8 @@ const CODEX_USER_AGENT = "codex_cli_rs/0.0.0";
 const TOKEN_EXPIRY_BUFFER_MS = 60_000;
 const TOKEN_REFRESH_TIMEOUT_MS = 30_000;
 const CODEX_STARTUP_PROBE_MAX_BYTES = 64 * 1024;
+const CODEX_WEBSOCKET_REPLAY_MAX_MESSAGES = 64;
+const DEFAULT_COMPACT_REQUEST_BUDGET_MS = 180_000;
 const MAX_CODEX_FILE_SIZE_BYTES = 512 * 1024 * 1024;
 const MAX_CHAT_IMAGE_DATA_URL_BYTES = 8 * 1024 * 1024;
 const STREAM_TEXT_DECODER = new TextDecoder();
@@ -103,6 +111,8 @@ export interface CodexChatGPTProviderOptions {
   compactTimeoutMs?: number;
   compactRequestBudgetMs?: number;
   compactRetryDelayMs?: number;
+  compactMaxConcurrentRequests?: number;
+  usageRefresh?: CodexUsageRefresh;
 }
 
 export { startCodexOAuthLogin, type CodexOAuthTokens } from "./oauth";
@@ -122,6 +132,16 @@ export interface CodexTokenRefreshResult {
 }
 
 type CodexTokenRefresh = (refreshToken: string) => Promise<CodexTokenRefreshResult>;
+type CodexUsageRefresh = (
+  accessToken: string,
+  chatgptAccountId?: string,
+) => Promise<CodexUsageRefreshResult>;
+
+interface CodexUsageRefreshResult {
+  cachedUsage: Record<string, unknown>;
+  cachedUsageAt: number;
+  planTier?: string;
+}
 
 export interface CodexWebSocketLike {
   readyState?: number;
@@ -143,10 +163,12 @@ interface ActiveCodexWebSocket {
 }
 
 interface WebSocketRelayState {
-  active: ActiveCodexWebSocket;
+  active?: ActiveCodexWebSocket;
   context: GatewayWebSocketContext;
   options: CodexChatGPTProviderOptions;
   websocketFactory: CodexWebSocketFactory;
+  turnRouter: CodexWebSocketTurnRouter;
+  routePlan?: CodexWebSocketRoutePlan;
   excludedAccountIds: string[];
   replayableMessages: GatewayWebSocketMessage[];
   upstreamStartupText: string[];
@@ -162,6 +184,10 @@ export function createCodexChatGPTProvider(
 ): ProviderAdapter {
   const fetchImpl = options.fetch ?? fetch;
   const fileAccountById = new Map<string, string>();
+  const websocketTurnRouter = new CodexWebSocketTurnRouter();
+  const usageRefresh = options.usageRefresh ?? ((accessToken: string, chatgptAccountId?: string) =>
+    fetchCodexUsage(accessToken, chatgptAccountId, fetchImpl));
+  const compactAdmission = createLocalAdmission(options.compactMaxConcurrentRequests ?? 0);
 
   return {
     id: "codex",
@@ -183,6 +209,12 @@ export function createCodexChatGPTProvider(
     async listModels() {
       return models;
     },
+    refreshUsage: ({ account }) =>
+      refreshCodexUsageForAccount({
+        account,
+        tokenRefresh: options.tokenRefresh ?? refreshCodexToken,
+        usageRefresh,
+      }),
     async handleRequest(context) {
       if (
         context.route !== "/v1/responses" &&
@@ -230,7 +262,7 @@ export function createCodexChatGPTProvider(
       }
 
       if (context.route === "/v1/responses/compact" || context.route === "/backend-api/codex/responses/compact") {
-        return handleCompactRequest({ context, fetchImpl, options });
+        return handleCompactRequest({ context, fetchImpl, options, compactAdmission });
       }
 
       if (context.route === "/backend-api/files" || context.route === "/backend-api/files/uploaded") {
@@ -295,7 +327,7 @@ export function createCodexChatGPTProvider(
         await context.websocket.close(1008, "Unsupported route");
         return;
       }
-      await handleResponsesWebSocket({ context, options });
+      await handleResponsesWebSocket({ context, options, turnRouter: websocketTurnRouter });
     },
   };
 }
@@ -303,6 +335,7 @@ export function createCodexChatGPTProvider(
 async function handleResponsesWebSocket(input: {
   context: GatewayWebSocketContext;
   options: CodexChatGPTProviderOptions;
+  turnRouter: CodexWebSocketTurnRouter;
 }): Promise<void> {
   const { context, options } = input;
   const websocketFactory = options.webSocketFactory ?? createGlobalWebSocket;
@@ -313,40 +346,11 @@ async function handleResponsesWebSocket(input: {
 
   await context.websocket.accept({ "x-codex-turn-state": turnState });
 
-  const upstreamResult = await openResponsesWebSocketWithFailover({
-    context,
-    options,
-    websocketFactory,
-    traceRequestId,
-    traceModel,
-    excludeAccountIds: excludedAccountIds,
-  });
-
-  if (!upstreamResult.credential) {
-    await sendWebSocketError(
-      context,
-      "missing_oauth_account",
-      "Codex WebSocket requests require a stored codex/oauth account. Add one with kyoli login codex.",
-    );
-    await context.websocket.close(1008, "Missing OAuth account");
-    return;
-  }
-
-  if (!upstreamResult.upstream) {
-    await sendWebSocketError(
-      context,
-      "upstream_unavailable",
-      upstreamResult.error?.message ?? "Codex WebSocket upstream connection failed.",
-    );
-    await context.websocket.close(1011, "Upstream unavailable");
-    return;
-  }
-
   const relayState: WebSocketRelayState = {
-    active: { upstream: upstreamResult.upstream, credential: upstreamResult.credential },
     context,
     options,
     websocketFactory,
+    turnRouter: input.turnRouter,
     excludedAccountIds,
     replayableMessages: [],
     upstreamStartupText: [],
@@ -356,22 +360,76 @@ async function handleResponsesWebSocket(input: {
     traceRequestId,
     traceModel,
   };
-  relayUpstreamMessages(relayState, upstreamResult.upstream, upstreamResult.credential);
 
   while (true) {
     const message = await context.websocket.receive();
     if (message.type === "close") {
-      relayState.active.upstream.close(message.code, message.reason);
+      safeCloseUpstreamWebSocket(relayState.active?.upstream, message.code, message.reason);
       return;
     }
-    if (message.type === "text") {
-      rememberReplayableWebSocketMessage(relayState, message);
-      relayState.active.upstream.send(message.data);
-    } else {
-      rememberReplayableWebSocketMessage(relayState, message);
-      relayState.active.upstream.send(message.data);
+    rememberReplayableWebSocketMessage(relayState, message);
+
+    if (!relayState.active) {
+      const opened = await openInitialResponsesWebSocket(relayState);
+      if (opened.status === "waiting") continue;
+      if (opened.status === "closed") return;
+      replayWebSocketMessages(opened.active.upstream, relayState.replayableMessages);
+      continue;
     }
+    const active = relayState.active;
+    if (!active) return;
+    if (message.type === "text") active.upstream.send(message.data);
+    else active.upstream.send(message.data);
   }
+}
+
+type InitialWebSocketOpenResult =
+  | { status: "waiting" }
+  | { status: "opened"; active: ActiveCodexWebSocket }
+  | { status: "closed" };
+
+async function openInitialResponsesWebSocket(
+  state: WebSocketRelayState,
+): Promise<InitialWebSocketOpenResult> {
+  const routePlan = state.turnRouter.plan(state.replayableMessages);
+  if (!routePlan) return { status: "waiting" };
+  state.routePlan = routePlan;
+
+  const upstreamResult = await openResponsesWebSocketWithFailover({
+    context: state.context,
+    options: state.options,
+    websocketFactory: state.websocketFactory,
+    traceRequestId: state.traceRequestId,
+    traceModel: state.traceModel,
+    excludeAccountIds: state.excludedAccountIds,
+    preferredAccountId: routePlan.preferredAccountId,
+    requirePreferredAccount: routePlan.requirePreferredAccount,
+  });
+
+  if (!upstreamResult.credential) {
+    await sendWebSocketError(
+      state.context,
+      "missing_oauth_account",
+      "Codex WebSocket requests require a stored codex/oauth account. Add one with kyoli login codex.",
+    );
+    await safeCloseDownstreamWebSocket(state.context, 1008, "Missing OAuth account");
+    return { status: "closed" };
+  }
+
+  if (!upstreamResult.upstream) {
+    await sendWebSocketError(
+      state.context,
+      "upstream_unavailable",
+      upstreamResult.error?.message ?? "Codex WebSocket upstream connection failed.",
+    );
+    await safeCloseDownstreamWebSocket(state.context, 1011, "Upstream unavailable");
+    return { status: "closed" };
+  }
+
+  const active = { upstream: upstreamResult.upstream, credential: upstreamResult.credential };
+  state.active = active;
+  relayUpstreamMessages(state, upstreamResult.upstream, upstreamResult.credential);
+  return { status: "opened", active };
 }
 
 async function openResponsesWebSocketWithFailover(input: {
@@ -381,6 +439,8 @@ async function openResponsesWebSocketWithFailover(input: {
   traceRequestId: string;
   traceModel?: string;
   excludeAccountIds?: string[];
+  preferredAccountId?: string;
+  requirePreferredAccount?: boolean;
 }): Promise<{
   credential?: CodexCredential;
   upstream?: CodexWebSocketLike;
@@ -396,6 +456,7 @@ async function openResponsesWebSocketWithFailover(input: {
       accounts: input.options.accounts,
       sessionKey: input.context.sessionKey,
       excludeAccountIds: excludedAccountIds,
+      preferredAccountId: input.preferredAccountId,
       tokenRefresh: input.options.tokenRefresh ?? refreshCodexToken,
     }).catch((error) => {
       if (error instanceof CredentialUnavailableError) {
@@ -429,6 +490,16 @@ async function openResponsesWebSocketWithFailover(input: {
         model: input.traceModel,
       });
       return {};
+    }
+    if (
+      input.requirePreferredAccount &&
+      input.preferredAccountId &&
+      credential.accountId !== input.preferredAccountId
+    ) {
+      return {
+        credential,
+        error: new Error("Previous response owner account is unavailable; retry later."),
+      };
     }
 
     lastCredential = credential;
@@ -472,7 +543,7 @@ async function openResponsesWebSocketWithFailover(input: {
       });
       return { credential, upstream };
     } catch (error) {
-      upstream.close();
+      safeCloseUpstreamWebSocket(upstream);
       lastError = error instanceof Error ? error : new Error(String(error));
       if (!credential.accountId) return { credential, error: lastError };
       await input.options.accounts?.recordFailure(credential.accountId, {
@@ -649,10 +720,27 @@ async function handleCompactRequest(input: {
   context: Parameters<ProviderAdapter["handleRequest"]>[0];
   fetchImpl: typeof fetch;
   options: CodexChatGPTProviderOptions;
+  compactAdmission: { acquire(): (() => void) | undefined };
+}): Promise<Response> {
+  const releaseAdmission = input.compactAdmission.acquire();
+  if (!releaseAdmission) return compactLocalOverloadResponse();
+
+  try {
+    return await handleAdmittedCompactRequest(input);
+  } finally {
+    releaseAdmission();
+  }
+}
+
+async function handleAdmittedCompactRequest(input: {
+  context: Parameters<ProviderAdapter["handleRequest"]>[0];
+  fetchImpl: typeof fetch;
+  options: CodexChatGPTProviderOptions;
 }): Promise<Response> {
   const body = rewriteCompactBody(input.context.body);
   const bodyText = JSON.stringify(body);
-  const budgetMs = input.options.compactRequestBudgetMs ?? input.options.compactTimeoutMs ?? 75_000;
+  const budgetMs = input.options.compactRequestBudgetMs ?? DEFAULT_COMPACT_REQUEST_BUDGET_MS;
+  const upstreamTimeoutMs = readPositiveMs(input.options.compactTimeoutMs);
   const deadline = Date.now() + Math.max(1, budgetMs);
   return executeWithAccountFailover({
     provider: "codex",
@@ -687,10 +775,14 @@ async function handleCompactRequest(input: {
           credential: selected as CodexCredential,
           bodyText,
           deadline,
+          upstreamTimeoutMs,
         });
 
       let currentCredential = credential;
       let response = await postCompact(currentCredential);
+      if (await isCompactBudgetExhaustedResponse(response)) {
+        return compactBudgetExhaustedResult(response);
+      }
       if (response.status === 401 && currentCredential.accountId) {
         const refreshed = await refreshOAuthCredentialForAccount({
           accounts: input.options.accounts,
@@ -700,11 +792,23 @@ async function handleCompactRequest(input: {
         if (refreshed) {
           currentCredential = refreshed;
           response = await postCompact(currentCredential);
+          if (await isCompactBudgetExhaustedResponse(response)) {
+            return compactBudgetExhaustedResult(response);
+          }
         }
       }
       if (!isRetryableCompactStatus(response.status)) return response;
       await sleep(input.options.compactRetryDelayMs ?? 250);
-      return postCompact(currentCredential);
+      response = await postCompact(currentCredential);
+      if (await isCompactBudgetExhaustedResponse(response)) {
+        return compactBudgetExhaustedResult(response);
+      }
+      if (!isRetryableCompactStatus(response.status)) return response;
+      return {
+        response,
+        downstreamVisible: false,
+        failure: await compactRetryExhaustedFailure(response),
+      };
     },
     failureMessage: (status) => `Codex compact upstream returned ${status}`,
     readRateLimitResetAt: readCodexRateLimitResetAt,
@@ -722,33 +826,185 @@ async function postCompactRequest(input: {
   credential: CodexCredential;
   bodyText: string;
   deadline: number;
+  upstreamTimeoutMs?: number;
 }): Promise<Response> {
   const remainingMs = input.deadline - Date.now();
   if (remainingMs <= 0) {
-    return jsonResponse(
-      {
-        error: {
-          type: "upstream_timeout",
-          message: "Codex compact request budget was exhausted before upstream completed.",
-          retryable: true,
-        },
-      },
-      { status: 504 },
+    return compactBudgetExhaustedResponse();
+  }
+
+  try {
+    const response = await input.fetchImpl(CODEX_COMPACT_ENDPOINT, {
+      method: input.context.request.method,
+      headers: buildUpstreamHeaders(
+        input.context.request.headers,
+        input.credential.value,
+        input.credential.chatgptAccountId,
+        { bridge: input.context.route.startsWith("/v1/") },
+      ),
+      body: input.bodyText,
+      signal: createCompactAbortSignal(input.upstreamTimeoutMs, remainingMs),
+      duplex: "half",
+    } as RequestInit);
+    return await normalizeCompactUpstreamResponse(response, input.deadline, input.upstreamTimeoutMs);
+  } catch (error) {
+    return compactTransientResponse(
+      error instanceof DOMException && error.name === "AbortError" ? 504 : 502,
+      error instanceof Error ? error.message : "Codex compact upstream request failed.",
+    );
+  }
+}
+
+async function normalizeCompactUpstreamResponse(
+  response: Response,
+  deadline: number,
+  upstreamTimeoutMs: number | undefined,
+): Promise<Response> {
+  const remainingMs = deadline - Date.now();
+  if (remainingMs <= 0) return compactBudgetExhaustedResponse();
+
+  let bodyText: string;
+  try {
+    bodyText = upstreamTimeoutMs
+      ? await withTimeout(
+        response.text(),
+        Math.min(upstreamTimeoutMs, remainingMs),
+        () => new Error("Codex compact upstream response body read timed out."),
+      )
+      : await response.text();
+  } catch (error) {
+    return compactTransientResponse(
+      error instanceof Error && error.name === "AbortError" ? 504 : 502,
+      error instanceof Error ? error.message : "Codex compact upstream response body could not be read.",
     );
   }
 
-  return input.fetchImpl(CODEX_COMPACT_ENDPOINT, {
-    method: input.context.request.method,
-    headers: buildUpstreamHeaders(
-      input.context.request.headers,
-      input.credential.value,
-      input.credential.chatgptAccountId,
-      { bridge: input.context.route.startsWith("/v1/") },
-    ),
-    body: input.bodyText,
-    signal: AbortSignal.timeout(Math.max(1, remainingMs)),
-    duplex: "half",
-  } as RequestInit);
+  const payload = readJsonRecordValue(bodyText);
+  if (isCompactPreviousResponseNotFound(payload)) {
+    return jsonResponse(
+      {
+        error: {
+          type: "invalid_request_error",
+          code: "previous_response_not_found",
+          message:
+            "Previous response is unavailable for compact. Retry without previous_response_id or start a fresh compact request.",
+          param: "previous_response_id",
+        },
+      },
+      { status: 400 },
+    );
+  }
+
+  return new Response(bodyText, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: filterCompactResponseHeaders(response.headers),
+  });
+}
+
+function compactBudgetExhaustedResponse(): Response {
+  return jsonResponse(
+    {
+      error: {
+        type: "upstream_unavailable",
+        code: "upstream_unavailable",
+        message: "Proxy request budget exhausted",
+        retryable: false,
+      },
+    },
+    { status: 502 },
+  );
+}
+
+function compactBudgetExhaustedResult(response: Response): AccountExecutionResult {
+  return {
+    response,
+    downstreamVisible: false,
+    failure: {
+      class: "neutral",
+      phase: "terminal",
+      code: "upstream_unavailable",
+      message: "Proxy request budget exhausted",
+      httpStatus: response.status,
+      retryScope: "none",
+      metadata: { compactBudgetExhausted: true },
+    },
+  };
+}
+
+async function isCompactBudgetExhaustedResponse(response: Response): Promise<boolean> {
+  if (response.status !== 502 && response.status !== 504) return false;
+  const payload = await readJsonRecord(response.clone());
+  const error = readRecord(payload?.error);
+  const code = readString(error?.code) ?? readString(error?.type) ?? readString(payload?.code);
+  const message = readString(error?.message) ?? readString(payload?.message);
+  return code === "compact_budget_exhausted" ||
+    (code === "upstream_unavailable" && message === "Proxy request budget exhausted");
+}
+
+function createCompactAbortSignal(
+  upstreamTimeoutMs: number | undefined,
+  remainingBudgetMs: number,
+): AbortSignal | undefined {
+  if (!upstreamTimeoutMs) return undefined;
+  return AbortSignal.timeout(Math.max(1, Math.min(upstreamTimeoutMs, remainingBudgetMs)));
+}
+
+function readPositiveMs(value: number | undefined): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined;
+}
+
+function compactTransientResponse(status: 502 | 504, message: string): Response {
+  return jsonResponse(
+    {
+      error: {
+        type: status === 504 ? "upstream_timeout" : "upstream_unavailable",
+        code: status === 504 ? "upstream_timeout" : "upstream_unavailable",
+        message: message || "Codex compact upstream request failed.",
+        retryable: true,
+      },
+    },
+    { status },
+  );
+}
+
+function filterCompactResponseHeaders(headers: Headers): Headers {
+  const filtered = new Headers(headers);
+  filtered.delete("content-encoding");
+  filtered.delete("content-length");
+  filtered.delete("transfer-encoding");
+  filtered.delete("connection");
+  return filtered;
+}
+
+function isCompactPreviousResponseNotFound(payload: Record<string, unknown> | undefined): boolean {
+  const error = readRecord(payload?.error);
+  const code = readString(error?.code) ?? readString(error?.type) ?? readString(payload?.code);
+  const param = readString(error?.param) ?? readString(payload?.param);
+  const message = readString(error?.message) ?? readString(payload?.message) ?? "";
+  const normalized = `${code ?? ""} ${param ?? ""} ${message}`.toLowerCase();
+  return normalized.includes("previous_response_not_found") ||
+    (normalized.includes("previous_response") && normalized.includes("not found"));
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, createError: () => Error): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const error = createError();
+      error.name = "AbortError";
+      reject(error);
+    }, Math.max(1, timeoutMs));
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }
 
 async function fetchCodexJsonWithAuthRefresh(input: {
@@ -1011,6 +1267,82 @@ function isRetryableCompactStatus(status: number): boolean {
   return status === 500 || status === 502 || status === 503 || status === 504;
 }
 
+function createLocalAdmission(maxConcurrentRequests: number): { acquire(): (() => void) | undefined } {
+  const max = Math.max(0, Math.floor(maxConcurrentRequests));
+  let active = 0;
+
+  return {
+    acquire() {
+      if (max === 0) return () => undefined;
+      if (active >= max) return undefined;
+
+      active += 1;
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        active = Math.max(0, active - 1);
+      };
+    },
+  };
+}
+
+function compactLocalOverloadResponse(): Response {
+  return jsonResponse(
+    {
+      error: {
+        type: "local_overload",
+        message: "Codex compact requests are temporarily overloaded. Retry shortly or raise compactMaxConcurrentRequests.",
+        retryable: true,
+      },
+    },
+    { status: 429, headers: { "retry-after": "1" } },
+  );
+}
+
+async function compactRetryExhaustedFailure(response: Response): Promise<AccountFailureSignal> {
+  const payload = await readJsonRecord(response.clone());
+  const error = readRecord(payload?.error);
+  const code = readString(error?.code) ??
+    readString(error?.type) ??
+    readString(payload?.code) ??
+    (response.status >= 500 ? "server_error" : `http_${response.status}`);
+  const message = readString(error?.message) ??
+    readString(payload?.message) ??
+    `Codex compact upstream returned ${response.status}`;
+  const failureClass = classifyCodexFailure(code, message);
+  const retryAfterSeconds = readHeaderRetryAfterSeconds(response.headers) ?? parseCodexRetryAfterSeconds(message);
+  const resetAt = failureClass === "rate_limit" || failureClass === "quota"
+    ? readCodexRateLimitResetAt(response.headers)
+    : undefined;
+
+  return {
+    class: failureClass,
+    phase: "terminal",
+    code,
+    message,
+    httpStatus: response.status,
+    retryAfterSeconds,
+    resetAt,
+    retryScope: failureClass === "neutral" || failureClass === "permanent" ? "none" : "next_account",
+    metadata: {
+      compactRetryExhausted: true,
+      upstreamStatus: response.status,
+    },
+  };
+}
+
+function readHeaderRetryAfterSeconds(headers: Headers): number | undefined {
+  const value = headers.get("retry-after");
+  if (!value) return undefined;
+  const seconds = Number.parseFloat(value);
+  if (Number.isFinite(seconds) && seconds > 0) return seconds;
+  const dateMs = new Date(value).getTime();
+  if (!Number.isFinite(dateMs)) return undefined;
+  const secondsUntil = Math.ceil((dateMs - Date.now()) / 1000);
+  return secondsUntil > 0 ? secondsUntil : undefined;
+}
+
 async function buildImageResponsesRequest(
   context: Parameters<ProviderAdapter["handleRequest"]>[0],
 ): Promise<{ ok: true; value: Record<string, unknown> } | { ok: false; response: Response }> {
@@ -1132,13 +1464,25 @@ async function readOAuthCredential(input: {
   preferredAccountId?: string;
   tokenRefresh: CodexTokenRefresh;
 }): Promise<CodexCredential | undefined> {
-  const account = await input.accounts?.select({
-    provider: "codex",
-    kind: "oauth",
-    sessionKey: input.sessionKey,
-    excludeAccountIds: input.excludeAccountIds,
-    preferredAccountId: input.preferredAccountId,
-  });
+  const selection = input.accounts?.selectWithDiagnostics
+    ? await input.accounts.selectWithDiagnostics({
+      provider: "codex",
+      kind: "oauth",
+      sessionKey: input.sessionKey,
+      excludeAccountIds: input.excludeAccountIds,
+      preferredAccountId: input.preferredAccountId,
+    })
+    : {
+      account: await input.accounts?.select({
+        provider: "codex",
+        kind: "oauth",
+        sessionKey: input.sessionKey,
+        excludeAccountIds: input.excludeAccountIds,
+        preferredAccountId: input.preferredAccountId,
+      }),
+      diagnostics: undefined,
+    };
+  const account = selection?.account;
   if (!account) return undefined;
 
   const refreshToken = readString(account.credentials.refreshToken);
@@ -1153,8 +1497,7 @@ async function readOAuthCredential(input: {
 
     const refreshed = await input.tokenRefresh(refreshToken).catch(async (error) => {
       await input.accounts?.recordFailure(account.id, {
-        status: 401,
-        message: error instanceof Error ? error.message : String(error),
+        ...codexOAuthRefreshFailureInput(error),
         reauthRequiredReason: "Codex OAuth token refresh failed",
       });
       throw new CredentialUnavailableError("Codex OAuth token refresh failed", account.id);
@@ -1184,6 +1527,7 @@ async function readOAuthCredential(input: {
     value: accessToken,
     accountId: account.id,
     chatgptAccountId,
+    selectionDiagnostics: selection?.diagnostics as Record<string, unknown> | undefined,
   };
 }
 
@@ -1201,8 +1545,7 @@ async function refreshOAuthCredentialForAccount(input: {
 
   const refreshed = await input.tokenRefresh(refreshToken).catch(async (error) => {
     await input.accounts?.recordFailure(account.id, {
-      status: 401,
-      message: error instanceof Error ? error.message : String(error),
+      ...codexOAuthRefreshFailureInput(error),
       reauthRequiredReason: "Codex OAuth token refresh failed",
     });
     return undefined;
@@ -1233,6 +1576,216 @@ async function refreshOAuthCredentialForAccount(input: {
   };
 }
 
+async function refreshCodexUsageForAccount(input: {
+  account: import("@kyoli-gam/core").AccountRecord;
+  tokenRefresh: CodexTokenRefresh;
+  usageRefresh: CodexUsageRefresh;
+}): Promise<import("@kyoli-gam/core").ProviderUsageRefreshResult> {
+  const refreshToken = readString(input.account.credentials.refreshToken);
+  let accessToken = readString(input.account.credentials.accessToken);
+  let expiresAt = readNumber(input.account.credentials.expiresAt);
+  let chatgptAccountId = readString(input.account.credentials.accountId) ??
+    readString(input.account.metadata.accountId);
+  let credentials = input.account.credentials;
+  let metadata = input.account.metadata;
+
+  if (!accessToken || !expiresAt || expiresAt <= Date.now() + TOKEN_EXPIRY_BUFFER_MS) {
+    if (!refreshToken) {
+      return {
+        ok: false,
+        status: 401,
+        message: "Codex account has no refresh token for usage refresh.",
+        reauthRequiredReason: "Codex OAuth token refresh failed",
+      };
+    }
+
+    const refreshed = await input.tokenRefresh(refreshToken).catch((error) => ({
+      error: codexOAuthRefreshFailureInput(error),
+    }));
+    if ("error" in refreshed) {
+      return {
+        ok: false,
+        status: refreshed.error.status,
+        message: refreshed.error.message,
+        reauthRequiredReason: "Codex OAuth token refresh failed",
+      };
+    }
+
+    accessToken = refreshed.accessToken;
+    expiresAt = refreshed.expiresAt;
+    chatgptAccountId = refreshed.accountId ?? chatgptAccountId;
+    credentials = {
+      ...credentials,
+      accessToken,
+      expiresAt,
+      refreshToken: refreshed.refreshToken ?? refreshToken,
+      accountId: chatgptAccountId,
+    };
+    metadata = {
+      ...metadata,
+      email: refreshed.email ?? metadata.email,
+      accountId: refreshed.accountId ?? metadata.accountId,
+      planTier: refreshed.planTier ?? metadata.planTier,
+    };
+  }
+
+  if (!accessToken) {
+    return {
+      ok: false,
+      status: 401,
+      message: "Codex account has no access token for usage refresh.",
+      reauthRequiredReason: "Codex OAuth token refresh failed",
+    };
+  }
+
+  let usage = await input.usageRefresh(accessToken, chatgptAccountId).catch((error) => ({
+    error: error instanceof CodexUsageFetchError ? error : new CodexUsageFetchError(0, error instanceof Error ? error.message : String(error)),
+  }));
+  if ("error" in usage && usage.error.status === 401 && refreshToken) {
+    const refreshed = await input.tokenRefresh(refreshToken).catch((error) => ({
+      error: codexOAuthRefreshFailureInput(error),
+    }));
+    if (!("error" in refreshed)) {
+      accessToken = refreshed.accessToken;
+      chatgptAccountId = refreshed.accountId ?? chatgptAccountId;
+      credentials = {
+        ...credentials,
+        accessToken,
+        expiresAt: refreshed.expiresAt,
+        refreshToken: refreshed.refreshToken ?? refreshToken,
+        accountId: chatgptAccountId,
+      };
+      metadata = {
+        ...metadata,
+        email: refreshed.email ?? metadata.email,
+        accountId: refreshed.accountId ?? metadata.accountId,
+        planTier: refreshed.planTier ?? metadata.planTier,
+      };
+      usage = await input.usageRefresh(accessToken, chatgptAccountId).catch((error) => ({
+        error: error instanceof CodexUsageFetchError ? error : new CodexUsageFetchError(0, error instanceof Error ? error.message : String(error)),
+      }));
+    }
+  }
+
+  if ("error" in usage) {
+    return {
+      ok: false,
+      status: usage.error.status,
+      message: usage.error.message,
+      reauthRequiredReason: isPermanentCodexUsageAuthFailure(usage.error)
+        ? "Codex usage refresh failed"
+        : undefined,
+    };
+  }
+
+  return {
+    ok: true,
+    credentials,
+    metadata: {
+      ...metadata,
+      planTier: usage.planTier ?? metadata.planTier,
+      cachedUsage: usage.cachedUsage,
+      cachedUsageAt: usage.cachedUsageAt,
+    },
+  };
+}
+
+class CodexUsageFetchError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "CodexUsageFetchError";
+  }
+}
+
+async function fetchCodexUsage(
+  accessToken: string,
+  chatgptAccountId: string | undefined,
+  fetchImpl: typeof fetch,
+): Promise<CodexUsageRefreshResult> {
+  const headers: Record<string, string> = {
+    accept: "application/json",
+    authorization: `Bearer ${accessToken}`,
+    "user-agent": CODEX_USER_AGENT,
+  };
+  if (chatgptAccountId) headers["ChatGPT-Account-Id"] = chatgptAccountId;
+
+  const response = await fetchImpl(CODEX_USAGE_ENDPOINT, { headers });
+  const payload = await response.json().catch(() => undefined);
+  if (!response.ok) {
+    throw new CodexUsageFetchError(response.status, readCodexUsageError(payload) ?? `Codex usage refresh failed with ${response.status}`);
+  }
+
+  const usage = mapCodexUsagePayload(payload);
+  if (!usage) {
+    throw new CodexUsageFetchError(502, "Codex usage refresh returned an invalid payload.");
+  }
+  return usage;
+}
+
+function mapCodexUsagePayload(payload: unknown): CodexUsageRefreshResult | undefined {
+  const record = readRecord(payload);
+  const rateLimit = readRecord(record?.rate_limit);
+  if (!record) return undefined;
+
+  return {
+    cachedUsage: {
+      five_hour: mapCodexUsageWindow(rateLimit?.primary_window),
+      seven_day: mapCodexUsageWindow(rateLimit?.secondary_window),
+      seven_day_sonnet: null,
+      credits: mapCodexUsageCredits(record.credits),
+    },
+    cachedUsageAt: Date.now(),
+    planTier: normalizePlanTier(readString(record.plan_type)) ?? undefined,
+  };
+}
+
+function mapCodexUsageWindow(value: unknown): Record<string, unknown> | null {
+  const window = readRecord(value);
+  if (!window) return null;
+  const utilization = readOptionalNumber(window.used_percent);
+  if (utilization === undefined) return null;
+  return {
+    utilization,
+    resets_at: readUsageResetAt(window),
+  };
+}
+
+function mapCodexUsageCredits(value: unknown): Record<string, unknown> | undefined {
+  const credits = readRecord(value);
+  if (!credits) return undefined;
+  return {
+    has_credits: credits.has_credits ?? credits.hasCredits,
+    unlimited: credits.unlimited,
+    balance: credits.balance,
+  };
+}
+
+function readUsageResetAt(window: Record<string, unknown>): string | null {
+  const resetAt = readOptionalNumber(window.reset_at ?? window.resetAt);
+  if (resetAt !== undefined) {
+    return new Date(resetAt * 1000).toISOString();
+  }
+  const resetAfterSeconds = readOptionalNumber(window.reset_after_seconds ?? window.resetAfterSeconds);
+  if (resetAfterSeconds !== undefined) {
+    return new Date(Date.now() + resetAfterSeconds * 1000).toISOString();
+  }
+  return null;
+}
+
+function readCodexUsageError(payload: unknown): string | undefined {
+  const record = readRecord(payload);
+  const error = readRecord(record?.error);
+  return readString(error?.message) ?? readString(record?.message);
+}
+
+function isPermanentCodexUsageAuthFailure(error: CodexUsageFetchError): boolean {
+  return error.status === 402 || error.status === 404 ||
+    (error.status === 401 && error.message.toLowerCase().includes("deactivated"));
+}
+
 export async function refreshCodexOAuthToken(refreshToken: string): Promise<CodexTokenRefreshResult> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), TOKEN_REFRESH_TIMEOUT_MS);
@@ -1254,7 +1807,7 @@ export async function refreshCodexOAuthToken(refreshToken: string): Promise<Code
     if (!response.ok) {
       const payload = await response.json().catch(() => undefined);
       const message = readOAuthErrorMessage(payload) ?? `Codex token refresh failed with ${response.status}`;
-      throw new Error(message);
+      throw createCodexOAuthRefreshError(message, response.status, readOAuthErrorCode(payload));
     }
 
     const payload = (await response.json()) as Record<string, unknown>;
@@ -1278,6 +1831,24 @@ export async function refreshCodexOAuthToken(refreshToken: string): Promise<Code
 }
 
 const refreshCodexToken = refreshCodexOAuthToken;
+
+function codexOAuthRefreshFailureInput(error: unknown): {
+  status: number;
+  message: string;
+  failureCode: string;
+} {
+  return {
+    status: readErrorStatus(error) ?? 401,
+    message: error instanceof Error ? error.message : String(error),
+    failureCode: readErrorCode(error) ?? "oauth_refresh_failed",
+  };
+}
+
+function createCodexOAuthRefreshError(message: string, status: number, code: string | undefined): Error {
+  const error = new Error(message);
+  Object.assign(error, { status, code });
+  return error;
+}
 
 async function fetchCodexFile(input: {
   fetchImpl: typeof fetch;
@@ -1753,6 +2324,7 @@ async function convertResponsesStreamToResponsePayload(
   let status = "completed";
 
   for (const frame of splitSseFrames(responseText)) {
+    const event = readSseEvent(frame);
     const data = readSseData(frame);
     if (!data || data === "[DONE]") continue;
 
@@ -1764,8 +2336,9 @@ async function convertResponsesStreamToResponsePayload(
     }
     if (!payload) continue;
 
-    const payloadType = readString(payload.type);
     const delta = readString(payload.delta);
+    const payloadType = readString(payload.type) ?? event ??
+      (delta ? "response.output_text.delta" : undefined);
     if (delta && payloadType === "response.output_text.delta") outputTextParts.push(delta);
 
     const outputIndex = readNumber(payload.output_index);
@@ -1881,8 +2454,9 @@ function convertResponsesSseFrame(
     }
   }
 
-  const payloadType = readString(payload.type);
   const delta = readString(payload.delta);
+  const payloadType = readString(payload.type) ?? event ??
+    (delta ? "response.output_text.delta" : undefined);
   if (delta && payloadType === "response.output_text.delta") {
     outputs.push(createChatCompletionChunk({
         ...chunkBase,
@@ -2871,7 +3445,7 @@ function relayUpstreamMessages(
   credential: CodexCredential,
 ): void {
   upstream.addEventListener("message", (event) => {
-    if (state.active.upstream !== upstream) return;
+    if (state.active?.upstream !== upstream) return;
     const data = readWebSocketEventData(event);
     if (typeof data === "string") {
       void handleUpstreamWebSocketText(state, upstream, credential, data);
@@ -2883,17 +3457,17 @@ function relayUpstreamMessages(
   });
   upstream.addEventListener("close", (event) => {
     if (state.retiredUpstreams.has(upstream)) return;
-    if (state.active.upstream !== upstream) return;
+    if (state.active?.upstream !== upstream) return;
     const record = readRecord(event);
     const code = readNumber(record?.code) ?? 1000;
     const reason = readString(record?.reason) ?? "Upstream closed";
-    void state.context.websocket.close(code, reason);
+    void safeCloseDownstreamWebSocket(state.context, code, reason, 1011);
   });
   upstream.addEventListener("error", (event) => {
     if (state.retiredUpstreams.has(upstream)) return;
-    if (state.active.upstream !== upstream) return;
+    if (state.active?.upstream !== upstream) return;
     void sendWebSocketError(state.context, "upstream_error", readWebSocketError(event).message)
-      .finally(() => state.context.websocket.close(1011, "Upstream error"));
+      .finally(() => safeCloseDownstreamWebSocket(state.context, 1011, "Upstream error"));
   });
 }
 
@@ -2908,6 +3482,7 @@ async function handleUpstreamWebSocketText(
   if (failure && credential.accountId) {
     await recordCodexAccountFailure(state.options.accounts, credential.accountId, failure);
   }
+  state.turnRouter.rememberCompletedResponse(payload, credential.accountId);
 
   if (await tryReplayWebSocketFailure(state, upstream, credential, failure)) return;
 
@@ -2933,7 +3508,7 @@ async function tryReplayWebSocketFailure(
   state.excludedAccountIds.push(accountId);
   state.retiredUpstreams.add(upstream);
   state.upstreamStartupText = [];
-  upstream.close(1011, "Retrying with next account");
+  safeCloseUpstreamWebSocket(upstream, 1011, "Retrying with next account");
 
   const next = await openResponsesWebSocketWithFailover({
     context: state.context,
@@ -2942,6 +3517,8 @@ async function tryReplayWebSocketFailure(
     traceRequestId: state.traceRequestId,
     traceModel: state.traceModel,
     excludeAccountIds: state.excludedAccountIds,
+    preferredAccountId: state.routePlan?.preferredAccountId,
+    requirePreferredAccount: state.routePlan?.requirePreferredAccount,
   });
   if (!next.upstream || !next.credential) return false;
 
@@ -2956,14 +3533,15 @@ function canReplayWebSocketFailure(
   credential: CodexCredential,
   failure: AccountFailureSignal | undefined,
 ): boolean {
-  if (!failure || failure.retryScope !== "next_account") return false;
-  if (state.downstreamVisible) return false;
-  if (!credential.accountId) return false;
-  if (state.replayableMessages.length === 0) return false;
-  if (hasPreviousResponseAnchor(state.replayableMessages)) return false;
-
-  const maxReplayAttempts = Math.max(1, state.options.maxAccountAttempts ?? 10) - 1;
-  return state.replayAttempts < maxReplayAttempts;
+  return canReplayCodexWebSocketFailure({
+    failure,
+    downstreamVisible: state.downstreamVisible,
+    hasCredentialAccount: credential.accountId !== undefined,
+    replayableMessages: state.replayableMessages,
+    replayAttempts: state.replayAttempts,
+    maxAccountAttempts: state.options.maxAccountAttempts ?? 10,
+    allowCrossAccountReplay: state.routePlan?.allowCrossAccountReplay ?? false,
+  });
 }
 
 function replayWebSocketMessages(
@@ -3015,7 +3593,9 @@ function rememberReplayableWebSocketMessage(
   updateWebSocketTraceModelFromMessage(state, message);
   if (state.downstreamVisible || message.type === "close") return;
   state.replayableMessages.push(message);
-  if (state.replayableMessages.length > 8) state.replayableMessages.shift();
+  while (state.replayableMessages.length > CODEX_WEBSOCKET_REPLAY_MAX_MESSAGES) {
+    state.replayableMessages.shift();
+  }
 }
 
 function updateWebSocketTraceModelFromMessage(
@@ -3023,7 +3603,7 @@ function updateWebSocketTraceModelFromMessage(
   message: GatewayWebSocketMessage,
 ): void {
   if (state.traceModel || message.type !== "text") return;
-  const model = readWebSocketPayloadModel(readJsonRecordFromString(message.data));
+  const model = readCodexWebSocketTurn(message)?.model;
   if (!model) return;
 
   state.traceModel = model;
@@ -3033,18 +3613,12 @@ function updateWebSocketTraceModelFromMessage(
     provider: "codex",
     kind: "oauth",
     sessionKey: state.context.sessionKey,
-    accountId: state.active.credential.accountId,
+    accountId: state.active?.credential.accountId,
     route: state.context.route,
     model,
-    message: "WebSocket response.create model discovered after account selection.",
-  });
-}
-
-function hasPreviousResponseAnchor(messages: GatewayWebSocketMessage[]): boolean {
-  return messages.some((message) => {
-    if (message.type !== "text") return false;
-    const payload = readJsonRecordFromString(message.data);
-    return typeof payload?.previous_response_id === "string" && payload.previous_response_id.length > 0;
+    message: state.active
+      ? "WebSocket response.create model discovered after account selection."
+      : "WebSocket response.create model discovered before account selection.",
   });
 }
 
@@ -3096,6 +3670,53 @@ async function sendWebSocketError(
       message,
     },
   }));
+}
+
+function safeCloseUpstreamWebSocket(
+  upstream: CodexWebSocketLike | undefined,
+  code?: number,
+  reason?: string,
+  fallbackCode = 1000,
+): void {
+  if (!upstream) return;
+  try {
+    upstream.close(normalizeWebSocketCloseCode(code, fallbackCode), normalizeWebSocketCloseReason(reason));
+  } catch {
+    // The upstream socket is already closing or rejected an invalid peer close frame.
+  }
+}
+
+async function safeCloseDownstreamWebSocket(
+  context: GatewayWebSocketContext,
+  code?: number,
+  reason?: string,
+  fallbackCode = 1000,
+): Promise<void> {
+  try {
+    await context.websocket.close(normalizeWebSocketCloseCode(code, fallbackCode), normalizeWebSocketCloseReason(reason));
+  } catch {
+    // Downstream disconnects are best-effort during relay shutdown.
+  }
+}
+
+function normalizeWebSocketCloseCode(code: unknown, fallbackCode: number): number {
+  if (isValidWebSocketCloseCode(code)) return code;
+  return isValidWebSocketCloseCode(fallbackCode) ? fallbackCode : 1000;
+}
+
+function isValidWebSocketCloseCode(code: unknown): code is number {
+  if (typeof code !== "number" || !Number.isInteger(code)) return false;
+  return (
+    (code >= 1000 && code <= 1014 && code !== 1004 && code !== 1005 && code !== 1006) ||
+    (code >= 3000 && code <= 4999)
+  );
+}
+
+function normalizeWebSocketCloseReason(reason: unknown): string {
+  const value = typeof reason === "string" ? reason : "";
+  const bytes = Buffer.from(value);
+  if (bytes.byteLength <= 123) return value;
+  return bytes.subarray(0, 123).toString("utf8").replace(/\uFFFD$/, "");
 }
 
 function readWebSocketEventData(event: unknown): string | Uint8Array | undefined {
@@ -3155,6 +3776,13 @@ function readString(value: unknown): string | undefined {
 
 function readNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function readOptionalNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value !== "string") return undefined;
+  const parsed = Number(value.trim());
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function readRecord(value: unknown): Record<string, unknown> | undefined {
@@ -3265,6 +3893,21 @@ function readOAuthErrorMessage(value: unknown): string | undefined {
   const error = readString(record.error);
   if (description && error) return `${error}: ${description}`;
   return description ?? error;
+}
+
+function readOAuthErrorCode(value: unknown): string | undefined {
+  const record = readRecord(value);
+  return readString(record?.error);
+}
+
+function readErrorStatus(value: unknown): number | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  return readOptionalNumber((value as { status?: unknown }).status);
+}
+
+function readErrorCode(value: unknown): string | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  return readString((value as { code?: unknown }).code);
 }
 
 function base64UrlDecode(value: string): string {

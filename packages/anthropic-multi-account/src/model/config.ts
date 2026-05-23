@@ -21,7 +21,7 @@ function splitBetaFlags(value: string): string[] {
 
 export const config: ModelConfig = {
   baseBetas: splitBetaFlags(ANTHROPIC_OAUTH_ADAPTER.requestBetaHeader),
-  longContextBetas: ["context-1m-2025-08-07", "interleaved-thinking-2025-05-14"],
+  longContextBetas: ["context-1m-2025-08-07", "context-management-2025-06-27"],
   modelOverrides: {
     "4-6": {
       add: ["effort-2025-11-24"],

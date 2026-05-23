@@ -320,7 +320,9 @@ describe("runtime-factory", () => {
       const firstHeaders = toHeaders(fetchMock.mock.calls[0]?.[1]?.headers);
       const secondHeaders = toHeaders(fetchMock.mock.calls[1]?.[1]?.headers);
       expect(firstHeaders.get("anthropic-beta")).toContain("context-1m-2025-08-07");
+      expect(firstHeaders.get("anthropic-beta")).toContain("context-management-2025-06-27");
       expect(secondHeaders.get("anthropic-beta")).not.toContain("context-1m-2025-08-07");
+      expect(secondHeaders.get("anthropic-beta")).not.toContain("context-management-2025-06-27");
     } finally {
       delete process.env.ANTHROPIC_ENABLE_1M_CONTEXT;
     }
@@ -429,6 +431,33 @@ describe("runtime-factory", () => {
     }
   });
 
+  test("retries without template long-context betas for non-1m models", async () => {
+    const uuid = await seedAccount();
+    const factory = new AccountRuntimeFactory(store, client);
+    const runtime = await factory.getRuntime(uuid);
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: "long context beta is not yet available" } }), { status: 400 }))
+      .mockResolvedValueOnce(new Response("ok"));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await runtime.fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({ model: "claude-haiku-4-5", messages: [] }),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    const firstHeaders = toHeaders(fetchMock.mock.calls[0]?.[1]?.headers);
+    const secondHeaders = toHeaders(fetchMock.mock.calls[1]?.[1]?.headers);
+    expect(firstHeaders.get("anthropic-beta")).toContain("context-1m-2025-08-07");
+    expect(firstHeaders.get("anthropic-beta")).toContain("context-management-2025-06-27");
+    expect(secondHeaders.get("anthropic-beta")).not.toContain("context-1m-2025-08-07");
+    expect(secondHeaders.get("anthropic-beta")).not.toContain("context-management-2025-06-27");
+    expect(secondHeaders.get("anthropic-beta")).toContain("interleaved-thinking-2025-05-14");
+  });
+
   test("retry exclusion removes rejected beta from template fallback and incoming header too", async () => {
     process.env.ANTHROPIC_ENABLE_1M_CONTEXT = "true";
     try {
@@ -456,8 +485,10 @@ describe("runtime-factory", () => {
       const secondHeaders = toHeaders(fetchMock.mock.calls[1]?.[1]?.headers);
 
       expect(firstHeaders.get("anthropic-beta")).toContain("context-1m-2025-08-07");
+      expect(firstHeaders.get("anthropic-beta")).toContain("context-management-2025-06-27");
       expect(firstHeaders.get("anthropic-beta")).toContain("custom-beta-2026-01-01");
       expect(secondHeaders.get("anthropic-beta")).not.toContain("context-1m-2025-08-07");
+      expect(secondHeaders.get("anthropic-beta")).not.toContain("context-management-2025-06-27");
       expect(secondHeaders.get("anthropic-beta")).toContain("custom-beta-2026-01-01");
     } finally {
       delete process.env.ANTHROPIC_ENABLE_1M_CONTEXT;

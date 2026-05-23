@@ -26,6 +26,7 @@ describe("loadCliConfig", () => {
         planWeights: { max: 5, pro: 2 },
         usageRefreshIntervalMs: 12345,
         maxConcurrentRequests: 12,
+        compactMaxConcurrentRequests: 4,
         adminToken: "file-token",
         logLevel: "debug",
       }),
@@ -42,6 +43,8 @@ describe("loadCliConfig", () => {
       planWeights: { max: 5, pro: 2 },
       usageRefreshIntervalMs: 12345,
       maxConcurrentRequests: 12,
+      compactMaxConcurrentRequests: 4,
+      maxBodyBytes: 64 * 1024 * 1024,
       adminToken: "file-token",
       logLevel: "debug",
     });
@@ -67,6 +70,7 @@ describe("loadCliConfig", () => {
         KYOLI_ACCOUNT_SELECTION_STRATEGY: "round-robin",
         KYOLI_PLAN_WEIGHTS: "max=9,pro=4",
         KYOLI_MAX_CONCURRENT_REQUESTS: "7",
+        KYOLI_COMPACT_MAX_CONCURRENT_REQUESTS: "3",
         KYOLI_ADMIN_TOKEN: "env-token",
         KYOLI_LOG_LEVEL: "silent",
       },
@@ -77,6 +81,7 @@ describe("loadCliConfig", () => {
     expect(config.accountSelectionStrategy).toBe("round-robin");
     expect(config.planWeights).toEqual({ max: 9, pro: 4 });
     expect(config.maxConcurrentRequests).toBe(7);
+    expect(config.compactMaxConcurrentRequests).toBe(3);
     expect(config.adminToken).toBe("env-token");
     expect(config.logLevel).toBe("silent");
   });
@@ -111,7 +116,9 @@ describe("loadCliConfig", () => {
     expect(config.port).toBe(2021);
     expect(config.databasePath?.endsWith("/.local/share/kyoli-gam/kyoli.db")).toBe(true);
     expect(config.accountSelectionStrategy).toBe("round-robin");
+    expect(config.softQuotaThresholdPercent).toBe(95);
     expect(config.maxConcurrentRequests).toBe(0);
+    expect(config.compactMaxConcurrentRequests).toBe(0);
     expect(config.logLevel).toBe("info");
   });
 
@@ -126,5 +133,6 @@ describe("loadCliConfig", () => {
     const config = await loadCliConfig(["kyoli", "--config", path], {});
     expect(config.host).toBe("127.0.0.1");
     expect(config.port).toBe(2021);
+    expect(config.softQuotaThresholdPercent).toBe(95);
   });
 });

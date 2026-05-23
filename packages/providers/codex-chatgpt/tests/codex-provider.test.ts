@@ -5,10 +5,95 @@ import {
   type AccountExecutionTraceEvent,
   type GatewayWebSocketMessage,
 } from "@kyoli-gam/core";
-import { createCodexChatGPTProvider } from "../src";
+import { createCodexChatGPTProvider, refreshCodexOAuthToken } from "../src";
 import { classifyCodexJsonEventFailure, parseCodexRetryAfterSeconds } from "../src/failures";
 
 describe("createCodexChatGPTProvider", () => {
+  it("refreshes OAuth tokens with the codex-lb JSON scope contract", async () => {
+    const originalFetch = globalThis.fetch;
+    let requestUrl = "";
+    let requestHeaders = new Headers();
+    let requestBody: Record<string, unknown> = {};
+
+    globalThis.fetch = (async (input, init) => {
+      requestUrl = String(input);
+      requestHeaders = new Headers(init?.headers);
+      requestBody = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({
+        access_token: "access-new",
+        refresh_token: "refresh-new",
+        expires_in: 3600,
+      }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    try {
+      const refreshed = await refreshCodexOAuthToken("refresh-old");
+
+      expect(refreshed.accessToken).toBe("access-new");
+      expect(refreshed.refreshToken).toBe("refresh-new");
+      expect(requestUrl).toBe("https://auth.openai.com/oauth/token");
+      expect(requestHeaders.get("content-type")).toBe("application/json");
+      expect(requestBody).toEqual({
+        grant_type: "refresh_token",
+        refresh_token: "refresh-old",
+        client_id: "app_EMoamEEZ73f0CkXaXp7hrann",
+        scope: "openid profile email",
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("records OAuth refresh error codes when compact refresh fails", async () => {
+    const store = new MemoryAccountStore();
+    const account = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-expired",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-old",
+      },
+    });
+
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      tokenRefresh: async () => {
+        throw Object.assign(new Error("invalid_grant: refresh token expired"), {
+          status: 400,
+          code: "invalid_grant",
+        });
+      },
+      fetch: async () =>
+        new Response(JSON.stringify({ error: { code: "invalid_api_key" } }), {
+          status: 401,
+          headers: { "content-type": "application/json" },
+        }),
+    });
+
+    const response = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/backend-api/codex/responses/compact", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "gpt-5.3-codex", instructions: "hi", input: [] }),
+      }),
+      route: "/backend-api/codex/responses/compact",
+      sessionKey: "session-a",
+      body: { model: "gpt-5.3-codex", instructions: "hi", input: [] },
+      model: "gpt-5.3-codex",
+    });
+
+    const updated = await store.get(account.id);
+    expect(response.status).toBe(401);
+    expect(updated?.enabled).toBe(false);
+    expect(updated?.reauthRequiredReason).toBe("Codex OAuth token refresh failed");
+    expect(updated?.lastFailureCode).toBe("invalid_grant");
+    expect(updated?.lastFailureMessage).toBe("invalid_grant: refresh token expired");
+  });
+
   it("reads structured Codex reset metadata from rate-limit errors", () => {
     const resetEpoch = 4_102_444_800;
 
@@ -206,6 +291,47 @@ describe("createCodexChatGPTProvider", () => {
     expect(updated?.metadata.email).toBe("fresh@example.com");
     expect(updated?.metadata.accountId).toBe("acct_new");
     expect(updated?.metadata.planTier).toBe("pro");
+  });
+
+  it("refreshes Codex usage metadata from the WHAM usage endpoint", async () => {
+    let usageAccountId = "";
+    const store = new MemoryAccountStore();
+    const account = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        accountId: "acct_test",
+      },
+    });
+
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      fetch: async (input, init) => {
+        usageAccountId = new Headers(init?.headers).get("ChatGPT-Account-Id") ?? "";
+        expect(String(input)).toBe("https://chatgpt.com/backend-api/wham/usage");
+        return Response.json({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: { used_percent: 12, reset_after_seconds: 60 },
+            secondary_window: { used_percent: 34, reset_after_seconds: 120 },
+          },
+          credits: { balance: "10.5", unlimited: false },
+        });
+      },
+    });
+
+    const refreshed = await provider.refreshUsage?.({ account });
+
+    expect(refreshed?.ok).toBe(true);
+    if (!refreshed?.ok) throw new Error("usage refresh failed");
+    expect(usageAccountId).toBe("acct_test");
+    expect(refreshed.metadata?.planTier).toBe("plus");
+    expect((refreshed.metadata?.cachedUsage as { five_hour?: { utilization: number } }).five_hour?.utilization)
+      .toBe(12);
+    expect((refreshed.metadata?.cachedUsage as { seven_day?: { utilization: number } }).seven_day?.utilization)
+      .toBe(34);
   });
 
   it("preserves native Codex originator and user-agent headers", async () => {
@@ -1306,6 +1432,62 @@ describe("createCodexChatGPTProvider", () => {
     expect(upstreamBody.parallel_tool_calls).toBeUndefined();
   });
 
+  it("converts v1 compact messages into native compact instructions and input", async () => {
+    let upstreamBody: Record<string, unknown> = {};
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+      },
+    });
+
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      fetch: async (_input, init) => {
+        upstreamBody = JSON.parse(String(init?.body));
+        return new Response(JSON.stringify({ object: "response.compaction", output: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    const response = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/v1/responses/compact", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "gpt-5.3-codex",
+          messages: [
+            { role: "system", content: "Be concise." },
+            { role: "user", content: "Summarize this thread." },
+          ],
+        }),
+      }),
+      route: "/v1/responses/compact",
+      sessionKey: "session-a",
+      body: {
+        model: "gpt-5.3-codex",
+        messages: [
+          { role: "system", content: "Be concise." },
+          { role: "user", content: "Summarize this thread." },
+        ],
+      },
+      model: "gpt-5.3-codex",
+    });
+
+    expect(response.status).toBe(200);
+    expect(upstreamBody.instructions).toBe("Be concise.");
+    expect(upstreamBody.messages).toBeUndefined();
+    expect(upstreamBody.input).toEqual([
+      { role: "user", content: [{ type: "input_text", text: "Summarize this thread." }] },
+    ]);
+  });
+
   it("retries compact 5xx responses once with the same contract", async () => {
     const statuses: number[] = [];
     const store = new MemoryAccountStore();
@@ -1347,6 +1529,250 @@ describe("createCodexChatGPTProvider", () => {
 
     expect(response.status).toBe(200);
     expect(statuses).toEqual([503, 200]);
+  });
+
+  it("fails over compact overloaded errors after same-account retry is exhausted", async () => {
+    const upstreamAuths: string[] = [];
+    const store = new MemoryAccountStore();
+    const first = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-a",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-a",
+      },
+    });
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-b",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-b",
+      },
+    });
+
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      compactRetryDelayMs: 0,
+      fetch: async (_input, init) => {
+        const authorization = new Headers(init?.headers).get("authorization") ?? "";
+        upstreamAuths.push(authorization);
+        if (authorization === "Bearer access-a") {
+          return new Response(
+            JSON.stringify({
+              error: {
+                type: "server_error",
+                code: "overloaded_error",
+                message: "We're currently experiencing high demand, which may cause temporary errors.",
+              },
+            }),
+            { status: 500, headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response(JSON.stringify({ object: "response.compaction", output: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    const response = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/backend-api/codex/responses/compact", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "gpt-5.3-codex", instructions: "hi", input: [] }),
+      }),
+      route: "/backend-api/codex/responses/compact",
+      sessionKey: "session-a",
+      body: { model: "gpt-5.3-codex", instructions: "hi", input: [] },
+      model: "gpt-5.3-codex",
+    });
+
+    const failed = await store.get(first.id);
+    expect(response.status).toBe(200);
+    expect(upstreamAuths).toEqual(["Bearer access-a", "Bearer access-a", "Bearer access-b"]);
+    expect(failed?.lastFailureClass).toBe("transient");
+    expect(failed?.lastFailureCode).toBe("overloaded_error");
+    expect(failed?.metadata.compactRetryExhausted).toBe(true);
+  });
+
+  it("keeps compact admission separate and rejects only concurrent compact overflow", async () => {
+    let upstreamCalls = 0;
+    let releaseFirst: (() => void) | undefined;
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+      },
+    });
+
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      compactMaxConcurrentRequests: 1,
+      fetch: async () => {
+        upstreamCalls += 1;
+        await new Promise<void>((resolve) => {
+          releaseFirst = resolve;
+        });
+        return new Response(JSON.stringify({ object: "response.compaction", output: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    const requestContext = {
+      request: new Request("http://127.0.0.1:2021/backend-api/codex/responses/compact", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "gpt-5.3-codex", instructions: "hi", input: [] }),
+      }),
+      route: "/backend-api/codex/responses/compact" as const,
+      sessionKey: "session-a",
+      body: { model: "gpt-5.3-codex", instructions: "hi", input: [] },
+      model: "gpt-5.3-codex",
+    };
+
+    const first = provider.handleRequest(requestContext);
+    await waitFor(() => upstreamCalls === 1);
+
+    const second = await provider.handleRequest(requestContext);
+    expect(second.status).toBe(429);
+    await expect(second.json()).resolves.toMatchObject({
+      error: { type: "local_overload", retryable: true },
+    });
+
+    releaseFirst?.();
+    await expect(first).resolves.toMatchObject({ status: 200 });
+  });
+
+  it("retries compact body-read failures and fails over after retry exhaustion", async () => {
+    const upstreamAuths: string[] = [];
+    const store = new MemoryAccountStore();
+    const first = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-a",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-a",
+      },
+    });
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-b",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-b",
+      },
+    });
+
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      compactRetryDelayMs: 0,
+      fetch: async (_input, init) => {
+        const authorization = new Headers(init?.headers).get("authorization") ?? "";
+        upstreamAuths.push(authorization);
+        if (authorization === "Bearer access-a") {
+          return new Response(new ReadableStream({
+            start(controller) {
+              controller.error(new Error("compact body read failed"));
+            },
+          }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify({ object: "response.compaction", output: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    const response = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/backend-api/codex/responses/compact", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "gpt-5.3-codex", instructions: "hi", input: [] }),
+      }),
+      route: "/backend-api/codex/responses/compact",
+      sessionKey: "session-a",
+      body: { model: "gpt-5.3-codex", instructions: "hi", input: [] },
+      model: "gpt-5.3-codex",
+    });
+
+    const failed = await store.get(first.id);
+    expect(response.status).toBe(200);
+    expect(upstreamAuths).toEqual(["Bearer access-a", "Bearer access-a", "Bearer access-b"]);
+    expect(failed?.lastFailureClass).toBe("transient");
+    expect(failed?.lastFailureCode).toBe("upstream_unavailable");
+  });
+
+  it("masks compact previous_response_not_found without penalizing the account", async () => {
+    const store = new MemoryAccountStore();
+    const account = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+      },
+    });
+
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      fetch: async () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              type: "invalid_request_error",
+              code: "previous_response_not_found",
+              param: "previous_response_id",
+              message: "Previous response with id 'resp_secret_123' not found.",
+            },
+          }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        ),
+    });
+
+    const response = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/backend-api/codex/responses/compact", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "gpt-5.3-codex",
+          instructions: "hi",
+          input: [],
+          previous_response_id: "resp_secret_123",
+        }),
+      }),
+      route: "/backend-api/codex/responses/compact",
+      sessionKey: "session-a",
+      body: {
+        model: "gpt-5.3-codex",
+        instructions: "hi",
+        input: [],
+        previous_response_id: "resp_secret_123",
+      },
+      model: "gpt-5.3-codex",
+    });
+
+    const updated = await store.get(account.id);
+    const text = await response.text();
+    expect(response.status).toBe(400);
+    expect(text).toContain("previous_response_not_found");
+    expect(text).not.toContain("resp_secret_123");
+    expect(updated?.failureCount).toBe(0);
+    expect(updated?.lastFailureClass).toBeUndefined();
   });
 
   it("refreshes OAuth credentials and retries compact 401 with the same contract", async () => {
@@ -1414,10 +1840,10 @@ describe("createCodexChatGPTProvider", () => {
     expect(updated?.metadata.planTier).toBe("pro");
   });
 
-  it("bounds compact retries by the overall request budget", async () => {
+  it("bounds compact retry starts by the overall request budget without penalizing the account", async () => {
     let upstreamCalls = 0;
     const store = new MemoryAccountStore();
-    await store.create({
+    const account = await store.create({
       provider: "codex",
       kind: "oauth",
       credentials: {
@@ -1452,14 +1878,58 @@ describe("createCodexChatGPTProvider", () => {
       model: "gpt-5.3-codex",
     });
 
-    expect(response.status).toBe(504);
+    const updated = await store.get(account.id);
+    expect(response.status).toBe(502);
     await expect(response.json()).resolves.toMatchObject({
       error: {
-        type: "upstream_timeout",
-        retryable: true,
+        type: "upstream_unavailable",
+        code: "upstream_unavailable",
+        message: "Proxy request budget exhausted",
+        retryable: false,
       },
     });
     expect(upstreamCalls).toBe(1);
+    expect(updated?.failureCount).toBe(0);
+  });
+
+  it("does not apply a default total timeout to compact upstream reads", async () => {
+    let upstreamSignal: AbortSignal | undefined;
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+      },
+    });
+
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      fetch: async (_input, init) => {
+        upstreamSignal = init?.signal as AbortSignal | undefined;
+        return new Response(JSON.stringify({ object: "response.compaction", output: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    const response = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/backend-api/codex/responses/compact", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "gpt-5.3-codex", instructions: "hi", input: [] }),
+      }),
+      route: "/backend-api/codex/responses/compact",
+      sessionKey: "session-a",
+      body: { model: "gpt-5.3-codex", instructions: "hi", input: [] },
+      model: "gpt-5.3-codex",
+    });
+
+    expect(response.status).toBe(200);
+    expect(upstreamSignal).toBeUndefined();
   });
 
   it("proxies transcription multipart requests to the Codex transcribe endpoint", async () => {
@@ -3035,6 +3505,286 @@ describe("createCodexChatGPTProvider", () => {
     expect(upstreamSocket?.closed).toEqual({ code: 1000, reason: "done" });
   });
 
+  it("normalizes invalid downstream WebSocket close codes before closing upstream", async () => {
+    let upstreamSocket: FakeUpstreamWebSocket | undefined;
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+        accountId: "acct_test",
+      },
+    });
+
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      webSocketFactory: () => {
+        upstreamSocket = new FakeUpstreamWebSocket();
+        queueMicrotask(() => upstreamSocket?.emit("open", {}));
+        return upstreamSocket;
+      },
+    });
+    const downstream = new FakeGatewayWebSocket([
+      { type: "text", data: '{"type":"response.create"}' },
+      { type: "close", code: 1006, reason: "abnormal client close" },
+    ]);
+
+    await provider.handleWebSocket?.({
+      request: new Request("http://127.0.0.1:2021/backend-api/codex/responses", {
+        headers: {
+          "sec-websocket-key": "client-key",
+          "sec-websocket-version": "13",
+        },
+      }),
+      route: "/backend-api/codex/responses",
+      sessionKey: "session-a",
+      websocket: downstream,
+    });
+
+    expect(upstreamSocket?.closed).toEqual({ code: 1000, reason: "abnormal client close" });
+  });
+
+  it("normalizes invalid upstream WebSocket close codes before closing downstream", async () => {
+    let upstreamSocket: FakeUpstreamWebSocket | undefined;
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+        accountId: "acct_test",
+      },
+    });
+
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      webSocketFactory: () => {
+        upstreamSocket = new FakeUpstreamWebSocket();
+        queueMicrotask(() => upstreamSocket?.emit("open", {}));
+        return upstreamSocket;
+      },
+    });
+    const downstream = new FakeGatewayWebSocket(
+      [{ type: "text", data: '{"type":"response.create"}' }],
+      { waitWhenEmpty: true },
+    );
+
+    const websocketPromise = provider.handleWebSocket?.({
+      request: new Request("http://127.0.0.1:2021/backend-api/codex/responses", {
+        headers: {
+          "sec-websocket-key": "client-key",
+          "sec-websocket-version": "13",
+        },
+      }),
+      route: "/backend-api/codex/responses",
+      sessionKey: "session-a",
+      websocket: downstream,
+    });
+
+    await waitFor(() => Boolean(upstreamSocket));
+    upstreamSocket?.emit("close", { code: 1006, reason: "abnormal upstream close" });
+    await waitFor(() => downstream.closed?.code === 1011);
+    downstream.pushMessage({ type: "close", code: 1000, reason: "done" });
+    await websocketPromise;
+
+    expect(downstream.closed).toEqual({ code: 1011, reason: "abnormal upstream close" });
+  });
+
+  it("reads WebSocket response.create metadata before account selection", async () => {
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+        accountId: "acct_test",
+      },
+    });
+    const traces: AccountExecutionTraceEvent[] = [];
+
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      onTrace: (event) => traces.push(event),
+      webSocketFactory: () => {
+        const socket = new FakeUpstreamWebSocket();
+        queueMicrotask(() => socket.emit("open", {}));
+        return socket;
+      },
+    });
+    const downstream = new FakeGatewayWebSocket([
+      { type: "text", data: '{"type":"response.create","model":"gpt-5.5"}' },
+      { type: "close", code: 1000, reason: "done" },
+    ]);
+
+    await provider.handleWebSocket?.({
+      request: new Request("http://127.0.0.1:2021/backend-api/codex/responses", {
+        headers: {
+          "sec-websocket-key": "client-key",
+          "sec-websocket-version": "13",
+        },
+      }),
+      route: "/backend-api/codex/responses",
+      sessionKey: "session-a",
+      websocket: downstream,
+    });
+
+    expect(traces.find((event) => event.type === "metadata")?.message)
+      .toBe("WebSocket response.create model discovered before account selection.");
+    expect(traces.find((event) => event.type === "selected")?.model).toBe("gpt-5.5");
+  });
+
+  it("waits for WebSocket response.create before selecting an account", async () => {
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+        accountId: "acct_test",
+      },
+    });
+    const upstreamSockets: FakeUpstreamWebSocket[] = [];
+
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      webSocketFactory: () => {
+        const socket = new FakeUpstreamWebSocket();
+        upstreamSockets.push(socket);
+        queueMicrotask(() => socket.emit("open", {}));
+        return socket;
+      },
+    });
+    const downstream = new FakeGatewayWebSocket(
+      [{ type: "text", data: '{"type":"session.update","session":{"id":"session-test"}}' }],
+      { waitWhenEmpty: true },
+    );
+
+    const websocketPromise = provider.handleWebSocket?.({
+      request: new Request("http://127.0.0.1:2021/backend-api/codex/responses", {
+        headers: {
+          "sec-websocket-key": "client-key",
+          "sec-websocket-version": "13",
+        },
+      }),
+      route: "/backend-api/codex/responses",
+      sessionKey: "session-a",
+      websocket: downstream,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(upstreamSockets).toHaveLength(0);
+
+    downstream.pushMessage({ type: "text", data: '{"type":"response.create","model":"gpt-5.5"}' });
+    await waitFor(() => upstreamSockets.length === 1 && upstreamSockets[0]!.sent.length === 2);
+    expect(upstreamSockets[0]?.sent).toEqual([
+      '{"type":"session.update","session":{"id":"session-test"}}',
+      '{"type":"response.create","model":"gpt-5.5"}',
+    ]);
+
+    downstream.pushMessage({ type: "close", code: 1000, reason: "done" });
+    await websocketPromise;
+  });
+
+  it("keeps previous response continuity on its owner account", async () => {
+    const store = new MemoryAccountStore();
+    const first = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "first-access",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-first",
+        accountId: "acct_first",
+      },
+    });
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "second-access",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-second",
+        accountId: "acct_second",
+      },
+    });
+    const upstreamSockets: FakeUpstreamWebSocket[] = [];
+
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      webSocketFactory: () => {
+        const socket = new FakeUpstreamWebSocket();
+        const socketIndex = upstreamSockets.length;
+        socket.onSend = () => {
+          if (socketIndex === 0) {
+            queueMicrotask(() => {
+              socket.emit("message", {
+                data: '{"type":"response.completed","response":{"id":"resp_owned","status":"completed"}}',
+              });
+            });
+          }
+        };
+        upstreamSockets.push(socket);
+        queueMicrotask(() => socket.emit("open", {}));
+        return socket;
+      },
+    });
+
+    const firstDownstream = new FakeGatewayWebSocket(
+      [{ type: "text", data: '{"type":"response.create"}' }],
+      { waitWhenEmpty: true },
+    );
+    const firstPromise = provider.handleWebSocket?.({
+      request: new Request("http://127.0.0.1:2021/backend-api/codex/responses", {
+        headers: {
+          "sec-websocket-key": "client-key",
+          "sec-websocket-version": "13",
+        },
+      }),
+      route: "/backend-api/codex/responses",
+      sessionKey: "session-a",
+      websocket: firstDownstream,
+    });
+    await waitFor(() => firstDownstream.sentText.length === 1);
+    firstDownstream.pushMessage({ type: "close", code: 1000, reason: "done" });
+    await firstPromise;
+
+    await store.recordFailure(first.id, {
+      status: 429,
+      message: "usage limit",
+      rateLimitCooldownUntil: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    });
+
+    const secondDownstream = new FakeGatewayWebSocket([
+      { type: "text", data: '{"type":"response.create","previous_response_id":"resp_owned"}' },
+    ]);
+    await provider.handleWebSocket?.({
+      request: new Request("http://127.0.0.1:2021/backend-api/codex/responses", {
+        headers: {
+          "sec-websocket-key": "client-key",
+          "sec-websocket-version": "13",
+        },
+      }),
+      route: "/backend-api/codex/responses",
+      sessionKey: "session-b",
+      websocket: secondDownstream,
+    });
+
+    expect(upstreamSockets).toHaveLength(1);
+    expect(JSON.parse(secondDownstream.sentText[0] ?? "{}")).toMatchObject({
+      type: "error",
+      error: { code: "upstream_unavailable" },
+    });
+  });
+
   it("fails over Codex WebSocket startup rate limits and replays the create message", async () => {
     const store = new MemoryAccountStore();
     const first = await store.create({
@@ -3120,7 +3870,7 @@ describe("createCodexChatGPTProvider", () => {
     expect(upstreamSockets[1]?.closed).toEqual({ code: 1000, reason: "done" });
   });
 
-  it("does not replay Codex WebSocket usage limits with previous_response_id to another account", async () => {
+  it("replays Codex WebSocket startup usage limits with previous_response_id and surfaces anchor misses", async () => {
     const store = new MemoryAccountStore();
     const first = await store.create({
       provider: "codex",
@@ -3148,8 +3898,15 @@ describe("createCodexChatGPTProvider", () => {
       accounts: new StickyAccountPool(store),
       webSocketFactory: () => {
         const socket = new FakeUpstreamWebSocket();
+        const socketIndex = upstreamSockets.length;
         socket.onSend = () => {
           queueMicrotask(() => {
+            if (socketIndex > 0) {
+              socket.emit("message", {
+                data: '{"type":"error","status":400,"error":{"code":"previous_response_not_found","param":"previous_response_id","message":"Previous response not found"}}',
+              });
+              return;
+            }
             socket.emit("message", {
               data: '{"type":"error","status":429,"error":{"code":"usage_limit_reached","message":"The usage limit has been reached"}}',
             });
@@ -3181,10 +3938,12 @@ describe("createCodexChatGPTProvider", () => {
 
     await waitFor(() => downstream.sentText.length === 1);
     const firstUpdated = await store.get(first.id);
-    expect(upstreamSockets).toHaveLength(1);
+    expect(upstreamSockets).toHaveLength(2);
+    expect(upstreamSockets[0]?.sent).toEqual(['{"type":"response.create","previous_response_id":"resp_anchor"}']);
+    expect(upstreamSockets[1]?.sent).toEqual(['{"type":"response.create","previous_response_id":"resp_anchor"}']);
     expect(JSON.parse(downstream.sentText[0] ?? "{}")).toMatchObject({
       type: "error",
-      error: { code: "usage_limit_reached" },
+      error: { code: "previous_response_not_found" },
     });
     expect(firstUpdated?.lastFailureClass).toBe("rate_limit");
 

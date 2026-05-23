@@ -104,6 +104,37 @@ describe("AccountStore state reset", () => {
       consecutiveAuthFailures: 1,
     });
   });
+
+  it("preserves the original reauth failure details across later generic 401s", async () => {
+    const store = new MemoryAccountStore();
+    const account = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: { accessToken: "secret" },
+    });
+
+    await store.recordFailure(account.id, {
+      status: 400,
+      message: "invalid_grant: refresh token expired",
+      failureClass: "auth",
+      failureCode: "invalid_grant",
+      reauthRequiredReason: "Codex OAuth token refresh failed",
+    });
+
+    const updated = await store.recordFailure(account.id, {
+      status: 401,
+      message: "Codex compact upstream returned 401",
+    });
+
+    expect(updated).toMatchObject({
+      enabled: false,
+      failureCount: 2,
+      reauthRequiredReason: "Codex OAuth token refresh failed",
+      lastFailureClass: "auth",
+      lastFailureCode: "invalid_grant",
+      lastFailureMessage: "invalid_grant: refresh token expired",
+    });
+  });
 });
 
 describe("SQLiteRequestLogStore", () => {

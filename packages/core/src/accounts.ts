@@ -71,6 +71,7 @@ export interface AccountStore {
 export interface AccountFailureInput {
   status: number;
   message?: string;
+  metadata?: Record<string, unknown>;
   rateLimitResetAt?: string;
   rateLimitCooldownUntil?: string;
   failureClass?: AccountFailureClass;
@@ -587,10 +588,12 @@ function recordAccountFailure(
     ? existing.consecutiveAuthFailures + 1
     : existing.consecutiveAuthFailures;
   const reauthRequiredReason = input.reauthRequiredReason ?? existing.reauthRequiredReason;
+  const preserveExistingReauthFailure = Boolean(existing.reauthRequiredReason && !input.reauthRequiredReason);
 
   return {
     ...existing,
     enabled: reauthRequiredReason ? false : existing.enabled,
+    metadata: input.metadata ? { ...existing.metadata, ...input.metadata } : existing.metadata,
     failureCount: existing.failureCount + 1,
     lastErrorAt: now,
     rateLimitResetAt: rateLimitFailure ? input.rateLimitResetAt : existing.rateLimitResetAt,
@@ -598,10 +601,18 @@ function recordAccountFailure(
     rateLimitCooldownUntil: rateLimitFailure
       ? input.rateLimitCooldownUntil ?? input.rateLimitResetAt
       : existing.rateLimitCooldownUntil,
-    lastFailureClass: input.failureClass ?? failureClassFromStatus(input.status),
-    lastFailureCode: input.failureCode,
-    lastFailureMessage: input.message,
-    lastFailurePhase: input.failurePhase,
+    lastFailureClass: preserveExistingReauthFailure
+      ? existing.lastFailureClass ?? input.failureClass ?? failureClassFromStatus(input.status)
+      : input.failureClass ?? failureClassFromStatus(input.status),
+    lastFailureCode: preserveExistingReauthFailure
+      ? existing.lastFailureCode ?? input.failureCode
+      : input.failureCode,
+    lastFailureMessage: preserveExistingReauthFailure
+      ? existing.lastFailureMessage ?? input.message
+      : input.message,
+    lastFailurePhase: preserveExistingReauthFailure
+      ? existing.lastFailurePhase ?? input.failurePhase
+      : input.failurePhase,
     authCooldownUntil: reauthRequiredReason
       ? undefined
       : authFailure

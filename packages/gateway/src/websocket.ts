@@ -80,7 +80,7 @@ export class NodeGatewayWebSocket implements GatewayWebSocket {
     this.#send(data);
   }
 
-  async close(code = 1000, reason = ""): Promise<void> {
+  async close(code: unknown = 1000, reason: unknown = ""): Promise<void> {
     if (this.#closed) return;
     const closeCode = normalizeCloseCode(code);
     const closeReason = normalizeCloseReason(reason);
@@ -139,17 +139,18 @@ export class NodeGatewayWebSocket implements GatewayWebSocket {
   }
 }
 
-function normalizeCloseCode(code: number): number {
-  return Number.isInteger(code) &&
-    ((code >= 1000 && code <= 1014 && code !== 1004 && code !== 1005 && code !== 1006) ||
+function normalizeCloseCode(code: unknown): number {
+  if (typeof code !== "number" || !Number.isInteger(code)) return 1000;
+  return ((code >= 1000 && code <= 1014 && code !== 1004 && code !== 1005 && code !== 1006) ||
       (code >= 3000 && code <= 4999))
     ? code
     : 1000;
 }
 
-function normalizeCloseReason(reason: string): string {
-  const bytes = Buffer.from(reason);
-  if (bytes.byteLength <= 123) return reason;
+function normalizeCloseReason(reason: unknown): string {
+  const value = typeof reason === "string" ? reason : "";
+  const bytes = Buffer.from(value);
+  if (bytes.byteLength <= 123) return value;
   return bytes.subarray(0, 123).toString("utf8").replace(/\uFFFD$/, "");
 }
 

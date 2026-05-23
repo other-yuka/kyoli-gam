@@ -82,8 +82,8 @@ KYOLI_CLAUDE_ALLOW_LIVE_MESSAGES=1 \
 pnpm --filter opencode-anthropic-multi-account test:live:opencode-claude-native
 ```
 
-## Docs
+## Related
 
 - [Root README](../../README.md)
-- [OpenCode Plugin Usage](../../docs/opencode-plugin-usage.md)
-- [Claude live acceptance](../../docs/claude-live-acceptance.md)
+- [`opencode-multi-account-core`](../multi-account-core)
+- [`@kyoli-gam/provider-claude-code`](../providers/claude-code)

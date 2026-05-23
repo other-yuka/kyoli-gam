@@ -126,6 +126,62 @@ describe("StickyAccountPool", () => {
     expect(selected).toEqual([first.id, second.id, first.id]);
   });
 
+  it("explains soft-quota skips and selected usage", async () => {
+    const store = new MemoryAccountStore();
+    const high = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      name: "high",
+      metadata: {
+        planTier: "pro",
+        cachedUsage: {
+          five_hour: { utilization: 1 },
+          seven_day: { utilization: 96 },
+        },
+      },
+    });
+    const low = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      name: "low",
+      metadata: {
+        planTier: "pro",
+        cachedUsage: {
+          five_hour: { utilization: 20 },
+          seven_day: { utilization: 30 },
+        },
+      },
+    });
+    const pool = new StickyAccountPool(store, {
+      strategy: "round-robin",
+      softQuotaThresholdPercent: 95,
+    });
+
+    const result = await pool.selectWithDiagnostics({
+      provider: "codex",
+      kind: "oauth",
+      sessionKey: "session-a",
+    });
+
+    expect(result.account?.id).toBe(low.id);
+    expect(result.diagnostics).toMatchObject({
+      strategy: "round-robin",
+      selectedReason: "round_robin",
+      softQuotaThresholdPercent: 95,
+      softQuotaSkippedAccountIds: [high.id],
+      poolAccountIds: [low.id],
+      selectedAccount: {
+        id: low.id,
+        planTier: "pro",
+        usage: {
+          five_hour: 20,
+          seven_day: 30,
+          max: 30,
+        },
+      },
+    });
+  });
+
   it("honors a preferred account when it is still eligible", async () => {
     const store = new MemoryAccountStore();
     const first = await store.create({ provider: "codex", kind: "oauth", name: "first" });
@@ -347,6 +403,95 @@ describe("StickyAccountPool", () => {
 
     expect(selected?.id).toBe(available.id);
     expect(selected?.id).not.toBe(saturated.id);
+  });
+
+  it("uses a conservative default soft quota threshold for fresh selection", async () => {
+    const store = new MemoryAccountStore();
+    const exhausted = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      name: "weekly-exhausted",
+      metadata: {
+        cachedUsage: {
+          five_hour: { utilization: 0, resets_at: null },
+          seven_day: { utilization: 100, resets_at: null },
+        },
+      },
+    });
+    const available = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      name: "available",
+      metadata: {
+        cachedUsage: {
+          five_hour: { utilization: 35, resets_at: null },
+          seven_day: { utilization: 40, resets_at: null },
+        },
+      },
+    });
+    const pool = new StickyAccountPool(store, { strategy: "round-robin" });
+
+    const selected = await pool.select({
+      provider: "codex",
+      kind: "oauth",
+      sessionKey: "session-a",
+    });
+
+    expect(selected?.id).toBe(available.id);
+    expect(selected?.id).not.toBe(exhausted.id);
+  });
+
+  it("rebinds sticky sessions away from accounts above the soft quota threshold", async () => {
+    const store = new MemoryAccountStore();
+    const stickySessionStore = new MemoryStickySessionStore();
+    const exhausted = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      name: "sticky-exhausted",
+      metadata: {
+        cachedUsage: {
+          five_hour: { utilization: 100, resets_at: null },
+          seven_day: { utilization: 20, resets_at: null },
+        },
+      },
+    });
+    const available = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      name: "available",
+      metadata: {
+        cachedUsage: {
+          five_hour: { utilization: 20, resets_at: null },
+          seven_day: { utilization: 20, resets_at: null },
+        },
+      },
+    });
+    stickySessionStore.upsertStickySession({
+      key: "codex:codex_session:header:turn-a",
+      provider: "codex",
+      kind: "codex_session",
+      sessionKey: "header:turn-a",
+      accountId: exhausted.id,
+    });
+    const pool = new StickyAccountPool(store, {
+      strategy: "round-robin",
+      stickySessionStore,
+    });
+
+    const selected = await pool.select({
+      provider: "codex",
+      kind: "oauth",
+      sessionKey: "header:turn-a",
+    });
+
+    expect(selected?.id).toBe(available.id);
+    expect(pool.listStickySessions()).toEqual([
+      expect.objectContaining({
+        kind: "codex_session",
+        sessionKey: "header:turn-a",
+        accountId: available.id,
+      }),
+    ]);
   });
 
   it("treats Claude per-model seven-day buckets as soft quota inputs", async () => {

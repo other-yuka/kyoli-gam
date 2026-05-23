@@ -21,8 +21,8 @@ store, account selection pool, and account status helpers used by the gateway an
 - [`@kyoli-gam/gateway`](../gateway)
 - provider adapters through the gateway execution path
 
-## Docs
+## Related
 
 - [Root README](../../README.md)
-- [Server mode operations](../../docs/server-mode-operations.md)
-- [Backpressure policy](../../docs/backpressure-policy.md)
+- [`@kyoli-gam/cli`](../cli)
+- [`@kyoli-gam/gateway`](../gateway)

@@ -49,8 +49,8 @@ Root no-live plugin gate:
 pnpm run test:contract:native
 ```
 
-## Docs
+## Related
 
-- [OpenCode Plugin Mode](../../docs/opencode-plugin-mode.md)
-- [OpenCode Plugin Usage](../../docs/opencode-plugin-usage.md)
-- [OpenCode Plugin Core Redesign Notes](../../docs/opencode-plugin-core-redesign.md)
+- [Root README](../../README.md)
+- [`opencode-codex-multi-account`](../codex-multi-account)
+- [`opencode-anthropic-multi-account`](../anthropic-multi-account)

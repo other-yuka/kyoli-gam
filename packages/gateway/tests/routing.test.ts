@@ -1,8 +1,15 @@
+import { once } from "node:events";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import type { AddressInfo, Server } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type {
   GatewayRequestContext,
   GatewayRoute,
   GatewayWebSocketContext,
+  GatewayWebSocketMessage,
   ModelInfo,
   ProviderAdapter,
   ProviderId,
@@ -11,6 +18,199 @@ import { MemoryAccountStore } from "@kyoli-gam/core";
 import { createGateway, serveGateway } from "../src";
 
 describe("gateway routing", () => {
+  it("serves dashboard index routes from bundled assets", async () => {
+    const dashboardAssetsDir = await createDashboardFixture();
+    const gateway = createGateway({
+      dashboardAssetsDir,
+      accounts: new MemoryAccountStore(),
+      providers: [],
+    });
+
+    try {
+      for (const path of ["/dashboard", "/dashboard/"]) {
+        const response = await gateway.fetch(new Request(`http://127.0.0.1:2021${path}`));
+        expect(response.status).toBe(200);
+        expect(response.headers.get("content-type")).toContain("text/html");
+        expect(await response.text()).toContain('<div id="root"></div>');
+      }
+    } finally {
+      await rm(dashboardAssetsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("serves dashboard assets with content types and cache headers", async () => {
+    const dashboardAssetsDir = await createDashboardFixture();
+    const gateway = createGateway({
+      dashboardAssetsDir,
+      accounts: new MemoryAccountStore(),
+      providers: [],
+    });
+
+    try {
+      const response = await gateway.fetch(new Request("http://127.0.0.1:2021/dashboard/assets/app.js"));
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toContain("text/javascript");
+      expect(response.headers.get("cache-control")).toContain("immutable");
+      expect(await response.text()).toBe("console.log('dashboard');");
+    } finally {
+      await rm(dashboardAssetsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to the dashboard shell for nested dashboard routes", async () => {
+    const dashboardAssetsDir = await createDashboardFixture();
+    const gateway = createGateway({
+      dashboardAssetsDir,
+      accounts: new MemoryAccountStore(),
+      providers: [],
+    });
+
+    try {
+      const response = await gateway.fetch(new Request("http://127.0.0.1:2021/dashboard/accounts/codex"));
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toContain("text/html");
+      expect(await response.text()).toContain("Kyoli Dashboard");
+    } finally {
+      await rm(dashboardAssetsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not route admin or api paths through the dashboard fallback", async () => {
+    const dashboardAssetsDir = await createDashboardFixture();
+    const gateway = createGateway({
+      dashboardAssetsDir,
+      accounts: new MemoryAccountStore(),
+      providers: [],
+    });
+
+    try {
+      const admin = await gateway.fetch(new Request("http://127.0.0.1:2021/admin/missing"));
+      const api = await gateway.fetch(new Request("http://127.0.0.1:2021/v1/not-dashboard"));
+
+      expect(admin.status).toBe(404);
+      expect(await admin.text()).not.toContain("Kyoli Dashboard");
+      expect(api.status).toBe(404);
+      expect(await api.text()).not.toContain("Kyoli Dashboard");
+    } finally {
+      await rm(dashboardAssetsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("blocks dashboard asset path traversal", async () => {
+    const dashboardAssetsDir = await createDashboardFixture();
+    const gateway = createGateway({
+      dashboardAssetsDir,
+      accounts: new MemoryAccountStore(),
+      providers: [],
+    });
+
+    try {
+      const response = await gateway.fetch(new Request("http://127.0.0.1:2021/dashboard/assets/..%2Findex.html"));
+      expect(response.status).toBe(404);
+      expect(await response.text()).not.toContain("Kyoli Dashboard");
+    } finally {
+      await rm(dashboardAssetsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("treats an existing kyoli gateway on the same port as already running", async () => {
+    const existing = createServer((request, response) => {
+      if (request.url === "/health") {
+        response.setHeader("content-type", "application/json");
+        response.end(JSON.stringify({
+          ok: true,
+          service: "kyoli-gam",
+          mode: "gateway",
+        }));
+        return;
+      }
+      response.statusCode = 404;
+      response.end();
+    });
+    const port = await listen(existing);
+
+    try {
+      const server = await serveGateway({
+        config: { host: "127.0.0.1", port },
+        accounts: new MemoryAccountStore(),
+        providers: [],
+      });
+
+      expect(server.alreadyRunning).toBe(true);
+      expect(server.port).toBe(port);
+      server.stop();
+    } finally {
+      await close(existing);
+    }
+  });
+
+  it("rejects port conflicts held by another process", async () => {
+    const existing = createServer((_request, response) => {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ service: "not-kyoli" }));
+    });
+    const port = await listen(existing);
+
+    try {
+      await expect(serveGateway({
+        config: { host: "127.0.0.1", port },
+        accounts: new MemoryAccountStore(),
+        providers: [],
+      })).rejects.toThrow(`Port ${port} is already in use by another process`);
+    } finally {
+      await close(existing);
+    }
+  });
+
+  it("keeps the server alive when a streamed response fails after headers are sent", async () => {
+    const encoder = new TextEncoder();
+    const codex = fakeProvider({
+      id: "codex",
+      routes: ["/backend-api/codex/responses"],
+      models: [],
+      handle: async () => {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode(
+              'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_stream"}}\n\n',
+            ));
+            setTimeout(() => controller.error(new Error("simulated upstream stream failure")), 20);
+          },
+        });
+        return new Response(body, { headers: { "content-type": "text/event-stream" } });
+      },
+    });
+    const server = await serveGateway({
+      config: { host: "127.0.0.1", port: 0 },
+      accounts: new MemoryAccountStore(),
+      providers: [codex],
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${server.port}/backend-api/codex/responses`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "gpt-5.3-codex", input: "hello", stream: true }),
+      });
+
+      expect(response.status).toBe(200);
+      const text = await response.text();
+      expect(text).toContain("response.created");
+      expect(text).toContain("response.failed");
+      expect(text).toContain("data: [DONE]");
+
+      const health = await fetch(`http://127.0.0.1:${server.port}/health`);
+      expect(health.status).toBe(200);
+      await expect(health.json()).resolves.toMatchObject({
+        ok: true,
+        service: "kyoli-gam",
+        mode: "gateway",
+      });
+    } finally {
+      server.stop(true);
+    }
+  });
+
   it("routes Anthropic-prefixed Claude messages to the Claude Code adapter", async () => {
     let seenContext: GatewayRequestContext | undefined;
     const claude = fakeProvider({
@@ -18,10 +218,10 @@ describe("gateway routing", () => {
       routes: ["/v1/messages"],
       models: [
         {
-          id: "anthropic/test-claude",
+          id: "anthropic/claude-sonnet-4-5",
           provider: "claude-code",
-          upstreamId: "test-claude",
-          aliases: ["claude-code/test-claude"],
+          upstreamId: "claude-sonnet-4-5",
+          aliases: ["claude-code/claude-sonnet-4-5"],
           capabilities: ["messages"],
         },
       ],
@@ -44,7 +244,7 @@ describe("gateway routing", () => {
           "x-kyoli-session-id": "thread-1",
         },
         body: JSON.stringify({
-          model: "anthropic/test-claude",
+          model: "anthropic/claude-sonnet-4-5",
           messages: [{ role: "user", content: "hello" }],
         }),
       }),
@@ -53,10 +253,10 @@ describe("gateway routing", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ provider: "claude-code" });
     expect(seenContext?.route).toBe("/v1/messages");
-    expect(seenContext?.model).toBe("anthropic/test-claude");
+    expect(seenContext?.model).toBe("anthropic/claude-sonnet-4-5");
     expect(seenContext?.sessionKey).toBe("header:thread-1");
     expect(seenContext?.body).toEqual({
-      model: "anthropic/test-claude",
+      model: "anthropic/claude-sonnet-4-5",
       messages: [{ role: "user", content: "hello" }],
     });
   });
@@ -123,6 +323,39 @@ describe("gateway routing", () => {
     expect(seenContext?.sessionKey).toBe("header:codex-thread-1");
   });
 
+  it("prefers Codex turn-state headers over broader Codex session headers", async () => {
+    let seenContext: GatewayRequestContext | undefined;
+    const codex = fakeProvider({
+      id: "codex",
+      routes: ["/backend-api/codex/responses"],
+      models: [],
+      handle: async (context) => {
+        seenContext = context;
+        return Response.json({ provider: "codex" });
+      },
+    });
+
+    const gateway = createGateway({
+      accounts: new MemoryAccountStore(),
+      providers: [codex],
+    });
+
+    const response = await gateway.fetch(
+      new Request("http://127.0.0.1:2021/backend-api/codex/responses", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-codex-session-id": "codex-terminal-session",
+          "x-codex-turn-state": "codex-turn-state",
+        },
+        body: JSON.stringify({ model: "gpt-5.3-codex", input: "hello" }),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(seenContext?.sessionKey).toBe("header:codex-turn-state");
+  });
+
   it("uses generic client session headers as sticky routing keys", async () => {
     let seenContext: GatewayRequestContext | undefined;
     const claude = fakeProvider({
@@ -130,9 +363,9 @@ describe("gateway routing", () => {
       routes: ["/v1/messages"],
       models: [
         {
-          id: "anthropic/test-claude",
+          id: "anthropic/claude-sonnet-4-5",
           provider: "claude-code",
-          upstreamId: "test-claude",
+          upstreamId: "claude-sonnet-4-5",
           capabilities: ["messages"],
         },
       ],
@@ -154,7 +387,7 @@ describe("gateway routing", () => {
           "content-type": "application/json",
           "x-client-session-id": "claude-client-thread-1",
         },
-        body: JSON.stringify({ model: "anthropic/test-claude", messages: [] }),
+        body: JSON.stringify({ model: "anthropic/claude-sonnet-4-5", messages: [] }),
       }),
     );
 
@@ -463,6 +696,9 @@ describe("gateway routing", () => {
           displayName: "Test Codex",
           capabilities: ["responses", "tools", "reasoning", "codex"],
           aliases: ["test-codex"],
+          metadata: {
+            experimental_supported_tools: ["shell"],
+          },
         },
       ],
     });
@@ -490,9 +726,332 @@ describe("gateway routing", () => {
       supports_parallel_tool_calls: true,
       supports_reasoning_summaries: true,
       shell_type: "shell_command",
+      experimental_supported_tools: ["shell"],
       prefer_websockets: true,
       visibility: "list",
     });
+  });
+
+  it("exposes Codex fast service tier metadata for GPT models", async () => {
+    const codex = fakeProvider({
+      id: "codex",
+      routes: ["/backend-api/codex/responses"],
+      models: [
+        {
+          id: "openai/gpt-5.5",
+          provider: "codex",
+          upstreamId: "gpt-5.5",
+          displayName: "GPT-5.5",
+          capabilities: ["responses", "tools", "reasoning", "codex"],
+          aliases: ["gpt-5.5"],
+        },
+        {
+          id: "openai/gpt-5.3-codex",
+          provider: "codex",
+          upstreamId: "gpt-5.3-codex",
+          displayName: "GPT-5.3 Codex",
+          capabilities: ["responses", "tools", "reasoning", "codex"],
+          aliases: ["gpt-5.3-codex"],
+        },
+        {
+          id: "openai/gpt-5.4-mini",
+          provider: "codex",
+          upstreamId: "gpt-5.4-mini",
+          displayName: "GPT-5.4 mini",
+          capabilities: ["responses", "tools", "reasoning", "codex"],
+          aliases: ["gpt-5.4-mini"],
+        },
+      ],
+    });
+
+    const gateway = createGateway({
+      accounts: new MemoryAccountStore(),
+      providers: [codex],
+    });
+
+    const response = await gateway.fetch(
+      new Request("http://127.0.0.1:2021/backend-api/codex/models"),
+    );
+    const payload = (await response.json()) as {
+      models: Array<Record<string, unknown>>;
+    };
+
+    const gpt55 = payload.models.find((model) => model.slug === "gpt-5.5");
+    expect(gpt55).toMatchObject({
+      additional_speed_tiers: ["fast"],
+      service_tiers: [
+        {
+          id: "priority",
+          name: "Fast",
+          description: "1.5x speed, increased usage",
+        },
+      ],
+    });
+
+    const codexModel = payload.models.find((model) => model.slug === "gpt-5.3-codex");
+    expect(codexModel?.service_tiers).toEqual([]);
+
+    const miniModel = payload.models.find((model) => model.slug === "gpt-5.4-mini");
+    expect(miniModel?.additional_speed_tiers).toEqual([]);
+    expect(miniModel?.service_tiers).toEqual([]);
+  });
+
+  it("exposes Claude Code models as Codex-compatible virtual models without WebSocket preference", async () => {
+    const claude = fakeProvider({
+      id: "claude-code",
+      routes: ["/v1/messages"],
+      models: [
+        {
+          id: "anthropic/claude-sonnet-4-5",
+          provider: "claude-code",
+          upstreamId: "claude-sonnet-4-5",
+          displayName: "Claude Sonnet 4.5",
+          capabilities: ["messages", "tools", "streaming", "claude-code"],
+          aliases: ["claude-code/claude-sonnet-4-5"],
+        },
+      ],
+    });
+
+    const gateway = createGateway({
+      accounts: new MemoryAccountStore(),
+      providers: [claude],
+    });
+
+    const response = await gateway.fetch(
+      new Request("http://127.0.0.1:2021/backend-api/codex/models"),
+    );
+    const payload = (await response.json()) as {
+      models: Array<Record<string, unknown>>;
+    };
+
+    expect(response.status).toBe(200);
+    expect(payload.models.find((model) => model.slug === "kyoli-claude/claude-sonnet-4-5")).toMatchObject({
+      slug: "kyoli-claude/claude-sonnet-4-5",
+      display_name: "Claude Sonnet 4.5 (Claude bridge)",
+      supports_parallel_tool_calls: true,
+      prefer_websockets: false,
+      available_in_plans: ["claude-code"],
+      visibility: "list",
+    });
+  });
+
+  it("bridges virtual Claude Codex response requests through the Claude Code adapter", async () => {
+    let seenContext: GatewayRequestContext | undefined;
+    const claude = fakeProvider({
+      id: "claude-code",
+      routes: ["/v1/messages"],
+      models: [
+        {
+          id: "anthropic/claude-sonnet-4-5",
+          provider: "claude-code",
+          upstreamId: "claude-sonnet-4-5",
+          displayName: "Claude Sonnet 4.5",
+          capabilities: ["messages", "tools", "streaming", "claude-code"],
+          aliases: ["claude-code/claude-sonnet-4-5"],
+        },
+      ],
+      handle: async (context) => {
+        seenContext = context;
+        return new Response(
+          [
+            "event: message_start",
+            'data: {"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[]}}',
+            "",
+            "event: content_block_start",
+            'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+            "",
+            "event: content_block_delta",
+            'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}',
+            "",
+            "event: content_block_stop",
+            'data: {"type":"content_block_stop","index":0}',
+            "",
+            "event: message_stop",
+            'data: {"type":"message_stop"}',
+            "",
+            "",
+          ].join("\n"),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      },
+    });
+
+    const gateway = createGateway({
+      accounts: new MemoryAccountStore(),
+      providers: [claude],
+    });
+
+    const response = await gateway.fetch(
+      new Request("http://127.0.0.1:2021/backend-api/codex/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "kyoli-claude/claude-sonnet-4-5",
+          instructions: "stay brief",
+          input: [{ role: "user", content: [{ type: "input_text", text: "hi" }] }],
+          tools: [{ type: "function", name: "shell", parameters: { type: "object" } }],
+        }),
+      }),
+    );
+    const text = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/event-stream");
+    expect(seenContext?.route).toBe("/v1/messages");
+    expect(seenContext?.model).toBe("claude-code/claude-sonnet-4-5");
+    expect(seenContext?.body).toMatchObject({
+      model: "claude-code/claude-sonnet-4-5",
+      stream: true,
+      system: "stay brief",
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      tools: [{ name: "shell", input_schema: { type: "object" } }],
+    });
+    expect(text).toContain("response.created");
+    expect(text).toContain("response.output_text.delta");
+    expect(text).toContain('"delta":"hello"');
+    expect(text).toContain("response.completed");
+  });
+
+  it("bridges virtual Claude compact requests through a non-streaming Claude Code request", async () => {
+    let seenContext: GatewayRequestContext | undefined;
+    const claude = fakeProvider({
+      id: "claude-code",
+      routes: ["/v1/messages"],
+      models: [
+        {
+          id: "anthropic/claude-sonnet-4-5",
+          provider: "claude-code",
+          upstreamId: "claude-sonnet-4-5",
+          capabilities: ["messages", "streaming", "claude-code"],
+        },
+      ],
+      handle: async (context) => {
+        seenContext = context;
+        return Response.json({
+          id: "msg_compact",
+          model: "claude-sonnet-4-5",
+          content: [{ type: "text", text: "Summary" }],
+        });
+      },
+    });
+
+    const gateway = createGateway({
+      accounts: new MemoryAccountStore(),
+      providers: [claude],
+    });
+
+    const response = await gateway.fetch(
+      new Request("http://127.0.0.1:2021/backend-api/codex/responses/compact", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "kyoli-claude/claude-sonnet-4-5",
+          input: "long conversation",
+        }),
+      }),
+    );
+    const payload = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(seenContext?.route).toBe("/v1/messages");
+    expect(seenContext?.body).toMatchObject({
+      model: "claude-code/claude-sonnet-4-5",
+      stream: false,
+      messages: [{ role: "user", content: "long conversation" }],
+    });
+    expect(payload).toMatchObject({
+      object: "response.compaction",
+      type: "response.compact",
+      status: "completed",
+    });
+    expect(JSON.stringify(payload)).toContain("Summary");
+  });
+
+  it("bridges virtual Claude Codex WebSocket response.create messages before Codex account selection", async () => {
+    let seenContext: GatewayRequestContext | undefined;
+    const claude = fakeProvider({
+      id: "claude-code",
+      routes: ["/v1/messages"],
+      models: [
+        {
+          id: "anthropic/claude-sonnet-4-5",
+          provider: "claude-code",
+          upstreamId: "claude-sonnet-4-5",
+          capabilities: ["messages", "tools", "streaming", "claude-code"],
+        },
+      ],
+      handle: async (context) => {
+        seenContext = context;
+        return new Response(
+          [
+            "event: message_start",
+            'data: {"type":"message_start","message":{"id":"msg_ws","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[]}}',
+            "",
+            "event: content_block_start",
+            'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+            "",
+            "event: content_block_delta",
+            'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ws hello"}}',
+            "",
+            "event: content_block_stop",
+            'data: {"type":"content_block_stop","index":0}',
+            "",
+            "event: message_stop",
+            'data: {"type":"message_stop"}',
+            "",
+            "",
+          ].join("\n"),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      },
+    });
+    const codex = fakeProvider({
+      id: "codex",
+      routes: ["/backend-api/codex/responses"],
+      models: [],
+      handleWebSocket: async () => {
+        throw new Error("Codex adapter should not receive kyoli-claude WebSocket messages");
+      },
+    });
+
+    const gateway = createGateway({
+      accounts: new MemoryAccountStore(),
+      providers: [codex, claude],
+    });
+
+    const websocket = fakeWebSocket([
+      {
+        type: "text",
+        data: JSON.stringify({
+          type: "response.create",
+          response: {
+            model: "kyoli-claude/claude-sonnet-4-5",
+            instructions: "stay brief",
+            input: "hello",
+          },
+        }),
+      },
+      { type: "close" },
+    ]);
+    await gateway.handleWebSocket(
+      new Request("http://127.0.0.1:2021/backend-api/codex/responses", {
+        headers: { "x-codex-session-id": "claude-ws-thread" },
+      }),
+      websocket,
+    );
+
+    expect(websocket.accepted).toBe(true);
+    expect(seenContext?.route).toBe("/v1/messages");
+    expect(seenContext?.model).toBe("claude-code/claude-sonnet-4-5");
+    expect(seenContext?.sessionKey).toBe("header:claude-ws-thread");
+    expect(seenContext?.body).toMatchObject({
+      model: "claude-code/claude-sonnet-4-5",
+      stream: true,
+      system: "stay brief",
+      messages: [{ role: "user", content: "hello" }],
+    });
+    expect(websocket.sentText.join("\n")).toContain("response.output_text.delta");
+    expect(websocket.sentText.join("\n")).toContain("ws hello");
   });
 
   it("routes native Codex WebSocket upgrades to the Codex adapter", async () => {
@@ -608,41 +1167,39 @@ describe("gateway routing", () => {
     releaseFirstRequest?.();
     await expect(first).resolves.toMatchObject({ status: 200 });
   });
-
-  it("returns JSON for oversized HTTP request bodies instead of resetting the connection", async () => {
-    const codex = fakeProvider({
-      id: "codex",
-      routes: ["/v1/responses"],
-      models: [],
-    });
-    const server = await serveGateway({
-      config: { host: "127.0.0.1", port: 0 },
-      accounts: new MemoryAccountStore(),
-      providers: [codex],
-      maxBodyBytes: 32,
-    });
-
-    try {
-      const response = await fetch(`http://${server.hostname}:${server.port}/v1/responses`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({ model: "openai/gpt-5.3-codex", input: "x".repeat(128) }),
-      });
-
-      expect(response.status).toBe(413);
-      await expect(response.json()).resolves.toMatchObject({
-        error: {
-          type: "payload_too_large",
-          message: "Request body is too large.",
-        },
-      });
-    } finally {
-      server.stop(true);
-    }
-  });
 });
+
+async function listen(server: Server): Promise<number> {
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address() as AddressInfo;
+  return address.port;
+}
+
+async function createDashboardFixture(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "kyoli-dashboard-"));
+  await mkdir(join(dir, "assets"), { recursive: true });
+  await writeFile(
+    join(dir, "index.html"),
+    '<!doctype html><title>Kyoli Dashboard</title><div id="root"></div>',
+    "utf8",
+  );
+  await writeFile(join(dir, "assets", "app.js"), "console.log('dashboard');", "utf8");
+  return dir;
+}
+
+async function close(server: Server): Promise<void> {
+  if (!server.listening) return;
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
+}
 
 function deferred<T>(): {
   promise: Promise<T>;
@@ -674,19 +1231,23 @@ function fakeProvider(input: {
   };
 }
 
-function fakeWebSocket() {
+function fakeWebSocket(messages: GatewayWebSocketMessage[] = []) {
   return {
     accepted: false,
+    sentText: [] as string[],
+    sentBinary: [] as Uint8Array[],
     async accept() {
       this.accepted = true;
     },
     async receive() {
-      return { type: "close" as const };
+      return messages.shift() ?? { type: "close" as const };
     },
-    async sendText() {
+    async sendText(data: string) {
+      this.sentText.push(data);
       return undefined;
     },
-    async sendBinary() {
+    async sendBinary(data: Uint8Array) {
+      this.sentBinary.push(data);
       return undefined;
     },
     async close() {

@@ -75,9 +75,10 @@ concurrency. The default `0` is uncapped. When a positive cap is saturated, the 
 returns `429 local_overload`; provider account exhaustion remains separate and is handled
 by the account executor.
 
-## Docs
+## Related
 
 - [Root README](../../README.md)
-- [Server mode operations](../../docs/server-mode-operations.md)
-- [Codex compatibility matrix](../../docs/codex-compatibility.md)
-- [Claude Code compatibility](../../docs/claude-code-compatibility.md)
+- [`@kyoli-gam/cli`](../cli)
+- [`@kyoli-gam/core`](../core)
+- [`@kyoli-gam/provider-codex-chatgpt`](../providers/codex-chatgpt)
+- [`@kyoli-gam/provider-claude-code`](../providers/claude-code)

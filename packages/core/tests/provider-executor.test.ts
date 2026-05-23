@@ -75,6 +75,41 @@ describe("executeWithAccountFailover", () => {
     ]);
   });
 
+  it("emits selection diagnostics on selected trace events", async () => {
+    const trace: AccountExecutionTraceEvent[] = [];
+    const response = await executeWithAccountFailover({
+      provider: "codex",
+      kind: "oauth",
+      sessionKey: "session-a",
+      missingCredentialResponse: () => new Response("missing", { status: 401 }),
+      failureMessage: (status) => `failed ${status}`,
+      onTrace: (event) => trace.push(event),
+      selectCredential: async () => ({
+        value: "token-1",
+        accountId: "account-1",
+        selectionDiagnostics: {
+          selectedReason: "round_robin",
+          selectedAccount: {
+            id: "account-1",
+            usage: { five_hour: 20, seven_day: 30, max: 30 },
+          },
+          softQuotaSkippedAccountIds: ["account-2"],
+        },
+      }),
+      execute: async () => new Response("upstream", { status: 200 }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(trace[0]).toMatchObject({
+      type: "selected",
+      accountId: "account-1",
+      selectionDiagnostics: {
+        selectedReason: "round_robin",
+        softQuotaSkippedAccountIds: ["account-2"],
+      },
+    });
+  });
+
   it("returns a structured rate-limit response when every account is cooling down", async () => {
     const store = new MemoryAccountStore();
     const account = await store.create({

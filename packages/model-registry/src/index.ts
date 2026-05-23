@@ -124,5 +124,9 @@ function mergeModelInfo(existing: ModelInfo | undefined, next: ModelInfo): Model
     ...next,
     aliases: [...new Set([...(existing.aliases ?? []), ...(next.aliases ?? [])])],
     capabilities: [...new Set([...existing.capabilities, ...next.capabilities])],
+    metadata: {
+      ...(existing.metadata ?? {}),
+      ...(next.metadata ?? {}),
+    },
   };
 }

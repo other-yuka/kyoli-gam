@@ -15,7 +15,6 @@ import {
   getExcludedBetas,
   getModelBetas,
   isUnexpectedBetaError,
-  getNextBetaToExclude,
   isLongContextError,
   LONG_CONTEXT_BETAS,
 } from "../request/betas";
@@ -484,12 +483,14 @@ export class AccountRuntimeFactory {
           addExcludedBeta(modelId, rejectedBeta);
         }
       } else {
-        const betaToExclude = getNextBetaToExclude(modelId);
-        if (!betaToExclude) {
+        const betasToExclude = LONG_CONTEXT_BETAS.filter((beta) => !getExcludedBetas(modelId).has(beta));
+        if (betasToExclude.length === 0) {
           break;
         }
 
-        addExcludedBeta(modelId, betaToExclude);
+        for (const beta of betasToExclude) {
+          addExcludedBeta(modelId, beta);
+        }
       }
 
       const retryHeaders = this.buildOutboundHeaders(

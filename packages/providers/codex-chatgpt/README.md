@@ -33,8 +33,8 @@ kyoli doctor codex --e2e --codex-cli
 kyoli doctor codex --load --requests 8 --concurrency 2
 ```
 
-## Docs
+## Related
 
-- [Codex compatibility matrix](../../../docs/codex-compatibility.md)
-- [Codex release checklist](../../../docs/codex-release-checklist.md)
-- [codex-lb cross-check](../../../docs/codex-lb-crosscheck.md)
+- [Root README](../../../README.md)
+- [`@kyoli-gam/gateway`](../../gateway)
+- [`opencode-codex-multi-account`](../../codex-multi-account)

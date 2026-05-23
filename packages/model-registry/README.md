@@ -27,8 +27,8 @@ KYOLI_MODELS_REFRESH_INTERVAL_MS=3600000
 KYOLI_MODELS_FETCH_TIMEOUT_MS=10000
 ```
 
-## Docs
+## Related
 
 - [Root README](../../README.md)
-- [OpenCode Plugin Mode](../../docs/opencode-plugin-mode.md)
-- [Codex compatibility matrix](../../docs/codex-compatibility.md)
+- [`@kyoli-gam/gateway`](../gateway)
+- [`@kyoli-gam/provider-codex-chatgpt`](../providers/codex-chatgpt)
