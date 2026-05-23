@@ -95,7 +95,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           run_install: false
 
@@ -168,9 +168,20 @@ jobs:
     outputs:
       pr_url: ${{ steps.pr.outputs.pr_url }}
     steps:
-      - uses: actions/checkout@v6
+      - name: Require drift bot PAT
+        env:
+          DRIFT_BOT_PAT: ${{ secrets.DARIO_DRIFT_BOT_PAT }}
+        run: |
+          if [ -z "$DRIFT_BOT_PAT" ]; then
+            echo "::error::DARIO_DRIFT_BOT_PAT is required so auto-opened drift PRs trigger normal pull_request checks."
+            exit 1
+          fi
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.DARIO_DRIFT_BOT_PAT }}
+
+      - uses: actions/download-artifact@v8
         with:
           name: claude-code-drift-report
 
@@ -183,7 +194,7 @@ jobs:
       - name: Open or update compat-range PR
         id: pr
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.DARIO_DRIFT_BOT_PAT }}
           CHANGED_FILES_JSON: ${{ steps.autopatch.outputs.changed_files }}
         run: |
           set -euo pipefail
@@ -234,7 +245,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           name: claude-code-drift-report
 
