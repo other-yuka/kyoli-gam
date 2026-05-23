@@ -535,6 +535,7 @@ describe("fingerprint-capture", () => {
         "Read",
         "RemoteTrigger",
         "ScheduleWakeup",
+        "ShareOnboardingGuide",
         "Skill",
         "TaskCreate",
         "TaskGet",
