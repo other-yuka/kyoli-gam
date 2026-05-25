@@ -43,7 +43,7 @@
   "dependencies": {
     "@opencode-ai/plugin": "^1.15.10",
     "opencode-multi-account-core": "workspace:*",
-    "valibot": "^1.2.0"
+    "valibot": "^1.4.1"
   },
   "devDependencies": {
     "@types/node": "^25.9.1",
