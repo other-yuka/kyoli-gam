@@ -15,12 +15,38 @@ import {
 
 const captureTimeoutMs = Number(process.env.FINGERPRINT_CAPTURE_TIMEOUT_MS ?? "10000");
 
-function assertClaudeCodeFingerprint(template, pinnedTemplate) {
-  if (!matchesBundledClaudeCodeFingerprint(template, pinnedTemplate)) {
-    throw new Error(
-      "captured fingerprint does not match bundled Claude Code identity; refusing to overwrite fallback template",
-    );
+function formatToolDiff(template, pinnedTemplate) {
+  const actualToolNames = template.tools.map((tool) => tool.name);
+  const expectedToolNames = pinnedTemplate.tool_names;
+  const diffs = [];
+
+  for (let index = 0; index < Math.max(actualToolNames.length, expectedToolNames.length); index += 1) {
+    if (actualToolNames[index] !== expectedToolNames[index]) {
+      diffs.push(`${index}: ${expectedToolNames[index] ?? "(missing)"} -> ${actualToolNames[index] ?? "(missing)"}`);
+    }
   }
+
+  return diffs.join("; ");
+}
+
+function assertClaudeCodeFingerprint(template, pinnedTemplate) {
+  if (matchesBundledClaudeCodeFingerprint(template, pinnedTemplate)) {
+    return;
+  }
+
+  if (
+    process.env.ALLOW_FINGERPRINT_SHAPE_CHANGE === "1"
+    && template.agent_identity === pinnedTemplate.agent_identity
+  ) {
+    console.warn(
+      `Allowing Claude Code fingerprint shape change after identity match; tool diff: ${formatToolDiff(template, pinnedTemplate)}`,
+    );
+    return;
+  }
+
+  throw new Error(
+    "captured fingerprint does not match bundled Claude Code identity; refusing to overwrite fallback template",
+  );
 }
 
 async function main() {

@@ -196,7 +196,10 @@ jobs:
               --label claude-code-drift \
               --body-file issue-body.md
           else
-            gh issue comment "$EXISTING" --body-file issue-body.md
+            # Keep one drift issue per Claude Code version. Updating the body preserves
+            # the latest run link without adding a duplicate notification comment on
+            # the daily fallback schedule.
+            gh issue edit "$EXISTING" --body-file issue-body.md
           fi
 
   close_resolved_issues:
