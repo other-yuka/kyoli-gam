@@ -347,6 +347,27 @@ describe("upstream-request", () => {
     expect(result.output_config).toEqual({ effort: "medium" });
   });
 
+  test("buildUpstreamRequest maps OpenCode Anthropic thinking budgetTokens into output_config effort", () => {
+    const result = buildUpstreamRequest({
+      model: "claude-sonnet-4-6",
+      thinking: { type: "enabled", budgetTokens: 16_000 },
+      messages: [{ role: "user", content: "hello" }],
+    }, createIdentity(), createTemplate());
+
+    expect(result.thinking).toEqual({ type: "adaptive" });
+    expect(result.output_config).toEqual({ effort: "high" });
+  });
+
+  test("buildUpstreamRequest maps Anthropic snake_case thinking budget into max output effort", () => {
+    const result = buildUpstreamRequest({
+      model: "claude-sonnet-4-6",
+      thinking: { type: "enabled", budget_tokens: 64_000 },
+      messages: [{ role: "user", content: "hello" }],
+    }, createIdentity(), createTemplate());
+
+    expect(result.output_config).toEqual({ effort: "max" });
+  });
+
   test("buildUpstreamRequest lets configured effort override client effort", () => {
     setUpstreamRequestTestOverridesForTest({ outputEffort: "xhigh" });
 
