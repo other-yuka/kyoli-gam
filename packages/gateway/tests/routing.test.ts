@@ -888,6 +888,7 @@ describe("gateway routing", () => {
         body: JSON.stringify({
           model: "kyoli-claude/claude-sonnet-4-5",
           instructions: "stay brief",
+          reasoning: { effort: "low" },
           input: [{ role: "user", content: [{ type: "input_text", text: "hi" }] }],
           tools: [{ type: "function", name: "shell", parameters: { type: "object" } }],
         }),
@@ -902,6 +903,7 @@ describe("gateway routing", () => {
     expect(seenContext?.body).toMatchObject({
       model: "claude-code/claude-sonnet-4-5",
       stream: true,
+      output_config: { effort: "low" },
       system: "stay brief",
       messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
       tools: [{ name: "shell", input_schema: { type: "object" } }],
