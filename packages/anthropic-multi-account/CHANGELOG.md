@@ -1,5 +1,14 @@
 # opencode-anthropic-multi-account
 
+## 0.2.41
+
+### Patch Changes
+
+- [#15](https://github.com/other-yuka/kyoli-gam/pull/15) [`2a543a3`](https://github.com/other-yuka/kyoli-gam/commit/2a543a38ce5c58aa94bb32b6e0f2f2ea018f0cfe) Thanks [@other-yuka](https://github.com/other-yuka)! - Map OpenCode Anthropic thinking budgets into Claude Code output effort so variant-selected reasoning levels are preserved.
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.41
+
 ## 0.2.40
 
 ### Patch Changes
