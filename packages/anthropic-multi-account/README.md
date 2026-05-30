@@ -51,7 +51,9 @@ This is an internal compatibility policy, not a third user-facing mode.
 
 For non-Haiku Claude Code requests, the plugin forwards a client-provided effort
 from `output_config.effort`, `reasoning.effort`, `reasoning_effort`, or
-`reasoningEffort`. If the client does not provide one, it falls back to `high`.
+`reasoningEffort`. It also maps OpenCode/Anthropic `thinking.budgetTokens`
+or Anthropic wire `thinking.budget_tokens` into an output effort. If the client
+does not provide one, it falls back to `high`.
 
 Operators can pin the outbound effort with `CLAUDE_MULTI_ACCOUNT_EFFORT` or
 `ANTHROPIC_MULTI_ACCOUNT_EFFORT`. Supported values are `low`, `medium`, `high`,

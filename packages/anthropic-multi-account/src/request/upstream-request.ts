@@ -81,6 +81,19 @@ function normalizeEffortForWire(effort: OutputEffortValue): string {
   return effort === "ultracode" ? "xhigh" : effort;
 }
 
+function readPositiveNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+function effortFromThinkingBudget(thinking: JsonRecord | undefined): OutputEffortValue | undefined {
+  const budgetTokens = readPositiveNumber(thinking?.budget_tokens) ?? readPositiveNumber(thinking?.budgetTokens);
+  if (budgetTokens === undefined) return undefined;
+  if (budgetTokens >= 32_000) return "max";
+  if (budgetTokens >= 16_000) return "high";
+  if (budgetTokens >= 8_000) return "medium";
+  return "low";
+}
+
 function getConfiguredOutputEffort(): OutputEffortValue | undefined {
   return upstreamRequestTestOverrides.outputEffort
     ?? readOutputEffortValue(process.env.CLAUDE_MULTI_ACCOUNT_EFFORT)
@@ -96,7 +109,8 @@ function getClientOutputEffort(inputBody: Record<string, unknown>): OutputEffort
     ?? readOutputEffortValue(reasoning?.effort)
     ?? readOutputEffortValue(inputBody.reasoning_effort)
     ?? readOutputEffortValue(inputBody.reasoningEffort)
-    ?? readOutputEffortValue(thinking?.effort);
+    ?? readOutputEffortValue(thinking?.effort)
+    ?? effortFromThinkingBudget(thinking);
 }
 
 export function resolveOutputEffort(
