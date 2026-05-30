@@ -1,0 +1,100 @@
+name: kyoli doctor drift watch
+
+on:
+  schedule:
+    - cron: "37 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      doctor_commands_json:
+        description: Optional JSON array of command argv arrays for scripts/check-kyoli-doctor-drift.mjs
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: kyoli-doctor-drift-watch
+  cancel-in-progress: false
+
+jobs:
+  doctor_drift:
+    if: github.event_name == 'workflow_dispatch' || vars.KYOLI_DOCTOR_DRIFT_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build doctor dependencies
+        run: pnpm --filter @kyoli-gam/cli build && pnpm --filter @kyoli-gam/provider-claude-code build
+
+      - name: Run kyoli doctor drift check
+        id: check
+        env:
+          KYOLI_DOCTOR_COMMANDS_JSON: ${{ inputs.doctor_commands_json || vars.KYOLI_DOCTOR_COMMANDS_JSON }}
+        run: |
+          set +e
+          node scripts/check-kyoli-doctor-drift.mjs > kyoli-doctor-drift.json 2> kyoli-doctor-drift.err
+          code=$?
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          if [ "$code" -eq 0 ]; then
+            cat kyoli-doctor-drift.json
+            exit 0
+          fi
+          if [ "$code" -eq 1 ]; then
+            cat kyoli-doctor-drift.json
+            exit 0
+          fi
+          cat kyoli-doctor-drift.err
+          exit "$code"
+
+      - name: Open or update kyoli doctor drift issue
+        if: steps.check.outputs.exit_code == '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create kyoli-doctor-drift \
+            --color D93F0B \
+            --description "kyoli doctor surfaced runtime Claude/OAuth/template drift" \
+            2>/dev/null || true
+
+          body_file=$(mktemp)
+          {
+            echo "## kyoli doctor drift"
+            echo ""
+            echo "\`.github/workflows/kyoli-doctor-drift-watch.yml\` detected runtime drift on $(date -Iseconds)."
+            echo ""
+            echo '```json'
+            cat kyoli-doctor-drift.json
+            echo '```'
+          } > "$body_file"
+
+          existing=$(gh issue list --label kyoli-doctor-drift --state open --json number --jq '.[0].number // ""')
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --body-file "$body_file"
+          else
+            gh issue create --title "kyoli doctor drift detected" --label kyoli-doctor-drift --body-file "$body_file"
+          fi
+
+      - name: Auto-close kyoli doctor drift issue on clean run
+        if: steps.check.outputs.exit_code == '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue list --label kyoli-doctor-drift --state open --json number --jq '.[].number' | while read -r n; do
+            [ -z "$n" ] && continue
+            gh issue close "$n" --comment "Auto-closed: kyoli doctor drift check is clean on run https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID."
+          done

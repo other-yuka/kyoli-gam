@@ -35,7 +35,7 @@ const STATIC_HEADER_NAMES = [
 ] as const;
 const SUPPORTED_CC_RANGE = {
   min: "1.0.0",
-  maxTested: "2.1.156",
+  maxTested: "2.1.158",
 } as const;
 
 type TemplateSource = "bundled" | "cached" | "live";
@@ -223,9 +223,27 @@ function readLiveCacheSync(sourceOverride: TemplateSource = "cached"): TemplateD
   }
 }
 
+function getCapturedAt(template: TemplateData): number {
+  return Date.parse(template._captured);
+}
+
 function isFreshTemplate(template: TemplateData): boolean {
-  const capturedAt = Date.parse(template._captured);
+  const capturedAt = getCapturedAt(template);
   return Number.isFinite(capturedAt) && (now() - capturedAt) < LIVE_TTL_MS;
+}
+
+function pickTemplate(cached: TemplateData, bundled: TemplateData): TemplateData {
+  if (isFreshTemplate(cached)) {
+    return cached;
+  }
+
+  const cachedAt = getCapturedAt(cached);
+  const bundledAt = getCapturedAt(bundled);
+  if (Number.isFinite(bundledAt) && (!Number.isFinite(cachedAt) || bundledAt > cachedAt)) {
+    return bundled;
+  }
+
+  return cached;
 }
 
 async function atomicWriteJson(targetPath: string, payload: unknown): Promise<void> {
@@ -434,11 +452,12 @@ function probeInstalledCCVersion(): string | null {
 
 export function loadTemplate(): TemplateData {
   const cached = readLiveCacheSync("cached");
+  const bundled = loadBundledTemplate();
   if (cached && isUsableTemplate(cached)) {
-    return cached;
+    return pickTemplate(cached, bundled);
   }
 
-  return loadBundledTemplate();
+  return bundled;
 }
 
 export function extractTemplate(captured: CapturedRequest): TemplateData | null {

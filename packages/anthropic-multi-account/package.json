@@ -23,7 +23,8 @@
     "check:cc-authorize-probe-headless": "node scripts/check-cc-authorize-probe-headless.mjs",
     "bake:fingerprint": "pnpm run build && ALLOW_FINGERPRINT_OVERWRITE=1 node scripts/rebake-bundled-fingerprint.mjs",
     "prepack": "pnpm run build",
-    "dev": "tsup --watch"
+    "dev": "tsup --watch",
+    "check:sdk-drift": "node scripts/check-sdk-drift.mjs"
   },
   "engines": {
     "node": ">=20.0.0"

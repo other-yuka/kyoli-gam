@@ -1,0 +1,80 @@
+name: Claude Agent SDK drift watch
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: sdk-drift-watch
+  cancel-in-progress: false
+
+jobs:
+  sdk_drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Run SDK drift check
+        id: check
+        run: |
+          set +e
+          node packages/anthropic-multi-account/scripts/check-sdk-drift.mjs > sdk-drift.json 2> sdk-drift.err
+          code=$?
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          if [ "$code" -eq 0 ]; then
+            cat sdk-drift.json
+            exit 0
+          fi
+          if [ "$code" -eq 1 ]; then
+            cat sdk-drift.json
+            exit 0
+          fi
+          cat sdk-drift.err
+          exit "$code"
+
+      - name: Open or update SDK drift issue
+        if: steps.check.outputs.exit_code == '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create sdk-drift \
+            --color 5319E7 \
+            --description "Claude Agent SDK metadata drift requires kyoli compatibility review" \
+            2>/dev/null || true
+
+          body_file=$(mktemp)
+          {
+            echo "## Claude Agent SDK drift"
+            echo ""
+            echo "\`.github/workflows/sdk-drift-watch.yml\` detected metadata drift on $(date -Iseconds)."
+            echo ""
+            echo '```json'
+            cat sdk-drift.json
+            echo '```'
+          } > "$body_file"
+
+          existing=$(gh issue list --label sdk-drift --state open --json number --jq '.[0].number // ""')
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --body-file "$body_file"
+          else
+            gh issue create --title "Claude Agent SDK drift detected" --label sdk-drift --body-file "$body_file"
+          fi
+
+      - name: Auto-close SDK drift issue on clean run
+        if: steps.check.outputs.exit_code == '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue list --label sdk-drift --state open --json number --jq '.[].number' | while read -r n; do
+            [ -z "$n" ] && continue
+            gh issue close "$n" --comment "Auto-closed: SDK drift check is clean on run https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID."
+          done
