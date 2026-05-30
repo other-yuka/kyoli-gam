@@ -350,7 +350,7 @@ describe("fingerprint-capture", () => {
     }
   });
 
-  test("loadTemplate keeps cached data even when cached version mismatches bundled version", async () => {
+  test("loadTemplate keeps fresh cached data even when cached version mismatches bundled version", async () => {
     const { dir, cleanup } = await setupTestEnv();
 
     try {
@@ -372,7 +372,7 @@ describe("fingerprint-capture", () => {
     }
   });
 
-  test("loadTemplate keeps cached data even when cached version mismatches installed version", async () => {
+  test("loadTemplate keeps fresh cached data even when cached version mismatches installed version", async () => {
     const { dir, cleanup } = await setupTestEnv();
 
     try {
@@ -391,6 +391,56 @@ describe("fingerprint-capture", () => {
       const template = loadTemplate();
       expect(template._source).toBe("cached");
       expect(template.cc_version).toBe("2.1.113");
+    } finally {
+      await cleanup();
+    }
+  });
+
+
+  test("loadTemplate prefers bundled data when stale cache is older than the bundled snapshot", async () => {
+    const { dir, cleanup } = await setupTestEnv();
+
+    try {
+      const bundled = loadTemplate();
+      await fs.writeFile(
+        join(dir, CACHE_FILE_NAME),
+        `${JSON.stringify(createLiveTemplate({
+          _captured: "2020-01-01T00:00:00.000Z",
+          cc_version: "2.1.1",
+        }), null, 2)}\n`,
+        "utf8",
+      );
+
+      const template = loadTemplate();
+
+      expect(template._source).toBe("bundled");
+      expect(template.cc_version).toBe(bundled.cc_version);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("loadTemplate keeps a stale cache when it is newer than the bundled snapshot", async () => {
+    const { dir, cleanup } = await setupTestEnv();
+
+    try {
+      await fs.writeFile(
+        join(dir, CACHE_FILE_NAME),
+        `${JSON.stringify(createLiveTemplate({
+          _captured: "2999-01-01T00:00:00.000Z",
+          cc_version: "9.9.9",
+        }), null, 2)}\n`,
+        "utf8",
+      );
+
+      setFingerprintCaptureTestOverridesForTest({
+        now: () => Date.parse("2999-01-03T00:00:00.000Z"),
+      });
+
+      const template = loadTemplate();
+
+      expect(template._source).toBe("cached");
+      expect(template.cc_version).toBe("9.9.9");
     } finally {
       await cleanup();
     }
