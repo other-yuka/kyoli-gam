@@ -1,5 +1,14 @@
 # opencode-anthropic-multi-account
 
+## 0.2.39
+
+### Patch Changes
+
+- [#11](https://github.com/other-yuka/kyoli-gam/pull/11) [`d8a26bc`](https://github.com/other-yuka/kyoli-gam/commit/d8a26bc2614ec2c02cef97fb1aa548ef0d865f21) Thanks [@other-yuka](https://github.com/other-yuka)! - Update the bundled Claude Code compatibility fingerprint and max tested range to 2.1.158, and prevent stale live fingerprint caches from shadowing newer bundled templates.
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.39
+
 ## 0.2.38
 
 ### Patch Changes
