@@ -29,8 +29,11 @@ import {
   buildUpstreamRequest,
   createStreamingReverseMapper,
   getDanglingToolUseError,
+  OPENCODE_OUTPUT_EFFORT_HEADER,
+  readOpenCodeVariantEffort,
   getUpstreamSessionId,
   reverseMapResponse,
+  type OutputEffortValue,
 } from "../request/upstream-request";
 import { claudeCodeIntegration, type ClaudeIdentity } from "../claude-code";
 import type { PluginClient, StoredAccount } from "../shared/types";
@@ -95,6 +98,10 @@ function extractIncomingHeaders(
 
 function isRecord(value: unknown): value is JsonRecord {
   return typeof value === "object" && value !== null;
+}
+
+function readHeaderOutputEffort(headers: Record<string, string>): OutputEffortValue | undefined {
+  return readOpenCodeVariantEffort(headers[OPENCODE_OUTPUT_EFFORT_HEADER]);
 }
 
 function messageHasToolUse(message: Message): boolean {
@@ -163,6 +170,7 @@ function transformBodyToUpstream(
   body: string,
   identity: ClaudeIdentity,
   sessionId: string,
+  outputEffort?: OutputEffortValue,
 ): { body: string; reverseLookup: Map<string, string>; validationError: string | null } {
   try {
     const parsed = JSON.parse(body) as unknown;
@@ -176,7 +184,7 @@ function transformBodyToUpstream(
       parsed as Record<string, unknown>,
       identity,
       template,
-      { sessionId },
+      { sessionId, outputEffort },
     );
 
     const validationError = getDanglingToolUseError(
@@ -381,6 +389,8 @@ export class AccountRuntimeFactory {
 
     const incomingHeaders = extractIncomingHeaders(transformedInput, init);
     const sessionId = incomingHeaders["x-claude-code-session-id"] ?? getUpstreamSessionId();
+    const outputEffort = readHeaderOutputEffort(incomingHeaders);
+    delete incomingHeaders[OPENCODE_OUTPUT_EFFORT_HEADER];
     const headers = this.buildOutboundHeaders(
       incomingHeaders,
       sessionId,
@@ -394,7 +404,7 @@ export class AccountRuntimeFactory {
     }
 
     const transformedRequest = typeof init?.body === "string"
-      ? transformBodyToUpstream(init.body, identity, sessionId)
+      ? transformBodyToUpstream(init.body, identity, sessionId, outputEffort)
       : { body: init?.body, reverseLookup: new Map<string, string>(), validationError: null };
 
     if (transformedRequest.validationError) {

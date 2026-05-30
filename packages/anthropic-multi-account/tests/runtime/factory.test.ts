@@ -111,6 +111,34 @@ describe("runtime-factory", () => {
     expect(body.tools[0]?.name).toMatch(/^tool_[a-f0-9]+$/);
   });
 
+  test("uses OpenCode variant effort bridge header without forwarding it upstream", async () => {
+    const uuid = await seedAccount();
+    const factory = new AccountRuntimeFactory(store, client);
+    const runtime = await factory.getRuntime(uuid);
+
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response("ok"));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await runtime.fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-kyoli-opencode-effort": "max",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    });
+
+    const [, init] = fetchMock.mock.calls[0] ?? [];
+    const headers = toHeaders(init?.headers);
+    const body = JSON.parse(String(init?.body)) as { output_config?: { effort?: string } };
+
+    expect(headers.has("x-kyoli-opencode-effort")).toBe(false);
+    expect(body.output_config).toEqual({ effort: "max" });
+  });
+
   test("prefers stored per-account Claude identity over process identity", async () => {
     const uuid = await seedAccount({
       accountId: "provider-account",
