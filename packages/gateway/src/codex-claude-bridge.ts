@@ -24,6 +24,7 @@ interface AnthropicMessageBody {
   messages: Array<Record<string, unknown>>;
   metadata?: Record<string, unknown>;
   model: string;
+  output_config?: { effort: string };
   stream: boolean;
   system?: string | Array<Record<string, unknown>>;
   tool_choice?: Record<string, unknown>;
@@ -282,8 +283,17 @@ function convertCodexResponsesBodyToAnthropicMessages(body: Record<string, unkno
   if (toolChoice) result.tool_choice = toolChoice;
   const metadata = readRecord(body.metadata);
   if (metadata) result.metadata = metadata;
+  const effort = readReasoningEffort(body);
+  if (effort) result.output_config = { effort };
 
   return { ok: true, body: result };
+}
+
+function readReasoningEffort(body: Record<string, unknown>): string | undefined {
+  const reasoning = readRecord(body.reasoning);
+  return readString(reasoning?.effort) ??
+    readString(body.reasoning_effort) ??
+    readString(body.reasoningEffort);
 }
 
 function readCodexWebSocketResponseBody(message: GatewayWebSocketMessage): Record<string, unknown> | undefined {

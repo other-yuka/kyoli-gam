@@ -47,6 +47,17 @@ Claude tool handling is OpenCode-first:
 
 This is an internal compatibility policy, not a third user-facing mode.
 
+## Claude Code effort
+
+For non-Haiku Claude Code requests, the plugin forwards a client-provided effort
+from `output_config.effort`, `reasoning.effort`, `reasoning_effort`, or
+`reasoningEffort`. If the client does not provide one, it falls back to `high`.
+
+Operators can pin the outbound effort with `CLAUDE_MULTI_ACCOUNT_EFFORT` or
+`ANTHROPIC_MULTI_ACCOUNT_EFFORT`. Supported values are `low`, `medium`, `high`,
+`xhigh`, `max`, `ultracode`, and `client`; `ultracode` is normalized to `xhigh`
+on the wire.
+
 ## Server Mode migration
 
 ```bash

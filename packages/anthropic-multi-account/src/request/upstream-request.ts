@@ -21,13 +21,17 @@ import { selectOpenCodeNativeTools, type ToolDefinition } from "./tool-adapter";
 const BILLING_SEED = "59cf53e54c78";
 const SESSION_IDLE_ROTATE_MS = 15 * 60 * 1000;
 const DEFAULT_CONTEXT_MANAGEMENT = {};
-const DEFAULT_OUTPUT_CONFIG = { effort: "high" };
+const DEFAULT_OUTPUT_EFFORT = "high";
+const VALID_OUTPUT_EFFORT_VALUES = new Set(["low", "medium", "high", "xhigh", "ultracode", "max", "client"]);
+
+type OutputEffortValue = "low" | "medium" | "high" | "xhigh" | "ultracode" | "max" | "client";
 
 type ReverseLookup = Map<string, string> | Record<string, string> | undefined;
 
 interface UpstreamRequestTestOverrides {
   now?: () => number;
   createSessionId?: () => string;
+  outputEffort?: OutputEffortValue;
 }
 
 let upstreamRequestTestOverrides: UpstreamRequestTestOverrides = {};
@@ -59,6 +63,56 @@ export function getUpstreamSessionId(): string {
 
 function isRecord(value: unknown): value is JsonRecord {
   return typeof value === "object" && value !== null;
+}
+
+
+function readString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function readOutputEffortValue(value: unknown): OutputEffortValue | undefined {
+  const normalized = readString(value)?.toLowerCase();
+  return normalized && VALID_OUTPUT_EFFORT_VALUES.has(normalized)
+    ? normalized as OutputEffortValue
+    : undefined;
+}
+
+function normalizeEffortForWire(effort: OutputEffortValue): string {
+  return effort === "ultracode" ? "xhigh" : effort;
+}
+
+function getConfiguredOutputEffort(): OutputEffortValue | undefined {
+  return upstreamRequestTestOverrides.outputEffort
+    ?? readOutputEffortValue(process.env.CLAUDE_MULTI_ACCOUNT_EFFORT)
+    ?? readOutputEffortValue(process.env.ANTHROPIC_MULTI_ACCOUNT_EFFORT);
+}
+
+function getClientOutputEffort(inputBody: Record<string, unknown>): OutputEffortValue | undefined {
+  const outputConfig = isRecord(inputBody.output_config) ? inputBody.output_config : undefined;
+  const reasoning = isRecord(inputBody.reasoning) ? inputBody.reasoning : undefined;
+  const thinking = isRecord(inputBody.thinking) ? inputBody.thinking : undefined;
+
+  return readOutputEffortValue(outputConfig?.effort)
+    ?? readOutputEffortValue(reasoning?.effort)
+    ?? readOutputEffortValue(inputBody.reasoning_effort)
+    ?? readOutputEffortValue(inputBody.reasoningEffort)
+    ?? readOutputEffortValue(thinking?.effort);
+}
+
+export function resolveOutputEffort(
+  inputBody: Record<string, unknown>,
+  configuredEffort = getConfiguredOutputEffort(),
+): string {
+  if (configuredEffort && configuredEffort !== "client") {
+    return normalizeEffortForWire(configuredEffort);
+  }
+
+  const clientEffort = getClientOutputEffort(inputBody);
+  return normalizeEffortForWire(clientEffort ?? DEFAULT_OUTPUT_EFFORT);
+}
+
+function isHaikuModel(modelId: string): boolean {
+  return modelId.trim().toLowerCase().includes("haiku");
 }
 
 function collectToolUseIds(message: Message): string[] {
@@ -240,7 +294,9 @@ export function buildUpstreamRequest(
   if (supportsAdaptiveThinking(modelId)) {
     body.thinking = { type: "adaptive" };
     body.context_management = DEFAULT_CONTEXT_MANAGEMENT;
-    body.output_config = DEFAULT_OUTPUT_CONFIG;
+  }
+  if (modelId && !isHaikuModel(modelId)) {
+    body.output_config = { effort: resolveOutputEffort(inputBody) };
   }
   body.max_tokens = resolveMaxTokens(body.max_tokens);
 

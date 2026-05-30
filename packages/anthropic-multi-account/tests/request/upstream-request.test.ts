@@ -205,7 +205,7 @@ describe("upstream-request", () => {
     expect(result.max_tokens).toBe(32_000);
     expect("thinking" in result).toBe(false);
     expect("context_management" in result).toBe(false);
-    expect("output_config" in result).toBe(false);
+    expect(result.output_config).toEqual({ effort: "high" });
     expect(result.tools).toEqual([{ name: "OriginalTool", description: "legacy" }]);
     expect(messages).toHaveLength(3);
     expect(messages[1]?.content).toEqual([{ type: "text", text: "Working on it" }]);
@@ -324,6 +324,62 @@ describe("upstream-request", () => {
     expect("top_k" in result).toBe(false);
     expect(result.thinking).toEqual({ type: "adaptive" });
     expect(result.output_config).toEqual({ effort: "high" });
+  });
+
+  test("buildUpstreamRequest passes through client output_config effort on non-Haiku models", () => {
+    const result = buildUpstreamRequest({
+      model: "claude-sonnet-4-6",
+      output_config: { effort: "low" },
+      messages: [{ role: "user", content: "hello" }],
+    }, createIdentity(), createTemplate());
+
+    expect(result.thinking).toEqual({ type: "adaptive" });
+    expect(result.output_config).toEqual({ effort: "low" });
+  });
+
+  test("buildUpstreamRequest maps Responses reasoning effort into output_config effort", () => {
+    const result = buildUpstreamRequest({
+      model: "claude-sonnet-4-6",
+      reasoning: { effort: "medium" },
+      messages: [{ role: "user", content: "hello" }],
+    }, createIdentity(), createTemplate());
+
+    expect(result.output_config).toEqual({ effort: "medium" });
+  });
+
+  test("buildUpstreamRequest lets configured effort override client effort", () => {
+    setUpstreamRequestTestOverridesForTest({ outputEffort: "xhigh" });
+
+    const result = buildUpstreamRequest({
+      model: "claude-sonnet-4-6",
+      output_config: { effort: "low" },
+      messages: [{ role: "user", content: "hello" }],
+    }, createIdentity(), createTemplate());
+
+    expect(result.output_config).toEqual({ effort: "xhigh" });
+  });
+
+  test("buildUpstreamRequest normalizes ultracode effort to xhigh on the wire", () => {
+    setUpstreamRequestTestOverridesForTest({ outputEffort: "ultracode" });
+
+    const result = buildUpstreamRequest({
+      model: "claude-sonnet-4-6",
+      messages: [{ role: "user", content: "hello" }],
+    }, createIdentity(), createTemplate());
+
+    expect(result.output_config).toEqual({ effort: "xhigh" });
+  });
+
+  test("buildUpstreamRequest emits output_config for non-adaptive non-Haiku models", () => {
+    const result = buildUpstreamRequest({
+      model: "claude-sonnet-4-5",
+      output_config: { effort: "max" },
+      messages: [{ role: "user", content: "hello" }],
+    }, createIdentity(), createTemplate());
+
+    expect("thinking" in result).toBe(false);
+    expect("context_management" in result).toBe(false);
+    expect(result.output_config).toEqual({ effort: "max" });
   });
 
   test("buildUpstreamRequest drops incoming thinking controls and does not force adaptive on Haiku", () => {
