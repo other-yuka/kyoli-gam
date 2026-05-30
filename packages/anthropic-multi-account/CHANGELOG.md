@@ -1,5 +1,14 @@
 # opencode-anthropic-multi-account
 
+## 0.2.40
+
+### Patch Changes
+
+- [#13](https://github.com/other-yuka/kyoli-gam/pull/13) [`e0c313f`](https://github.com/other-yuka/kyoli-gam/commit/e0c313fed513b1a93db2030ad1ac309ddd2be563) Thanks [@other-yuka](https://github.com/other-yuka)! - Pass through client Claude Code output effort when provided instead of always forcing high, with environment overrides for pinned effort values.
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.40
+
 ## 0.2.39
 
 ### Patch Changes
