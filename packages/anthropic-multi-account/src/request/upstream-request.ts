@@ -24,7 +24,9 @@ const DEFAULT_CONTEXT_MANAGEMENT = {};
 const DEFAULT_OUTPUT_EFFORT = "high";
 const VALID_OUTPUT_EFFORT_VALUES = new Set(["low", "medium", "high", "xhigh", "ultracode", "max", "client"]);
 
-type OutputEffortValue = "low" | "medium" | "high" | "xhigh" | "ultracode" | "max" | "client";
+export const OPENCODE_OUTPUT_EFFORT_HEADER = "x-kyoli-opencode-effort";
+
+export type OutputEffortValue = "low" | "medium" | "high" | "xhigh" | "ultracode" | "max" | "client";
 
 type ReverseLookup = Map<string, string> | Record<string, string> | undefined;
 
@@ -70,11 +72,17 @@ function readString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
-function readOutputEffortValue(value: unknown): OutputEffortValue | undefined {
+export function readOutputEffortValue(value: unknown): OutputEffortValue | undefined {
   const normalized = readString(value)?.toLowerCase();
   return normalized && VALID_OUTPUT_EFFORT_VALUES.has(normalized)
     ? normalized as OutputEffortValue
     : undefined;
+}
+
+export function readOpenCodeVariantEffort(value: unknown): OutputEffortValue | undefined {
+  const normalized = readString(value)?.toLowerCase();
+  if (normalized === "minimal") return "low";
+  return readOutputEffortValue(normalized);
 }
 
 function normalizeEffortForWire(effort: OutputEffortValue): string {
@@ -88,7 +96,7 @@ function readPositiveNumber(value: unknown): number | undefined {
 function effortFromThinkingBudget(thinking: JsonRecord | undefined): OutputEffortValue | undefined {
   const budgetTokens = readPositiveNumber(thinking?.budget_tokens) ?? readPositiveNumber(thinking?.budgetTokens);
   if (budgetTokens === undefined) return undefined;
-  if (budgetTokens >= 32_000) return "max";
+  if (budgetTokens >= 31_999) return "max";
   if (budgetTokens >= 16_000) return "high";
   if (budgetTokens >= 8_000) return "medium";
   return "low";
@@ -100,12 +108,13 @@ function getConfiguredOutputEffort(): OutputEffortValue | undefined {
     ?? readOutputEffortValue(process.env.ANTHROPIC_MULTI_ACCOUNT_EFFORT);
 }
 
-function getClientOutputEffort(inputBody: Record<string, unknown>): OutputEffortValue | undefined {
+export function getClientOutputEffort(inputBody: Record<string, unknown>): OutputEffortValue | undefined {
   const outputConfig = isRecord(inputBody.output_config) ? inputBody.output_config : undefined;
   const reasoning = isRecord(inputBody.reasoning) ? inputBody.reasoning : undefined;
   const thinking = isRecord(inputBody.thinking) ? inputBody.thinking : undefined;
 
   return readOutputEffortValue(outputConfig?.effort)
+    ?? readOutputEffortValue(inputBody.effort)
     ?? readOutputEffortValue(reasoning?.effort)
     ?? readOutputEffortValue(inputBody.reasoning_effort)
     ?? readOutputEffortValue(inputBody.reasoningEffort)
@@ -294,10 +303,11 @@ export function buildUpstreamRequest(
   inputBody: Record<string, unknown>,
   identity: ClaudeIdentity,
   template: TemplateData,
-  options?: { sessionId?: string },
+  options?: { sessionId?: string; outputEffort?: OutputEffortValue },
 ): Record<string, unknown> {
   const { body, firstUserMessage, systemTexts } = normalizeAnthropicClientRequest(inputBody);
   const activeSessionId = options?.sessionId ?? getActiveSessionId();
+  const configuredEffort = getConfiguredOutputEffort() ?? options?.outputEffort;
 
   const incomingTools = Array.isArray(body.tools) ? body.tools as ToolDefinition[] : [];
   body.tools = selectOpenCodeNativeTools({
@@ -310,7 +320,7 @@ export function buildUpstreamRequest(
     body.context_management = DEFAULT_CONTEXT_MANAGEMENT;
   }
   if (modelId && !isHaikuModel(modelId)) {
-    body.output_config = { effort: resolveOutputEffort(inputBody) };
+    body.output_config = { effort: resolveOutputEffort(inputBody, configuredEffort) };
   }
   body.max_tokens = resolveMaxTokens(body.max_tokens);
 

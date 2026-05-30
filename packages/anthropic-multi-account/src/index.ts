@@ -26,7 +26,13 @@ import {
   getStaticHeaders,
   orderHeadersForOutbound,
 } from "./request/headers";
-import { getUpstreamSessionId } from "./request/upstream-request";
+import {
+  getClientOutputEffort,
+  getUpstreamSessionId,
+  OPENCODE_OUTPUT_EFFORT_HEADER,
+  readOpenCodeVariantEffort,
+  type OutputEffortValue,
+} from "./request/upstream-request";
 import { syncBootstrapAuth } from "./oauth/bootstrap";
 import { sanitizeError } from "./shared/error-utils";
 import { getSessionId, startHeartbeat } from "./session-heartbeat";
@@ -80,6 +86,18 @@ function applyOrderedHeaders(
     : orderedHeaders;
 }
 
+function getMessageVariant(input: { message?: { model?: Record<string, unknown> } }): unknown {
+  return input.message?.model?.variant;
+}
+
+function isAnthropicChatHook(input: {
+  provider?: { info?: { id?: string } };
+  model?: { providerID?: string };
+}): boolean {
+  return input.provider?.info?.id === ANTHROPIC_OAUTH_ADAPTER.authProviderId
+    || input.model?.providerID === ANTHROPIC_OAUTH_ADAPTER.authProviderId;
+}
+
 export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
   if (process.env.CLAUDE_MULTI_ACCOUNT_TRACE_PLUGIN === "1") {
     console.error("[anthropic-multi-account] plugin function called");
@@ -99,6 +117,7 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
   let heartbeatHandle: { stop(): void } | null = null;
   let heartbeatToken: string | null = null;
   let heartbeatSessionId: string | null = null;
+  const outputEffortBySession = new Map<string, OutputEffortValue>();
 
   const stopHeartbeat = (): void => {
     heartbeatHandle?.stop();
@@ -345,7 +364,47 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
 
   await lifecycle.load({ type: "api" }).catch(() => {});
 
-  return {
+  const hooks = {
+    "chat.params": async (
+      input: {
+        sessionID: string;
+        provider?: { info?: { id?: string } };
+        model?: { providerID?: string };
+        message?: { model?: Record<string, unknown> };
+      },
+      output: { options: Record<string, unknown> },
+    ): Promise<void> => {
+      if (!isAnthropicChatHook(input)) return;
+
+      const outputEffort = getClientOutputEffort(output.options)
+        ?? readOpenCodeVariantEffort(getMessageVariant(input));
+
+      if (!outputEffort || outputEffort === "client") {
+        outputEffortBySession.delete(input.sessionID);
+        return;
+      }
+
+      outputEffortBySession.set(input.sessionID, outputEffort);
+    },
+
+    "chat.headers": async (
+      input: {
+        sessionID: string;
+        provider?: { info?: { id?: string } };
+        model?: { providerID?: string };
+        message?: { model?: Record<string, unknown> };
+      },
+      output: { headers: Record<string, string> },
+    ): Promise<void> => {
+      if (!isAnthropicChatHook(input)) return;
+
+      const outputEffort = outputEffortBySession.get(input.sessionID)
+        ?? readOpenCodeVariantEffort(getMessageVariant(input));
+      if (!outputEffort || outputEffort === "client") return;
+
+      output.headers[OPENCODE_OUTPUT_EFFORT_HEADER] = outputEffort;
+    },
+
     "experimental.chat.system.transform": async (
       input: Record<string, unknown>,
       output: { system?: string[] },
@@ -368,4 +427,5 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
       loader: authLoader,
     },
   };
+  return hooks;
 };

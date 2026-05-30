@@ -380,6 +380,35 @@ describe("upstream-request", () => {
     expect(result.output_config).toEqual({ effort: "xhigh" });
   });
 
+  test("buildUpstreamRequest uses explicit OpenCode variant effort when body has no effort", () => {
+    const result = buildUpstreamRequest({
+      model: "claude-sonnet-4-6",
+      messages: [{ role: "user", content: "hello" }],
+    }, createIdentity(), createTemplate(), { outputEffort: "max" });
+
+    expect(result.output_config).toEqual({ effort: "max" });
+  });
+
+  test("buildUpstreamRequest reads OpenCode top-level effort option", () => {
+    const result = buildUpstreamRequest({
+      model: "claude-sonnet-4-6",
+      effort: "medium",
+      messages: [{ role: "user", content: "hello" }],
+    }, createIdentity(), createTemplate());
+
+    expect(result.output_config).toEqual({ effort: "medium" });
+  });
+
+  test("buildUpstreamRequest maps OpenCode max thinking budget into max output effort", () => {
+    const result = buildUpstreamRequest({
+      model: "claude-sonnet-4-6",
+      thinking: { type: "enabled", budgetTokens: 31_999 },
+      messages: [{ role: "user", content: "hello" }],
+    }, createIdentity(), createTemplate());
+
+    expect(result.output_config).toEqual({ effort: "max" });
+  });
+
   test("buildUpstreamRequest normalizes ultracode effort to xhigh on the wire", () => {
     setUpstreamRequestTestOverridesForTest({ outputEffort: "ultracode" });
 

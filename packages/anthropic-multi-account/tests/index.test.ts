@@ -115,6 +115,47 @@ describe("index", () => {
     ]);
   });
 
+  test("bridges OpenCode message variant into an internal effort header", async () => {
+    const plugin = await ClaudeMultiAuthPlugin({ client: createMockClient() } as any);
+    const chatHeaders = plugin["chat.headers"] as (
+      input: unknown,
+      output: { headers: Record<string, string> },
+    ) => Promise<void>;
+    const output = { headers: {} as Record<string, string> };
+
+    await chatHeaders({
+      provider: { info: { id: "anthropic" } },
+      model: { providerID: "anthropic" },
+      message: { model: { variant: "max" } },
+    }, output);
+
+    expect(output.headers["x-kyoli-opencode-effort"]).toBe("max");
+  });
+
+  test("bridges OpenCode resolved chat params into an internal effort header", async () => {
+    const plugin = await ClaudeMultiAuthPlugin({ client: createMockClient() } as any);
+    const chatParams = plugin["chat.params"] as (
+      input: unknown,
+      output: { options: Record<string, unknown> },
+    ) => Promise<void>;
+    const chatHeaders = plugin["chat.headers"] as (
+      input: unknown,
+      output: { headers: Record<string, string> },
+    ) => Promise<void>;
+    const input = {
+      sessionID: "session-params",
+      provider: { info: { id: "anthropic" } },
+      model: { providerID: "anthropic" },
+      message: { model: { variant: "max" } },
+    };
+    const output = { headers: {} as Record<string, string> };
+
+    await chatParams(input, { options: { effort: "medium" } });
+    await chatHeaders(input, output);
+
+    expect(output.headers["x-kyoli-opencode-effort"]).toBe("medium");
+  });
+
   test("plugin loads in a temporary OpenCode config dir without user config", async () => {
     const { dir, cleanup } = await setupTestEnv();
 
