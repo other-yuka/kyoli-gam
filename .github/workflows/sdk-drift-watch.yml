@@ -38,6 +38,11 @@ jobs:
             cat sdk-drift.json
             exit 0
           fi
+          if [ "$code" -eq 2 ]; then
+            cat sdk-drift.json
+            echo "::warning::SDK drift check skipped because npm metadata was unavailable."
+            exit 0
+          fi
           cat sdk-drift.err
           exit "$code"
 
