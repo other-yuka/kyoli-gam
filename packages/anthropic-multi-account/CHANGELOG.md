@@ -1,5 +1,14 @@
 # opencode-anthropic-multi-account
 
+## 0.2.43
+
+### Patch Changes
+
+- [#27](https://github.com/other-yuka/kyoli-gam/pull/27) [`dda6480`](https://github.com/other-yuka/kyoli-gam/commit/dda6480fd0152255d9fa7aee433f3ee43be1e47a) Thanks [@other-yuka](https://github.com/other-yuka)! - Refresh bundled Claude Code drift metadata to 2.1.161 and keep SDK drift checks scoped to SDK metadata.
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.43
+
 ## 0.2.42
 
 ### Patch Changes
