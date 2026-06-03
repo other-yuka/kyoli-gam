@@ -215,11 +215,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           CC_VERSION="${{ needs.drift.outputs.cc_version }}"
-          TITLE_MATCH="Claude Code drift detected: v${CC_VERSION}"
-          LEGACY_TITLE_MATCH="Fingerprint drift detected: Claude Code v${CC_VERSION}"
           {
-            gh issue list --label claude-code-drift --state open --search "in:title \"${TITLE_MATCH}\"" --json number --jq '.[].number'
-            gh issue list --label fingerprint-drift --state open --search "in:title \"${LEGACY_TITLE_MATCH}\"" --json number --jq '.[].number' 2>/dev/null || true
+            gh issue list --label claude-code-drift --state open --json number --jq '.[].number'
+            gh issue list --label fingerprint-drift --state open --json number --jq '.[].number' 2>/dev/null || true
           } | sort -u > drift-issue-numbers.txt
           COMMENT="Resolved: static Claude Code drift scan is clean for v${CC_VERSION}."
           while IFS= read -r n; do
