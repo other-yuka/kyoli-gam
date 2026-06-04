@@ -326,13 +326,13 @@ jobs:
         run: |
           CC_VERSION="${{ needs.drift.outputs.cc_version }}"
           {
-            gh issue list --label claude-code-drift --state open --json number --jq '.[].number'
-            gh issue list --label fingerprint-drift --state open --json number --jq '.[].number' 2>/dev/null || true
+            gh issue list --repo "${{ github.repository }}" --label claude-code-drift --state open --json number --jq '.[].number'
+            gh issue list --repo "${{ github.repository }}" --label fingerprint-drift --state open --json number --jq '.[].number' 2>/dev/null || true
           } | sort -u > drift-issue-numbers.txt
           COMMENT="Resolved: static Claude Code drift scan is clean for v${CC_VERSION}."
           while IFS= read -r n; do
             if [ -z "$n" ]; then
               continue
             fi
-            gh issue close "$n" --comment "$COMMENT"
+            gh issue close "$n" --repo "${{ github.repository }}" --comment "$COMMENT"
           done < drift-issue-numbers.txt
