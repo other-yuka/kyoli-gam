@@ -48,3 +48,24 @@ jobs:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: "true"
+
+      - name: Enable auto-merge for release PR
+        if: steps.changesets.outputs.published != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.KYOLI_RELEASE_BOT_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          pr=$(gh pr list \
+            --repo "${{ github.repository }}" \
+            --head changeset-release/main \
+            --state open \
+            --json number \
+            --jq '.[0].number')
+
+          if [ -z "$pr" ]; then
+            echo "No open Changesets release PR to auto-merge."
+            exit 0
+          fi
+
+          echo "Arming auto-merge for Changesets release PR #$pr."
+          gh pr merge "$pr" --repo "${{ github.repository }}" --auto --squash --delete-branch
