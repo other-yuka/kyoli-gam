@@ -163,12 +163,19 @@ jobs:
       contents: write
       pull-requests: write
     steps:
+      - name: Require drift bot PAT
+        env:
+          KYOLI_DRIFT_BOT_PAT: ${{ secrets.KYOLI_DRIFT_BOT_PAT }}
+        run: |
+          if [ -z "$KYOLI_DRIFT_BOT_PAT" ]; then
+            echo "::error::KYOLI_DRIFT_BOT_PAT is required to open drift PRs because GITHUB_TOKEN-created PRs do not reliably trigger required checks."
+            exit 1
+          fi
+
       - uses: actions/checkout@v6
         with:
-          # Prefer a PAT so bot-created PRs trigger normal pull_request checks.
-          # GITHUB_TOKEN fallback can still push/create the PR, but downstream
-          # workflow triggering may be suppressed by GitHub loop protection.
-          token: ${{ secrets.KYOLI_DRIFT_BOT_PAT || secrets.GITHUB_TOKEN }}
+          # Use a PAT so bot-created PRs trigger normal pull_request checks.
+          token: ${{ secrets.KYOLI_DRIFT_BOT_PAT }}
 
       - uses: actions/download-artifact@v8
         with:
@@ -206,7 +213,7 @@ jobs:
 
       - name: Open PR and arm auto-merge
         env:
-          GH_TOKEN: ${{ secrets.KYOLI_DRIFT_BOT_PAT || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.KYOLI_DRIFT_BOT_PAT }}
           BRANCH: ${{ steps.auto_draft.outputs.branch_name }}
           COMMIT_MESSAGE: ${{ steps.auto_draft.outputs.commit_message }}
           PR_TITLE: ${{ steps.auto_draft.outputs.pr_title }}
