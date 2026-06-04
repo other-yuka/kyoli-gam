@@ -52,9 +52,15 @@ jobs:
       - name: Enable auto-merge for release PR
         if: steps.changesets.outputs.published != 'true'
         env:
-          GH_TOKEN: ${{ secrets.KYOLI_RELEASE_BOT_PAT || secrets.GITHUB_TOKEN }}
+          KYOLI_RELEASE_BOT_PAT: ${{ secrets.KYOLI_RELEASE_BOT_PAT }}
         run: |
           set -euo pipefail
+          if [ -z "$KYOLI_RELEASE_BOT_PAT" ]; then
+            echo "::warning::KYOLI_RELEASE_BOT_PAT is not configured; leaving the Changesets release PR for manual merge so publish is not suppressed by GITHUB_TOKEN loop protection."
+            exit 0
+          fi
+          export GH_TOKEN="$KYOLI_RELEASE_BOT_PAT"
+
           pr=$(gh pr list \
             --repo "${{ github.repository }}" \
             --head changeset-release/main \
