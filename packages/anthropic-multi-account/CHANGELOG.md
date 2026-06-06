@@ -1,5 +1,14 @@
 # opencode-anthropic-multi-account
 
+## 0.2.46
+
+### Patch Changes
+
+- [#45](https://github.com/other-yuka/kyoli-gam/pull/45) [`cbdaf8f`](https://github.com/other-yuka/kyoli-gam/commit/cbdaf8f1d4123af680389e9dc77929654c66b7d8) Thanks [@other-yuka](https://github.com/other-yuka)! - Scrub flattened POSIX Claude project slugs from bundled fingerprint templates.
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.46
+
 ## 0.2.45
 
 ### Patch Changes
