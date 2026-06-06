@@ -43,8 +43,8 @@
     "valibot": "^1.4.1"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "^1.15.10",
-    "@types/node": "^25.9.1",
+    "@opencode-ai/plugin": "^1.16.2",
+    "@types/node": "^25.9.2",
     "typescript": "^6.0.3"
   },
   "publishConfig": {
