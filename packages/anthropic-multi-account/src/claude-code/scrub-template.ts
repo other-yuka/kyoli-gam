@@ -38,12 +38,17 @@ const USER_PATH_REPLACEMENTS = [
     pattern: /([A-Za-z]:\\Users\\)(?!user(?:\\|$))[A-Za-z0-9._-]+/g,
     replacement: "$1user",
   },
+  {
+    pattern: /(\/\.claude\/projects\/)-[A-Za-z0-9._-]+(?=\/|$)/g,
+    replacement: "$1project",
+  },
 ] as const;
 
 const USER_PATH_HIT_PATTERNS = [
   /\/Users\/(?!user(?:\/|$))[A-Za-z0-9._-]+(?:\/[^\s"'`<>)]*)?/g,
   /\/home\/(?!user(?:\/|$))[A-Za-z0-9._-]+(?:\/[^\s"'`<>)]*)?/g,
   /[A-Za-z]:\\Users\\(?!user(?:\\|$))[A-Za-z0-9._-]+(?:\\[^\s"'`<>)]*)?/g,
+  /\/\.claude\/projects\/-[A-Za-z0-9._-]+(?:\/[^\s"'`<>)]*)?/g,
 ] as const;
 
 const GIT_METADATA_REPLACEMENTS = [

@@ -17,6 +17,8 @@ const RAW_WINDOWS_HOME = `C:\\Users\\${RAW_USER}`;
 const SCRUBBED_MAC_HOME = "/Users/user";
 const SCRUBBED_LINUX_HOME = "/home/user";
 const SCRUBBED_WINDOWS_HOME = "C:\\Users\\user";
+const RAW_PROJECT_SLUG = "-Users-yuka-Documents-kyoli-gam";
+const SCRUBBED_PROJECT_SLUG = "project";
 
 function createTemplate(overrides: Partial<TemplateData> = {}): TemplateData {
   return {
@@ -140,6 +142,13 @@ describe("scrubText", () => {
     expect(scrubText(`${RAW_LINUX_HOME}/project`)).toBe(`${SCRUBBED_LINUX_HOME}/project`);
     expect(scrubText(`${RAW_WINDOWS_HOME}\\project`)).toBe(`${SCRUBBED_WINDOWS_HOME}\\project`);
   });
+
+  test("normalizes flattened POSIX Claude project slugs", () => {
+    expect(scrubText(`${RAW_MAC_HOME}/.claude/projects/${RAW_PROJECT_SLUG}/memory/user.md`))
+      .toBe(`${SCRUBBED_MAC_HOME}/.claude/projects/${SCRUBBED_PROJECT_SLUG}/memory/user.md`);
+    expect(scrubText(`/root/.claude/projects/-root-actions-runner--work-dario-dario/memory/ref.md`))
+      .toBe(`/root/.claude/projects/${SCRUBBED_PROJECT_SLUG}/memory/ref.md`);
+  });
 });
 
 describe("scrubObjectStrings", () => {
@@ -197,6 +206,12 @@ describe("findUserPathHits", () => {
       `${RAW_MAC_HOME}/project`,
       `${RAW_LINUX_HOME}/work`,
       `${RAW_WINDOWS_HOME}\\repo`,
+    ]);
+  });
+
+  test("detects flattened POSIX Claude project slug leaks", () => {
+    expect(findUserPathHits(`${SCRUBBED_MAC_HOME}/.claude/projects/${RAW_PROJECT_SLUG}/memory/user.md`)).toEqual([
+      `/.claude/projects/${RAW_PROJECT_SLUG}/memory/user.md`,
     ]);
   });
 });
