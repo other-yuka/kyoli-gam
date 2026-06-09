@@ -39,6 +39,10 @@ afterAll(() => {
 });
 
 describe("detectCliVersion", () => {
+  test("tracks the bundled fingerprint label", () => {
+    expect(DEFAULT_CLI_VERSION).toBe("2.1.169");
+  });
+
   test("returns parsed semver when the Claude binary is available", () => {
     execFileSyncMock.mockReturnValue("claude v2.3.5\n");
 

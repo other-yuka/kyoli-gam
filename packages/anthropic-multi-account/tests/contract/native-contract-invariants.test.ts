@@ -246,7 +246,8 @@ describe("native-plugin request contract invariants", () => {
       "project_database_lookup",
     ]);
     expect(tools.every((tool) => isRecord(tool.input_schema))).toBe(true);
-    expect(JSON.stringify(body.messages)).not.toContain("cache_control");
+    const messages = body.messages as Array<{ content?: Array<{ cache_control?: { type: string } }> }>;
+    expect(messages.at(-1)?.content?.at(-1)?.cache_control).toEqual({ type: "ephemeral" });
     expect(JSON.stringify(body.messages)).not.toContain('"type":"thinking"');
     expect(JSON.stringify(body.system)).not.toContain("Remove this orchestration note.");
   });
@@ -268,6 +269,7 @@ describe("native-plugin request contract invariants", () => {
         name: "Read",
         description: "Read files",
         input_schema: { type: "object", properties: { file_path: { type: "string" } } },
+        cache_control: { type: "ephemeral" },
       },
     ]);
   });
@@ -305,7 +307,12 @@ describe("native-plugin request contract invariants", () => {
       {
         role: "user",
         content: [
-          { type: "tool_result", tool_use_id: "toolu_1", content: "" },
+          {
+            type: "tool_result",
+            tool_use_id: "toolu_1",
+            content: "",
+            cache_control: { type: "ephemeral" },
+          },
         ],
       },
     ]);

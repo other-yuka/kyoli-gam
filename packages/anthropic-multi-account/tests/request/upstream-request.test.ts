@@ -206,7 +206,9 @@ describe("upstream-request", () => {
     expect("thinking" in result).toBe(false);
     expect("context_management" in result).toBe(false);
     expect(result.output_config).toEqual({ effort: "high" });
-    expect(result.tools).toEqual([{ name: "OriginalTool", description: "legacy" }]);
+    expect(result.tools).toEqual([
+      { name: "OriginalTool", description: "legacy", cache_control: { type: "ephemeral" } },
+    ]);
     expect(messages).toHaveLength(3);
     expect(messages[1]?.content).toEqual([{ type: "text", text: "Working on it" }]);
     expect(truncated.length).toBeLessThanOrEqual(MAX_TOOL_RESULT_TEXT_LENGTH + TRUNCATION_SUFFIX.length);
@@ -232,7 +234,12 @@ describe("upstream-request", () => {
     const assistantMessage = messages[1] as { content: Array<{ type?: string; text?: string; name?: string; input?: unknown }> };
 
     expect(assistantMessage.content).toEqual([
-      { type: "tool_use", name: "AskUserQuestion", input: { question: "x" } },
+      {
+        type: "tool_use",
+        name: "AskUserQuestion",
+        input: { question: "x" },
+        cache_control: { type: "ephemeral" },
+      },
     ]);
   });
 
@@ -249,7 +256,7 @@ describe("upstream-request", () => {
 
     expect(messages).toEqual([
       { role: "user", content: [{ type: "text", text: "hello" }] },
-      { role: "assistant", content: [{ type: "text", text: "partial answer" }] },
+      { role: "assistant", content: [{ type: "text", text: "partial answer", cache_control: { type: "ephemeral" } }] },
     ]);
   });
 
@@ -306,7 +313,12 @@ describe("upstream-request", () => {
     ]);
     expect(messages[2]?.role).toBe("user");
     expect(messages[2]?.content).toEqual([
-      { type: "tool_result", tool_use_id: "toolu_1", content: "" },
+      {
+        type: "tool_result",
+        tool_use_id: "toolu_1",
+        content: "",
+        cache_control: { type: "ephemeral" },
+      },
     ]);
   });
 
@@ -578,7 +590,12 @@ describe("upstream-request", () => {
 
     expect(result.tools).toEqual([
       { name: "question", description: "OpenCode question tool", input_schema: { type: "object", properties: { questions: { type: "array" } } } },
-      { name: "bash", description: "OpenCode bash tool", input_schema: { type: "object", properties: { command: { type: "string" } } } },
+      {
+        name: "bash",
+        description: "OpenCode bash tool",
+        input_schema: { type: "object", properties: { command: { type: "string" } } },
+        cache_control: { type: "ephemeral" },
+      },
     ]);
   });
 
@@ -607,7 +624,10 @@ describe("upstream-request", () => {
       messages: [{ role: "user", content: "hello" }],
     }, createIdentity(), template);
 
-    expect(result.tools).toEqual(incomingTools);
+    expect(result.tools).toEqual([
+      ...incomingTools.slice(0, -1),
+      { ...incomingTools[incomingTools.length - 1], cache_control: { type: "ephemeral" } },
+    ]);
   });
 
   test("buildUpstreamRequest preserves tool_use names for the later request-scoped flow", () => {

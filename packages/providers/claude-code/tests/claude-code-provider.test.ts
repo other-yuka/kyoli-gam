@@ -113,7 +113,43 @@ describe("OpenCode shared Claude Code helpers", () => {
       device_id: "device-1",
       session_id: "session-1",
     });
-    expect(body.tools).toEqual([{ name: "Bash", input_schema: { type: "object" } }]);
+    expect(body.tools).toEqual([
+      {
+        name: "Bash",
+        input_schema: { type: "object" },
+        cache_control: { type: "ephemeral" },
+      },
+    ]);
+  });
+
+  it("adds Claude Code prompt cache breakpoints to tools and block-array messages", () => {
+    const body = applyClaudeCodeUpstreamBodyFields(
+      {
+        messages: [
+          { role: "user", content: [{ type: "text", text: "hello" }] },
+          { role: "assistant", content: [{ type: "text", text: "answer" }] },
+        ],
+        tools: [
+          { name: "Read", input_schema: { type: "object" }, cache_control: { type: "ephemeral" } },
+          { name: "Write", input_schema: { type: "object" } },
+        ],
+      },
+      {
+        agentIdentity: "agent identity",
+        ccVersion: "2.1.137",
+        identity: { accountUuid: "account-1", deviceId: "device-1" },
+        sessionId: "session-1",
+        systemPrompt: "system prompt",
+      },
+    );
+
+    const tools = body.tools as Array<{ cache_control?: { type: string } }>;
+    const messages = body.messages as Array<{ content: Array<{ cache_control?: { type: string } }> }>;
+
+    expect(tools[0]?.cache_control).toBeUndefined();
+    expect(tools[1]?.cache_control).toEqual({ type: "ephemeral" });
+    expect(messages[0]?.content[0]?.cache_control).toBeUndefined();
+    expect(messages[1]?.content[0]?.cache_control).toEqual({ type: "ephemeral" });
   });
 });
 
