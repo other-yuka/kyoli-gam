@@ -1349,6 +1349,10 @@ describe("createClaudeCodeProvider", () => {
     const fakeClaudePath = join(tempDir, "claude.mjs");
     const metadata = getClaudeCodeTemplateMetadata();
     const tools = getClaudeCodeTemplateTools();
+    const capturedSystemPrompt = (metadata.systemPrompt ?? "").replaceAll(
+      "/.claude/projects/project/memory/",
+      "/.claude/projects/-tmp-example-repo/memory/",
+    );
 
     await writeFile(
       fakeClaudePath,
@@ -1362,7 +1366,7 @@ const body = {
   system: [
     { type: "text", text: "x-anthropic-billing-header: cc_version=${metadata.ccVersion}.abc; cc_entrypoint=sdk-cli; cch=abc12;" },
     { type: "text", text: ${JSON.stringify(metadata.agentIdentity)} },
-    { type: "text", text: ${JSON.stringify(metadata.systemPrompt)} }
+    { type: "text", text: ${JSON.stringify(capturedSystemPrompt)} }
   ],
   tools: ${JSON.stringify(tools)},
   metadata: { user_id: "{}" },

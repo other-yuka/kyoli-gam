@@ -39,6 +39,10 @@ const USER_PATH_REPLACEMENTS = [
     replacement: "$1user",
   },
   {
+    pattern: /([A-Za-z])--Users-[^\s\\`'")\]]+/g,
+    replacement: "$1--Users-user-project",
+  },
+  {
     pattern: /(\/\.claude\/projects\/)-[A-Za-z0-9._-]+(?=\/|$)/g,
     replacement: "$1project",
   },
@@ -48,6 +52,7 @@ const USER_PATH_HIT_PATTERNS = [
   /\/Users\/(?!user(?:\/|$))[A-Za-z0-9._-]+(?:\/[^\s"'`<>)]*)?/g,
   /\/home\/(?!user(?:\/|$))[A-Za-z0-9._-]+(?:\/[^\s"'`<>)]*)?/g,
   /[A-Za-z]:\\Users\\(?!user(?:\\|$))[A-Za-z0-9._-]+(?:\\[^\s"'`<>)]*)?/g,
+  /[A-Za-z]--Users-(?!user-project\b)[^\s\\`'")\]]+/g,
   /\/\.claude\/projects\/-[A-Za-z0-9._-]+(?:\/[^\s"'`<>)]*)?/g,
 ] as const;
 

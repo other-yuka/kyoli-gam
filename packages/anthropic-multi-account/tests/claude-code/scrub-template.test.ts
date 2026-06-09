@@ -17,7 +17,7 @@ const RAW_WINDOWS_HOME = `C:\\Users\\${RAW_USER}`;
 const SCRUBBED_MAC_HOME = "/Users/user";
 const SCRUBBED_LINUX_HOME = "/home/user";
 const SCRUBBED_WINDOWS_HOME = "C:\\Users\\user";
-const RAW_PROJECT_SLUG = "-Users-yuka-Documents-kyoli-gam";
+const RAW_PROJECT_SLUG = "-Users-alice-work-example-repo";
 const SCRUBBED_PROJECT_SLUG = "project";
 
 function createTemplate(overrides: Partial<TemplateData> = {}): TemplateData {
@@ -149,6 +149,13 @@ describe("scrubText", () => {
     expect(scrubText(`/root/.claude/projects/-root-actions-runner--work-dario-dario/memory/ref.md`))
       .toBe(`/root/.claude/projects/${SCRUBBED_PROJECT_SLUG}/memory/ref.md`);
   });
+
+  test("normalizes flattened Windows Claude project slugs", () => {
+    expect(scrubText(`C--Users-alice-work-example-repo\\memory\\note.md`))
+      .toBe(`C--Users-user-project\\memory\\note.md`);
+    expect(scrubText(`D--Users-alice-work-example-repo\\memory\\note.md`))
+      .toBe(`D--Users-user-project\\memory\\note.md`);
+  });
 });
 
 describe("scrubObjectStrings", () => {
@@ -212,6 +219,12 @@ describe("findUserPathHits", () => {
   test("detects flattened POSIX Claude project slug leaks", () => {
     expect(findUserPathHits(`${SCRUBBED_MAC_HOME}/.claude/projects/${RAW_PROJECT_SLUG}/memory/user.md`)).toEqual([
       `/.claude/projects/${RAW_PROJECT_SLUG}/memory/user.md`,
+    ]);
+  });
+
+  test("detects flattened Windows Claude project slug leaks", () => {
+    expect(findUserPathHits("D--Users-alice-work-example-repo\\memory\\note.md")).toEqual([
+      "D--Users-alice-work-example-repo",
     ]);
   });
 });

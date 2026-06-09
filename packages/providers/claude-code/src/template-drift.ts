@@ -345,6 +345,8 @@ function scrubText(text: string): string {
     .replace(/\/Users\/(?!user(?:\/|$))[A-Za-z0-9._-]+/g, "/Users/user")
     .replace(/\/home\/(?!user(?:\/|$))[A-Za-z0-9._-]+/g, "/home/user")
     .replace(/([A-Za-z]:\\Users\\)(?!user(?:\\|$))[A-Za-z0-9._-]+/g, "$1user")
+    .replace(/([A-Za-z])--Users-[^\s\\`'")\]]+/g, "$1--Users-user-project")
+    .replace(/(\/\.claude\/projects\/)-[A-Za-z0-9._-]+(?=\/|$)/g, "$1project")
     .replace(/^Current branch: .+$/gm, "Current branch: (dynamic)")
     .replace(/^Main branch \(you will usually use this for PRs\): .+$/gm, "Main branch (you will usually use this for PRs): (dynamic)")
     .replace(/^Git user: .+$/gm, "Git user: (dynamic)");
