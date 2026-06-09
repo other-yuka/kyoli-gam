@@ -1,5 +1,14 @@
 # opencode-anthropic-multi-account
 
+## 0.2.51
+
+### Patch Changes
+
+- [#60](https://github.com/other-yuka/kyoli-gam/pull/60) [`f8892e4`](https://github.com/other-yuka/kyoli-gam/commit/f8892e4b79ca562487f67c423447ecf95713dd6a) Thanks [@other-yuka](https://github.com/other-yuka)! - Refresh Claude Code static drift compatibility metadata for `@anthropic-ai/claude-code@2.1.170`.
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.51
+
 ## 0.2.50
 
 ### Patch Changes
