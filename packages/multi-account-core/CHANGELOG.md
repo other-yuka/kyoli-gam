@@ -1,5 +1,11 @@
 # opencode-multi-account-core
 
+## 0.2.50
+
+### Patch Changes
+
+- [#57](https://github.com/other-yuka/kyoli-gam/pull/57) [`c7a5cf3`](https://github.com/other-yuka/kyoli-gam/commit/c7a5cf3c6188750a04acbfc7292d14db93bb915d) Thanks [@other-yuka](https://github.com/other-yuka)! - Re-bake the bundled Claude Code 2.1.169 fingerprint from the local CLI capture and align doctor drift scrubbing with the baked-template scrubber.
+
 ## 0.2.49
 
 ## 0.2.48
