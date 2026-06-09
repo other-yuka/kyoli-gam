@@ -1,5 +1,14 @@
 # opencode-anthropic-multi-account
 
+## 0.2.49
+
+### Patch Changes
+
+- [#55](https://github.com/other-yuka/kyoli-gam/pull/55) [`060ed84`](https://github.com/other-yuka/kyoli-gam/commit/060ed844993b4b1422bd26826280e4e0ba451704) Thanks [@other-yuka](https://github.com/other-yuka)! - Preserve user message content while refreshing Claude Code fingerprint labels and prompt cache breakpoints.
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.49
+
 ## 0.2.48
 
 ### Patch Changes
