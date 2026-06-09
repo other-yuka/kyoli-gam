@@ -292,7 +292,12 @@ describe("runtime-factory", () => {
     ]);
     expect(body.messages[2]?.role).toBe("user");
     expect(body.messages[2]?.content).toEqual([
-      { type: "tool_result", tool_use_id: "toolu_1", content: "" },
+      {
+        type: "tool_result",
+        tool_use_id: "toolu_1",
+        content: "",
+        cache_control: { type: "ephemeral" },
+      },
     ]);
   });
 
@@ -342,7 +347,7 @@ describe("runtime-factory", () => {
       expect(firstBody.tools.every((tool) => Boolean(tool.input_schema))).toBe(true);
       expect(firstBody.tool_choice?.name).toBe(firstBody.tools[1]?.name);
       expect(firstBody.messages[1]?.content?.[0]?.name).toBe(firstBody.tools[0]?.name);
-      expect(JSON.stringify(firstBody.messages)).not.toContain("cache_control");
+      expect(firstBody.messages.at(-1)?.content?.at(-1)?.cache_control).toEqual({ type: "ephemeral" });
       expect(JSON.stringify(firstBody.messages)).not.toContain('"thinking"');
 
       const firstHeaders = toHeaders(fetchMock.mock.calls[0]?.[1]?.headers);

@@ -3,6 +3,7 @@ import {
   normalizeAnthropicClientRequest,
   sanitizeMessages,
   scrubFrameworkIdentifiers,
+  scrubFrameworkIdentifiersInContent,
 } from "../../src/request/client-adapter";
 
 describe("client-adapter", () => {
@@ -39,6 +40,13 @@ describe("client-adapter", () => {
     expect(output.toLowerCase()).not.toContain("cursor");
     expect(output.toLowerCase()).not.toContain("openai");
     expect(output.toLowerCase()).not.toContain("gateway");
+  });
+
+  test("scrubFrameworkIdentifiersInContent preserves user code and data tokens", () => {
+    const input = "continue; const cursor = gateway(OpenAI, Hermes); // Powered by Stripe";
+
+    expect(scrubFrameworkIdentifiersInContent(input)).toBe(input);
+    expect(scrubFrameworkIdentifiersInContent("Roo Cline used LibreChat")).toBe(" used ");
   });
 
   test("normalizeAnthropicClientRequest strips OpenCode adapter fields before Claude Code replay", () => {
@@ -86,12 +94,45 @@ describe("client-adapter", () => {
     expect("output_config" in adapted.body).toBe(false);
     expect(adapted.systemTexts).toEqual(["Local  system"]);
     expect(messages[0]?.content).toEqual([
-      { type: "text", text: "Use  but keep /tmp/kyoli/opencode-state" },
+      { type: "text", text: "Use opencode but keep /tmp/kyoli/opencode-state" },
     ]);
     expect(messages[1]?.content).toEqual([
       { type: "text", text: "Visible answer" },
     ]);
     expect(JSON.stringify(adapted.body)).not.toContain("cache_control");
+  });
+
+  test("normalizeAnthropicClientRequest preserves code-like content while sanitizing", () => {
+    const adapted = normalizeAnthropicClientRequest({
+      system: "OpenCode gateway system",
+      messages: [
+        {
+          role: "user",
+          content: "continue; const cursor = gateway(OpenAI, Hermes); // Powered by Stripe",
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "toolu_1",
+              content: [
+                { type: "text", text: "continue cursor gateway OpenAI Hermes Powered by Stripe" },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(adapted.systemTexts).toEqual(["system"]);
+    expect(adapted.messages[0]?.content).toBe(
+      "continue; const cursor = gateway(OpenAI, Hermes); // Powered by Stripe",
+    );
+    const second = adapted.messages[1] as { content: Array<{ content: Array<{ text: string }> }> };
+    expect(second.content[0]?.content[0]?.text).toBe(
+      "continue cursor gateway OpenAI Hermes Powered by Stripe",
+    );
   });
 
   test("normalizeAnthropicClientRequest drops empty turns but preserves tool_result turns", () => {

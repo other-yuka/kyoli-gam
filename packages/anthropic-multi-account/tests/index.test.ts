@@ -302,9 +302,9 @@ describe("index", () => {
       const assistantBlocks = messages[1]?.content as Array<{ name?: string; type?: string }> | undefined;
       const toolUse = assistantBlocks?.find((block) => block.type === "tool_use");
       expect(toolUse?.name).toBe(toolNames[0]);
-      expect(containsProperty(messages, "cache_control")).toBe(false);
+      expect(messages.at(-1)?.content?.at(-1)?.cache_control).toEqual({ type: "ephemeral" });
       expect(JSON.stringify(messages)).not.toContain('"type":"thinking"');
-      expect(JSON.stringify(messages)).not.toContain("OpenCode request");
+      expect(JSON.stringify(messages)).toContain("OpenCode request");
     } finally {
       globalThis.fetch = originalFetch;
       await cleanup();

@@ -138,6 +138,44 @@ export function composeClaudeCodeBillingSystemEntry(
   return `x-anthropic-billing-header: cc_version=${version}.${buildTag}; cc_entrypoint=sdk-cli; cch=${cch};`;
 }
 
+// Claude Code caches the two system blocks above, plus the tools prefix and
+// one rolling conversation breakpoint. Client-supplied cache_control is stripped
+// before this shared helper runs; these markers are Kyoli-owned outbound hints.
+export function applyClaudeCodePromptCaching(
+  body: Record<string, unknown>,
+  cacheControl: { type: "ephemeral" } = { type: "ephemeral" },
+): void {
+  const tools = body.tools as Array<Record<string, unknown>> | undefined;
+  if (Array.isArray(tools) && tools.length > 0) {
+    const clonedTools = tools.map((tool) => {
+      const cloned = { ...tool };
+      delete cloned.cache_control;
+      return cloned;
+    });
+    clonedTools[clonedTools.length - 1] = {
+      ...clonedTools[clonedTools.length - 1],
+      cache_control: cacheControl,
+    };
+    body.tools = clonedTools;
+  }
+
+  const messages = body.messages as Array<Record<string, unknown>> | undefined;
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return;
+  }
+
+  const lastMessage = messages[messages.length - 1];
+  const content = lastMessage?.content;
+  if (!Array.isArray(content) || content.length === 0) {
+    return;
+  }
+
+  content[content.length - 1] = {
+    ...content[content.length - 1],
+    cache_control: cacheControl,
+  };
+}
+
 export function applyClaudeCodeUpstreamBodyFields(
   body: Record<string, unknown>,
   input: ClaudeCodeUpstreamBodyOptions,
@@ -186,6 +224,8 @@ export function applyClaudeCodeUpstreamBodyFields(
   ) {
     body.tools = input.defaultTools.map((tool) => ({ ...tool }));
   }
+
+  applyClaudeCodePromptCaching(body);
 
   return orderClaudeCodeBodyForOutbound(body, input.bodyFieldOrder);
 }

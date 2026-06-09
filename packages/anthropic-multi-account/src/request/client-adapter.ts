@@ -35,6 +35,15 @@ const FRAMEWORK_PATTERNS: RegExp[] = [
   /\bsessions_[a-z_]+\b/gi,
 ];
 
+// Message and tool-result content is user-owned code/data. Only scrub
+// distinctive multi-word framework identifiers here; bare words like
+// `continue`, `cursor`, `gateway`, `openai`, `hermes`, or `powered by ...`
+// can be legitimate payload text and must not be removed.
+const CONTENT_FRAMEWORK_PATTERNS: RegExp[] = [
+  /\b(roo[- ]?cline|roo[- ]?code|big[- ]?agi|claude[- ]?bridge)\b/gi,
+  /\b(librechat|typingmind)\b/gi,
+];
+
 export type JsonRecord = Record<string, unknown>;
 
 export type ContentBlock = JsonRecord & {
@@ -67,7 +76,7 @@ export function normalizeAnthropicClientRequest(inputBody: JsonRecord): AdaptedC
 
   for (const message of messages) {
     if (typeof message.content === "string") {
-      message.content = sanitizeAndScrubText(message.content);
+      message.content = sanitizeAndScrubContent(message.content);
       continue;
     }
 
@@ -127,10 +136,10 @@ export function sanitizeMessages(body: JsonRecord): void {
   }
 }
 
-export function scrubFrameworkIdentifiers(text: string): string {
+function scrubWithPatterns(text: string, patterns: readonly RegExp[]): string {
   let result = text;
 
-  for (const pattern of FRAMEWORK_PATTERNS) {
+  for (const pattern of patterns) {
     pattern.lastIndex = 0;
     result = result.replace(pattern, (match, ...args: unknown[]) => {
       const offset = args.at(-2);
@@ -156,6 +165,14 @@ export function scrubFrameworkIdentifiers(text: string): string {
   }
 
   return result;
+}
+
+export function scrubFrameworkIdentifiers(text: string): string {
+  return scrubWithPatterns(text, FRAMEWORK_PATTERNS);
+}
+
+export function scrubFrameworkIdentifiersInContent(text: string): string {
+  return scrubWithPatterns(text, CONTENT_FRAMEWORK_PATTERNS);
 }
 
 export function truncateToolResultText(text: string): string {
@@ -187,6 +204,12 @@ function sanitizeAndScrubText(text: string): string {
     .trim();
 }
 
+function sanitizeAndScrubContent(text: string): string {
+  return scrubFrameworkIdentifiersInContent(sanitizeContent(text))
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 function stripCacheControl(value: unknown): void {
   if (Array.isArray(value)) {
     for (const item of value) {
@@ -208,7 +231,7 @@ function stripCacheControl(value: unknown): void {
 
 function sanitizeMessageBlock(block: ContentBlock): void {
   if (typeof block.text === "string") {
-    block.text = sanitizeAndScrubText(block.text);
+    block.text = sanitizeAndScrubContent(block.text);
   }
 
   if (block.type !== "tool_result") {
@@ -216,7 +239,7 @@ function sanitizeMessageBlock(block: ContentBlock): void {
   }
 
   if (typeof block.content === "string") {
-    block.content = truncateToolResultText(sanitizeAndScrubText(block.content));
+    block.content = truncateToolResultText(sanitizeAndScrubContent(block.content));
     return;
   }
 
@@ -229,7 +252,7 @@ function sanitizeMessageBlock(block: ContentBlock): void {
       if (isRecord(item) && typeof item.text === "string") {
         return {
           ...item,
-          text: truncateToolResultText(sanitizeAndScrubText(item.text)),
+          text: truncateToolResultText(sanitizeAndScrubContent(item.text)),
         };
       }
 

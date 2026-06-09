@@ -167,7 +167,7 @@ describe("transformRequestBody", () => {
 
       const parsed = JSON.parse(transformed as string) as {
         system: Array<{ text?: string }>;
-        tools: Array<{ name?: string; input_schema?: unknown }>;
+        tools: Array<{ name?: string; input_schema?: unknown; cache_control?: { type?: string } }>;
         messages: Array<{ role?: string; content?: Array<Record<string, unknown>> }>;
         metadata?: { user_id?: string };
         thinking?: Record<string, unknown>;
@@ -195,10 +195,11 @@ describe("transformRequestBody", () => {
       expect("thinking" in parsed).toBe(false);
       expect("context_management" in parsed).toBe(false);
       expect("output_config" in parsed).toBe(false);
-      expect(JSON.stringify(parsed.messages)).not.toContain("cache_control");
+      expect(parsed.tools.at(-1)?.cache_control).toEqual({ type: "ephemeral" });
+      expect(parsed.messages.at(-1)?.content?.at(-1)?.cache_control).toEqual({ type: "ephemeral" });
       expect(JSON.stringify(parsed.messages)).not.toContain('"thinking"');
       expect(parsed.messages[0]?.content?.[0]?.text).toContain("/tmp/kyoli/opencode-state");
-      expect(parsed.messages[0]?.content?.[0]?.text).not.toContain("OpenCode");
+      expect(parsed.messages[0]?.content?.[0]?.text).toContain("OpenCode");
       expect(parsed.messages[1]?.content?.[0]?.name).toBe(parsed.tools[0]?.name);
       expect(parsed.messages[2]?.content?.[0]?.content).toBe("Found  retry guidance.");
     } finally {
