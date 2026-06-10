@@ -1,5 +1,14 @@
 # opencode-anthropic-multi-account
 
+## 0.2.52
+
+### Patch Changes
+
+- [#62](https://github.com/other-yuka/kyoli-gam/pull/62) [`577ef60`](https://github.com/other-yuka/kyoli-gam/commit/577ef6081698daee91d8655d37f1d7b564e535fb) Thanks [@other-yuka](https://github.com/other-yuka)! - Add Claude Fable 5 routing guards, aliases, beta tailoring, and wire-model normalization.
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.52
+
 ## 0.2.51
 
 ### Patch Changes
