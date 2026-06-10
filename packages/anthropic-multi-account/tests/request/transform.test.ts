@@ -103,6 +103,41 @@ describe("buildRequestHeaders", () => {
     expect(headers.get("x-api-key")).toBe(null);
   });
 
+
+
+  test("applies Fable-specific beta flags and per-family omissions", () => {
+    const fableHeaders = new Headers(buildRequestHeaders(
+      "https://api.anthropic.com/v1/messages",
+      { headers: {} },
+      "token-123",
+      "fable1m",
+    ));
+    const fableBetas = splitBetas(fableHeaders.get("anthropic-beta"));
+
+    expect(fableBetas).toContain("fallback-credit-2026-06-01");
+    expect(fableBetas).toContain("context-1m-2025-08-07");
+
+    const sonnetHeaders = new Headers(buildRequestHeaders(
+      "https://api.anthropic.com/v1/messages",
+      { headers: {} },
+      "token-123",
+      "claude-sonnet-4-6",
+    ));
+    const sonnetBetas = splitBetas(sonnetHeaders.get("anthropic-beta"));
+    expect(sonnetBetas).not.toContain("mid-conversation-system-2026-04-07");
+    expect(sonnetBetas).toContain("effort-2025-11-24");
+
+    const haikuHeaders = new Headers(buildRequestHeaders(
+      "https://api.anthropic.com/v1/messages",
+      { headers: {} },
+      "token-123",
+      "claude-haiku-4-5",
+    ));
+    const haikuBetas = splitBetas(haikuHeaders.get("anthropic-beta"));
+    expect(haikuBetas).not.toContain("mid-conversation-system-2026-04-07");
+    expect(haikuBetas).not.toContain("effort-2025-11-24");
+  });
+
   test("can enable 1m beta through environment variable", () => {
     process.env.ANTHROPIC_ENABLE_1M_CONTEXT = "true";
     try {
@@ -124,6 +159,7 @@ describe("buildRequestHeaders", () => {
 describe("extractModelIdFromBody", () => {
   test("returns model id when present in JSON body", () => {
     expect(extractModelIdFromBody(JSON.stringify({ model: "claude-sonnet-4-6" }))).toBe("claude-sonnet-4-6");
+    expect(extractModelIdFromBody(JSON.stringify({ model: "anthropic/fable1m" }))).toBe("claude-fable-5[1m]");
   });
 
   test("returns unknown for invalid JSON or missing model", () => {

@@ -20,7 +20,6 @@ import {
 } from "../request/betas";
 import {
   filterBillableBetas,
-  getBetaHeader,
   getPerRequestHeaders,
   getStaticHeaders,
   orderHeadersForOutbound,
@@ -360,7 +359,6 @@ export class AccountRuntimeFactory {
     excludedBetas: Set<string>,
   ): HeadersInit {
     const mergedBetas = deduplicateBetas(ensureOauthBeta([
-      ...excludeBetas(splitBetaValues(getBetaHeader()), excludedBetas),
       ...getModelBetas(modelId, excludedBetas),
       ...excludeBetas(splitBetaValues(incomingHeaders["anthropic-beta"]), excludedBetas),
     ])).join(",");

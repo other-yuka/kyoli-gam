@@ -18,6 +18,12 @@ import {
 } from "@kyoli-gam/core";
 import {
   applyClaudeCodeUpstreamBodyFields,
+  CLAUDE_FABLE_1M_MODEL_ID,
+  CLAUDE_FABLE_MODEL_ID,
+  isClaudeCode1mModelLabel,
+  isClaudeFableModel,
+  resolveClaudeCodeModelAlias,
+  toClaudeCodeWireModelId,
 } from "./opencode-shared";
 import {
   refreshClaudeCodeAccountMetadata,
@@ -61,6 +67,9 @@ const TOKEN_EXPIRY_BUFFER_MS = 60_000;
 const BILLABLE_BETA_PREFIXES = ["extended-cache-ttl-"];
 const CONTEXT_1M_BETA = "context-1m-2025-08-07";
 const CONTEXT_MANAGEMENT_BETA = "context-management-2025-06-27";
+const FABLE_FALLBACK_CREDIT_BETA = "fallback-credit-2026-06-01";
+const MID_CONVERSATION_SYSTEM_BETA = "mid-conversation-system-2026-04-07";
+const EFFORT_BETA = "effort-2025-11-24";
 const LONG_CONTEXT_BETAS = [CONTEXT_1M_BETA, CONTEXT_MANAGEMENT_BETA] as const;
 const BILLING_SEED = "59cf53e54c78";
 const CLAUDE_STARTUP_PROBE_MAX_BYTES = 64 * 1024;
@@ -72,6 +81,34 @@ const sessionIdsByKey = new Map<string, ClaudeSessionState>();
 const fallbackDeviceId = randomUUID();
 
 const models: ModelInfo[] = [
+  {
+    id: `anthropic/${CLAUDE_FABLE_MODEL_ID}`,
+    provider: "claude-code",
+    upstreamId: CLAUDE_FABLE_MODEL_ID,
+    displayName: "Claude Fable 5 via Claude Code",
+    aliases: [
+      CLAUDE_FABLE_MODEL_ID,
+      "fable",
+      `claude-code/${CLAUDE_FABLE_MODEL_ID}`,
+      "claude-code/fable",
+    ],
+    capabilities: ["messages", "tools", "streaming", "reasoning", "claude-code"],
+    metadata: { max_context_window: 1_000_000 },
+  },
+  {
+    id: `anthropic/${CLAUDE_FABLE_1M_MODEL_ID}`,
+    provider: "claude-code",
+    upstreamId: CLAUDE_FABLE_1M_MODEL_ID,
+    displayName: "Claude Fable 5 [1m] via Claude Code",
+    aliases: [
+      CLAUDE_FABLE_1M_MODEL_ID,
+      "fable1m",
+      `claude-code/${CLAUDE_FABLE_1M_MODEL_ID}`,
+      "claude-code/fable1m",
+    ],
+    capabilities: ["messages", "tools", "streaming", "reasoning", "claude-code"],
+    metadata: { max_context_window: 1_000_000 },
+  },
   {
     id: "anthropic/claude-sonnet-4-5",
     provider: "claude-code",
@@ -278,6 +315,7 @@ export function createClaudeCodeProvider(
           const sessionId = getClaudeSessionId(context.sessionKey, sessionRotation);
           const transformed = transformRequestBody(context.body, {
             identity: resolveRequestIdentity(claudeCredential, options.identity),
+            model: context.model,
             route: context.route,
             sessionKey: context.sessionKey,
             sessionId,
@@ -892,6 +930,7 @@ function transformRequestBody(
   body: unknown,
   options: {
     identity: Required<ClaudeCodeIdentity>;
+    model?: string;
     route: string;
     sessionKey: string;
     sessionId: string;
@@ -906,10 +945,12 @@ function transformRequestBody(
   }
 
   let record = { ...(body as Record<string, unknown>) };
+  const requestModel = readString(record.model) ?? options.model;
   if (typeof record.model === "string") {
-    record.model = stripProviderPrefix(record.model);
+    record.model = toClaudeCodeWireModelId(record.model);
   }
 
+  const hadIncomingTools = Array.isArray(record.tools) && record.tools.length > 0;
   stripCacheControl(record);
   removeUnsupportedClaudeCodeFields(record);
   if (options.route === "/v1/messages") {
@@ -926,6 +967,9 @@ function transformRequestBody(
       sessionId: options.sessionId,
       systemPrompt: CLAUDE_CODE_SYSTEM_PROMPT,
     });
+    if (requestModel && isClaudeFableModel(requestModel) && !hadIncomingTools && Array.isArray(record.tools) && record.tools.length > 0) {
+      record.tool_choice = { type: "none" };
+    }
   }
 
   const transformed = applyClaudeToolFlow(record);
@@ -974,7 +1018,7 @@ function buildUpstreamHeaders(input: {
     "anthropic-beta",
     mergeBetaHeaders(
       input.trustClientFingerprint ? headers.get("anthropic-beta") : null,
-      fingerprint.anthropicBeta,
+      getClaudeCodeBetasForModel(fingerprint.anthropicBeta, input.model, input.excludedBetas),
       input.excludedBetas,
     ),
   );
@@ -1275,6 +1319,41 @@ function removeUnsupportedClaudeCodeFields(body: Record<string, unknown>): void 
   delete body.temperature;
   delete body.top_p;
   delete body.top_k;
+}
+
+function splitBetaHeader(value: string): string[] {
+  return value.split(",").map((entry) => entry.trim()).filter(Boolean);
+}
+
+function getClaudeCodeBetasForModel(
+  defaults: string,
+  model: string | undefined,
+  excludedBetas: Set<string> = new Set(),
+): string {
+  const normalizedModel = model ? resolveClaudeCodeModelAlias(model).toLowerCase() : "";
+  const values = splitBetaHeader(defaults);
+  const add = (beta: string): void => {
+    if (!excludedBetas.has(beta) && !values.includes(beta)) values.push(beta);
+  };
+  const drop = (beta: string): void => {
+    const index = values.indexOf(beta);
+    if (index !== -1) values.splice(index, 1);
+  };
+
+  if (model && isClaudeFableModel(model)) {
+    add(FABLE_FALLBACK_CREDIT_BETA);
+  }
+  if (model && isClaudeCode1mModelLabel(model)) {
+    add(CONTEXT_1M_BETA);
+  }
+  if (normalizedModel.includes("haiku")) {
+    drop(MID_CONVERSATION_SYSTEM_BETA);
+    drop(EFFORT_BETA);
+  } else if (normalizedModel.includes("sonnet")) {
+    drop(MID_CONVERSATION_SYSTEM_BETA);
+  }
+
+  return values.filter((beta) => !excludedBetas.has(beta)).join(",");
 }
 
 function mergeBetaHeaders(

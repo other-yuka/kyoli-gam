@@ -15,6 +15,13 @@ export const bundledModelsDevSnapshot = {
     id: "anthropic",
     name: "Anthropic",
     models: {
+      "claude-fable-5": {
+        id: "claude-fable-5",
+        name: "Claude Fable 5",
+        reasoning: true,
+        tool_call: true,
+        limit: { context: 1000000, output: 128000 },
+      },
       "claude-sonnet-4-5": {
         id: "claude-sonnet-4-5",
         name: "Claude Sonnet 4.5",

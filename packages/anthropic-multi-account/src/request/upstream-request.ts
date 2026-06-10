@@ -3,7 +3,10 @@ import {
   applyClaudeCodeUpstreamBodyFields,
   composeClaudeCodeBillingSystemEntry,
   computeClaudeCodeBuildTag,
+  isClaudeFableModel,
   orderClaudeCodeBodyForOutbound,
+  resolveClaudeCodeModelAlias,
+  toClaudeCodeWireModelId,
 } from "../../../providers/claude-code/src/opencode-shared";
 import { claudeCodeIntegration, type ClaudeIdentity, type TemplateData } from "../claude-code";
 import { getRuntimeModelCapability } from "../model/capabilities";
@@ -125,17 +128,24 @@ export function getClientOutputEffort(inputBody: Record<string, unknown>): Outpu
 export function resolveOutputEffort(
   inputBody: Record<string, unknown>,
   configuredEffort = getConfiguredOutputEffort(),
+  modelId?: string,
 ): string {
   if (configuredEffort && configuredEffort !== "client") {
-    return normalizeEffortForWire(configuredEffort);
+    return clampFableEffort(normalizeEffortForWire(configuredEffort), modelId);
   }
 
   const clientEffort = getClientOutputEffort(inputBody);
-  return normalizeEffortForWire(clientEffort ?? DEFAULT_OUTPUT_EFFORT);
+  return clampFableEffort(normalizeEffortForWire(clientEffort ?? DEFAULT_OUTPUT_EFFORT), modelId);
 }
 
 function isHaikuModel(modelId: string): boolean {
-  return modelId.trim().toLowerCase().includes("haiku");
+  return resolveClaudeCodeModelAlias(modelId).toLowerCase().includes("haiku");
+}
+
+function clampFableEffort(effort: string, modelId: string | undefined): string {
+  return modelId && isClaudeFableModel(modelId) && (effort === "max" || effort === "xhigh")
+    ? "high"
+    : effort;
 }
 
 function collectToolUseIds(message: Message): string[] {
@@ -191,6 +201,7 @@ const ADAPTIVE_THINKING_MODEL_MATCHERS = [
   (modelId: string) => modelId.includes("claude-sonnet-4-6") || modelId.includes("claude-sonnet-4.6"),
   (modelId: string) => modelId.includes("claude-opus-4-6") || modelId.includes("claude-opus-4.6"),
   (modelId: string) => /claude-opus-4[-._]([7-9]|\d{2,})/.test(modelId),
+  (modelId: string) => /claude-fable-(?:[5-9]|\d{2,})(?:[-._]\d+)?(?:\[1m\])?$/.test(modelId),
 ];
 const DEFAULT_MAX_OUTPUT_TOKENS = 32_000;
 
@@ -200,7 +211,7 @@ function supportsAdaptiveThinking(modelId: string): boolean {
     return runtimeCapability.supportsThinking;
   }
 
-  const normalized = modelId.trim().toLowerCase();
+  const normalized = resolveClaudeCodeModelAlias(modelId).toLowerCase();
   if (normalized.includes("haiku")) {
     return false;
   }
@@ -310,17 +321,24 @@ export function buildUpstreamRequest(
   const configuredEffort = getConfiguredOutputEffort() ?? options?.outputEffort;
 
   const incomingTools = Array.isArray(body.tools) ? body.tools as ToolDefinition[] : [];
-  body.tools = selectOpenCodeNativeTools({
+  const selectedTools = selectOpenCodeNativeTools({
     incomingTools,
     templateTools: template.tools,
-  }).tools;
-  const modelId = typeof body.model === "string" ? body.model : "";
+  });
+  body.tools = selectedTools.tools;
+  const modelId = typeof body.model === "string" ? resolveClaudeCodeModelAlias(body.model) : "";
+  if (typeof body.model === "string") {
+    body.model = toClaudeCodeWireModelId(body.model);
+  }
+  if (isClaudeFableModel(modelId) && incomingTools.length === 0 && selectedTools.tools.length > 0) {
+    body.tool_choice = { type: "none" };
+  }
   if (supportsAdaptiveThinking(modelId)) {
     body.thinking = { type: "adaptive" };
     body.context_management = DEFAULT_CONTEXT_MANAGEMENT;
   }
   if (modelId && !isHaikuModel(modelId)) {
-    body.output_config = { effort: resolveOutputEffort(inputBody, configuredEffort) };
+    body.output_config = { effort: resolveOutputEffort(inputBody, configuredEffort, modelId) };
   }
   body.max_tokens = resolveMaxTokens(body.max_tokens);
 
