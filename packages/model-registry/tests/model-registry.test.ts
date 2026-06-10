@@ -62,6 +62,49 @@ describe("ModelRegistry", () => {
     });
   });
 
+  it("adds Fable aliases from models.dev for Claude Code routing", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "kyoli-fable-models-dev-"));
+    const localPath = join(dir, "api.json");
+    await writeFile(localPath, JSON.stringify({
+      anthropic: {
+        models: {
+          "claude-fable-5": {
+            id: "claude-fable-5",
+            name: "Claude Fable 5",
+            reasoning: true,
+            tool_call: true,
+          },
+        },
+      },
+    }));
+    const registry = new ModelRegistry([
+      adapter("claude-code", "anthropic/claude-fable-5[1m]", "claude-fable-5[1m]", ["fable1m", "claude-fable-5[1m]"]),
+    ], {
+      modelsDev: new ModelsDevRegistrySource({
+        sourceUrl: "https://models.dev",
+        cachePath: join(dir, "cache.json"),
+        localPath,
+        disableFetch: true,
+        refreshIntervalMs: 60_000,
+        fetchTimeoutMs: 10_000,
+      }),
+    });
+
+    await expect(registry.resolve("fable")).resolves.toMatchObject({
+      provider: "claude-code",
+      upstreamId: "claude-fable-5",
+    });
+    await expect(registry.resolve("fable1m")).resolves.toMatchObject({
+      provider: "claude-code",
+      upstreamId: "claude-fable-5[1m]",
+    });
+    await expect(registry.listModels()).resolves.toContainEqual(expect.objectContaining({
+      id: "anthropic/claude-fable-5",
+      aliases: expect.arrayContaining(["fable", "claude-code/fable", "anthropic/fable"]),
+      capabilities: expect.arrayContaining(["messages", "reasoning", "tools"]),
+    }));
+  });
+
   it("marks OpenAI models.dev Codex-family models as Codex-capable", async () => {
     const dir = await mkdtemp(join(tmpdir(), "kyoli-models-dev-"));
     const localPath = join(dir, "api.json");

@@ -432,6 +432,30 @@ describe("upstream-request", () => {
     expect(result.output_config).toEqual({ effort: "xhigh" });
   });
 
+
+
+  test("buildUpstreamRequest maps Fable aliases to CC wire shape", () => {
+    const result = buildUpstreamRequest({
+      model: "fable1m",
+      output_config: { effort: "max" },
+      messages: [
+        { role: "user", content: "hello" },
+        { role: "assistant", content: [{ type: "text", text: "answer" }] },
+        { role: "user", content: "again" },
+      ],
+    }, createIdentity(), createTemplate());
+
+    expect(result.model).toBe("claude-fable-5");
+    expect(result.thinking).toEqual({ type: "adaptive" });
+    expect(result.context_management).toEqual({});
+    expect(result.output_config).toEqual({ effort: "high" });
+    expect(result.tool_choice).toEqual({ type: "none" });
+    expect(result.tools).toEqual([
+      { name: "Bash", description: "Run shell commands", input_schema: { type: "object" } },
+      { name: "Read", description: "Read files", input_schema: { type: "object" }, cache_control: { type: "ephemeral" } },
+    ]);
+  });
+
   test("buildUpstreamRequest emits output_config for non-adaptive non-Haiku models", () => {
     const result = buildUpstreamRequest({
       model: "claude-sonnet-4-5",

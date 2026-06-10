@@ -162,18 +162,37 @@ function mapProviderModels(
 ): ModelInfo[] {
   const kyoliProvider = toKyoliProviderId(providerId);
   const publicProvider = toPublicProviderId(providerId);
-  return Object.entries(models).map(([modelId, model]) => ({
-    id: `${publicProvider}/${modelId}`,
-    provider: kyoliProvider,
-    upstreamId: model.id ?? modelId,
-    displayName: model.name ?? modelId,
-    aliases: [
-      model.id ?? modelId,
-      `${kyoliProvider}/${model.id ?? modelId}`,
-    ],
-    capabilities: inferCapabilities(providerId, model),
-    metadata: pickModelMetadata(model),
-  }));
+  return Object.entries(models).map(([modelId, model]) => {
+    const upstreamId = model.id ?? modelId;
+    return {
+      id: `${publicProvider}/${modelId}`,
+      provider: kyoliProvider,
+      upstreamId,
+      displayName: model.name ?? modelId,
+      aliases: buildModelAliases(providerId, upstreamId),
+      capabilities: inferCapabilities(providerId, model),
+      metadata: pickModelMetadata(model),
+    };
+  });
+}
+
+function buildModelAliases(providerId: ModelsDevProviderId, upstreamId: string): string[] {
+  const kyoliProvider = toKyoliProviderId(providerId);
+  const publicProvider = toPublicProviderId(providerId);
+  const aliases = [
+    upstreamId,
+    `${kyoliProvider}/${upstreamId}`,
+  ];
+
+  if (providerId === "anthropic" && upstreamId === "claude-fable-5") {
+    aliases.push(
+      "fable",
+      `${kyoliProvider}/fable`,
+      `${publicProvider}/fable`,
+    );
+  }
+
+  return [...new Set(aliases)];
 }
 
 function pickModelMetadata(model: ModelsDevModel): Record<string, unknown> | undefined {

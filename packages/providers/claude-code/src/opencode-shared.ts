@@ -10,6 +10,45 @@ const templateMetadata = getClaudeCodeTemplateMetadata();
 const templateHeaders = templateMetadata.headerValues;
 const CLAUDE_CODE_VERSION = templateMetadata.ccVersion ?? "2.1.137";
 
+export const CLAUDE_FABLE_MODEL_ID = "claude-fable-5";
+export const CLAUDE_FABLE_1M_MODEL_ID = `${CLAUDE_FABLE_MODEL_ID}[1m]`;
+
+const CLAUDE_CODE_MODEL_ALIASES: Record<string, string> = {
+  fable: CLAUDE_FABLE_MODEL_ID,
+  fable1m: CLAUDE_FABLE_1M_MODEL_ID,
+};
+
+export function stripClaudeCodeProviderPrefix(modelId: string): string {
+  const slash = modelId.indexOf("/");
+  if (slash === -1) return modelId;
+
+  const provider = modelId.slice(0, slash).toLowerCase();
+  return provider === "anthropic" || provider === "claude-code"
+    ? modelId.slice(slash + 1)
+    : modelId;
+}
+
+export function resolveClaudeCodeModelAlias(modelId: string): string {
+  const unprefixed = stripClaudeCodeProviderPrefix(modelId.trim());
+  return CLAUDE_CODE_MODEL_ALIASES[unprefixed.toLowerCase()] ?? unprefixed;
+}
+
+export function stripClaudeCodeContext1mTag(modelId: string): string {
+  return modelId.replace(/\[1m\]$/i, "");
+}
+
+export function toClaudeCodeWireModelId(modelId: string): string {
+  return stripClaudeCodeContext1mTag(resolveClaudeCodeModelAlias(modelId));
+}
+
+export function isClaudeCode1mModelLabel(modelId: string): boolean {
+  return /\[1m\]$/i.test(resolveClaudeCodeModelAlias(modelId));
+}
+
+export function isClaudeFableModel(modelId: string): boolean {
+  return resolveClaudeCodeModelAlias(modelId).toLowerCase().includes("fable");
+}
+
 export interface ClaudeCodeSharedRequestProfile {
   anthropicBeta: string;
   anthropicVersion: string;

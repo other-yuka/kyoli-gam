@@ -306,6 +306,67 @@ describe("createClaudeCodeProvider", () => {
     expect(userId.session_id).toBe(upstreamSessionId);
   });
 
+
+
+  it("routes Fable aliases with fallback beta and safe tool defaults", async () => {
+    let upstreamBody: Record<string, unknown> = {};
+    let upstreamBeta = "";
+
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+      },
+    });
+
+    const provider = createTestClaudeCodeProvider({
+      accounts: new StickyAccountPool(store),
+      baseUrl: "https://example.test",
+      usageRefresh: async () => ({ cachedUsageAt: Date.now() }),
+      fetch: async (_input, init) => {
+        const headers = new Headers(init?.headers);
+        upstreamBeta = headers.get("anthropic-beta") ?? "";
+        upstreamBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+
+        return new Response(JSON.stringify({ id: "msg_test", type: "message" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    const response = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "fable1m",
+          max_tokens: 1024,
+          messages: [{ role: "user", content: "hello" }],
+        }),
+      }),
+      route: "/v1/messages",
+      sessionKey: "session-fable",
+      body: {
+        model: "fable1m",
+        max_tokens: 1024,
+        messages: [{ role: "user", content: "hello" }],
+      },
+      model: "fable1m",
+    });
+
+    expect(response.status).toBe(200);
+    expect(upstreamBody.model).toBe("claude-fable-5");
+    expect(upstreamBody.tool_choice).toEqual({ type: "none" });
+    expect((upstreamBody.tools as unknown[]).length).toBeGreaterThan(0);
+    expect(upstreamBeta).toContain("fallback-credit-2026-06-01");
+    expect(upstreamBeta).toContain("context-1m-2025-08-07");
+  });
+
   it("uses Claude Code identity device id while keeping the selected account UUID", async () => {
     let upstreamBody: {
       metadata?: {

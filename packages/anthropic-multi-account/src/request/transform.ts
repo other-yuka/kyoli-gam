@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { resolveClaudeCodeModelAlias } from "../../../providers/claude-code/src/opencode-shared";
 import { ensureOauthBeta, getModelBetas } from "./betas";
 import { claudeCodeIntegration } from "../claude-code";
 import { ANTHROPIC_OAUTH_ADAPTER } from "../shared/constants";
@@ -13,7 +14,6 @@ import {
 } from "../tools/flow";
 import {
   filterBillableBetas,
-  getBetaHeader,
   getPerRequestHeaders,
   getStaticHeaders,
   orderHeadersForOutbound,
@@ -162,7 +162,6 @@ export function buildRequestHeaders(
   const incomingHeaders = getMergedIncomingHeaders(input, init);
   const sessionId = resolveSessionId(incomingHeaders);
   const mergedBetas = dedupeHeaderValues(ensureOauthBeta([
-    ...excludeBetas(splitHeaderValues(getBetaHeader()), excludedBetas),
     ...getModelBetas(modelId, excludedBetas),
     ...excludeBetas(splitHeaderValues(incomingHeaders["anthropic-beta"]), excludedBetas),
   ])).join(",");
@@ -191,7 +190,7 @@ export function extractModelIdFromBody(body: BodyInit | null | undefined): strin
 
   try {
     const parsed = JSON.parse(body) as RequestPayload;
-    return typeof parsed.model === "string" ? parsed.model : "unknown";
+    return typeof parsed.model === "string" ? resolveClaudeCodeModelAlias(parsed.model) : "unknown";
   } catch {
     return "unknown";
   }

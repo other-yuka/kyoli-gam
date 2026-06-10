@@ -110,8 +110,10 @@ export function toCodexClaudeModelEntry(model: ModelInfo): Record<string, unknow
 }
 
 function isCodexClaudeBridgeCandidate(upstreamId: string): boolean {
-  return /^claude-(sonnet|opus|haiku)-4(?:-\d+)*$/.test(upstreamId) &&
-    !/-\d{8}$/.test(upstreamId);
+  return (
+    /^claude-(sonnet|opus|haiku)-4(?:-\d+)*$/.test(upstreamId)
+    || /^claude-fable-5(?:\[1m\])?$/.test(upstreamId)
+  ) && !/-\d{8}$/.test(upstreamId);
 }
 
 export async function handleCodexClaudeBridgeRequest(

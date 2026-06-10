@@ -1,3 +1,4 @@
+import { resolveClaudeCodeModelAlias, isClaudeCode1mModelLabel } from "../../../providers/claude-code/src/opencode-shared";
 import { config, getModelOverride, getRequiredBetas } from "../model/config";
 
 export const LONG_CONTEXT_BETAS = config.longContextBetas;
@@ -72,35 +73,40 @@ export function getNextBetaToExclude(modelId: string): string | null {
 }
 
 export function supports1mContext(modelId: string): boolean {
-  const lowerModelId = modelId.toLowerCase();
-  if (!lowerModelId.includes("opus") && !lowerModelId.includes("sonnet")) {
+  const lowerModelId = resolveClaudeCodeModelAlias(modelId).toLowerCase();
+  if (isClaudeCode1mModelLabel(modelId)) {
+    return lowerModelId.includes("fable") || lowerModelId.includes("opus") || lowerModelId.includes("sonnet");
+  }
+
+  if (!lowerModelId.includes("opus") && !lowerModelId.includes("sonnet") && !lowerModelId.includes("fable")) {
     return false;
   }
 
-  const versionMatch = lowerModelId.match(/(opus|sonnet)-(\d+)-(\d+)/);
+  const versionMatch = lowerModelId.match(/(opus|sonnet|fable)-(\d+)(?:-(\d+))?/);
   if (!versionMatch) {
     return false;
   }
 
   const major = Number.parseInt(versionMatch[2]!, 10);
-  const minor = Number.parseInt(versionMatch[3]!, 10);
+  const minor = versionMatch[3] ? Number.parseInt(versionMatch[3], 10) : 0;
   const effectiveMinor = minor > 99 ? 0 : minor;
   return major > 4 || (major === 4 && effectiveMinor >= 6);
 }
 
 export function getModelBetas(modelId: string, excluded?: Set<string>): string[] {
+  const normalizedModelId = resolveClaudeCodeModelAlias(modelId);
   const betas = [...getRequiredBetas()];
   const longContextBeta = config.longContextBetas[0];
 
   if (
     longContextBeta
-    && process.env.ANTHROPIC_ENABLE_1M_CONTEXT === "true"
-    && supports1mContext(modelId)
+    && (process.env.ANTHROPIC_ENABLE_1M_CONTEXT === "true" || isClaudeCode1mModelLabel(normalizedModelId))
+    && supports1mContext(normalizedModelId)
   ) {
     betas.push(longContextBeta);
   }
 
-  const override = getModelOverride(modelId);
+  const override = getModelOverride(normalizedModelId);
   if (override?.exclude) {
     for (const excludedBeta of override.exclude) {
       const index = betas.indexOf(excludedBeta);
