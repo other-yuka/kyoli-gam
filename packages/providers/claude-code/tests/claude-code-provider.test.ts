@@ -1240,6 +1240,68 @@ describe("createClaudeCodeProvider", () => {
     expect(retryCounts).toEqual(["0", "1", "0"]);
   });
 
+  it("retries hard effort-capability 400s and caches the supported level", async () => {
+    const efforts: string[] = [];
+    const retryCounts: string[] = [];
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+      },
+    });
+
+    const provider = createTestClaudeCodeProvider({
+      accounts: new StickyAccountPool(store),
+      allowLiveMessages: true,
+      baseUrl: "https://example.test",
+      usageRefresh: async () => ({ cachedUsageAt: Date.now() }),
+      fetch: async (_input, init) => {
+        const body = JSON.parse(String(init?.body)) as { output_config?: { effort?: string } };
+        const headers = new Headers(init?.headers);
+        efforts.push(body.output_config?.effort ?? "");
+        retryCounts.push(headers.get("x-stainless-retry-count") ?? "");
+        if (efforts.length === 1) {
+          return new Response(
+            JSON.stringify({
+              error: {
+                message: "This model does not support effort level 'max'. Supported levels: high, low, medium.",
+              },
+            }),
+            { status: 400, headers: { "content-type": "application/json" } },
+          );
+        }
+
+        return new Response(JSON.stringify({ id: `msg_${efforts.length}`, type: "message" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    const firstContext = createMessagesContext(
+      "session-effort",
+      "anthropic/claude-opus-4-5-20251101",
+    ) as ReturnType<typeof createMessagesContext> & { body: Record<string, unknown> };
+    firstContext.body.output_config = { effort: "max" };
+    const first = await provider.handleRequest(firstContext);
+
+    const secondContext = createMessagesContext(
+      "session-effort-2",
+      "anthropic/claude-opus-4-5-20251101",
+    ) as ReturnType<typeof createMessagesContext> & { body: Record<string, unknown> };
+    secondContext.body.output_config = { effort: "max" };
+    const second = await provider.handleRequest(secondContext);
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(efforts).toEqual(["max", "high", "high"]);
+    expect(retryCounts).toEqual(["0", "1", "0"]);
+  });
+
   it("retries without long-context betas after subscription errors", async () => {
     const betas: string[] = [];
     const store = new MemoryAccountStore();
