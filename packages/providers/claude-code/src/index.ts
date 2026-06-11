@@ -37,6 +37,11 @@ import {
   type ReverseToolLookup,
 } from "./tool-flow";
 import {
+  clampEffortAfterRejection,
+  clampUnsupportedEffortInBody,
+  parseEffortCapabilityRejection,
+} from "./effort-capability";
+import {
   getClaudeCodeTemplateMetadata,
   getClaudeCodeTemplateTools,
 } from "./fingerprint-template";
@@ -239,6 +244,7 @@ export function createClaudeCodeProvider(
   const usageRefresh = options.usageRefresh ?? ((accessToken: string) =>
     refreshClaudeCodeAccountMetadata(accessToken, { fetch: fetchImpl }));
   const rejectedBetasByAccount = new Map<string, Set<string>>();
+  const effortSupportByModel = new Map<string, string[]>();
   const pacer = createClaudeCodePacer(resolvePacingOptions(options.pacing));
   const drainOnCancel = options.drainOnCancel ?? readBooleanEnv("KYOLI_CLAUDE_DRAIN_ON_CANCEL");
   const drainTimeoutMs = readNonNegativeInteger(options.drainTimeoutMs) ??
@@ -328,6 +334,7 @@ export function createClaudeCodeProvider(
                 ? undefined
                 : JSON.stringify(transformed.body),
             context,
+            effortSupportByModel,
             fetchImpl,
             fingerprint,
             pacer,
@@ -366,6 +373,7 @@ async function fetchWithClaudeRetries(input: {
   accountKey: string;
   body: BodyInit | undefined;
   context: Parameters<ProviderAdapter["handleRequest"]>[0];
+  effortSupportByModel: Map<string, string[]>;
   fetchImpl: typeof fetch;
   fingerprint: ClaudeCodeRequestFingerprint;
   pacer: () => Promise<void>;
@@ -377,11 +385,33 @@ async function fetchWithClaudeRetries(input: {
   url: string;
 }): Promise<Response> {
   const excludedBetas = getRejectedBetaSet(input.rejectedBetasByAccount, input.accountKey);
-  let response = await dispatchClaudeRequest(input, excludedBetas, 0);
+  let body = clampUnsupportedEffortInBody(input.body, input.effortSupportByModel).body;
+  const dispatchInput = (nextBody: BodyInit | undefined): Parameters<typeof dispatchClaudeRequest>[0] => ({
+    ...input,
+    body: nextBody,
+  });
+  let response = await dispatchClaudeRequest(dispatchInput(body), excludedBetas, 0);
 
   if (response.status !== 400 && response.status !== 429) return response;
 
-  const bodyText = await response.clone().text().catch(() => "");
+  let bodyText = await response.clone().text().catch(() => "");
+  const effortRejection = response.status === 400
+    ? parseEffortCapabilityRejection(bodyText)
+    : null;
+  if (effortRejection) {
+    const clamped = clampEffortAfterRejection(
+      body,
+      effortRejection,
+      input.effortSupportByModel,
+    );
+    if (clamped.changed) {
+      body = clamped.body;
+      response = await dispatchClaudeRequest(dispatchInput(body), excludedBetas, 1);
+      if (response.status !== 400 && response.status !== 429) return response;
+      bodyText = await response.clone().text().catch(() => "");
+    }
+  }
+
   const rejectedBetas = input.retryRejectedBetas && response.status === 400
     ? parseRejectedBetaFlags(bodyText)
     : [];
@@ -398,7 +428,7 @@ async function fetchWithClaudeRetries(input: {
   for (const beta of retryBetas) {
     excludedBetas.add(beta);
   }
-  return dispatchClaudeRequest(input, excludedBetas, 1);
+  return dispatchClaudeRequest(dispatchInput(body), excludedBetas, 1);
 }
 
 async function dispatchClaudeRequest(

@@ -139,6 +139,54 @@ describe("runtime-factory", () => {
     expect(body.output_config).toEqual({ effort: "max" });
   });
 
+  test("retries hard effort-capability 400s and caches the supported level", async () => {
+    const uuid = await seedAccount();
+    const factory = new AccountRuntimeFactory(store, client);
+    const runtime = await factory.getRuntime(uuid);
+    const efforts: string[] = [];
+
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { output_config?: { effort?: string } };
+      efforts.push(body.output_config?.effort ?? "");
+      if (efforts.length === 1) {
+        return new Response(
+          JSON.stringify({
+            error: {
+              type: "invalid_request_error",
+              message: "This model does not support effort level 'max'. Supported levels: high, low, medium.",
+            },
+          }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        );
+      }
+
+      return new Response(JSON.stringify({ id: `msg_${efforts.length}`, type: "message" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const request = {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-kyoli-opencode-effort": "max",
+      },
+      body: JSON.stringify({
+        model: "claude-opus-4-5-20251101",
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    };
+
+    const first = await runtime.fetch("https://api.anthropic.com/v1/messages", request);
+    const second = await runtime.fetch("https://api.anthropic.com/v1/messages", request);
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(efforts).toEqual(["max", "high", "high"]);
+  });
+
   test("prefers stored per-account Claude identity over process identity", async () => {
     const uuid = await seedAccount({
       accountId: "provider-account",

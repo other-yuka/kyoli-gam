@@ -9,6 +9,11 @@ import {
   transformRequestUrl,
 } from "../request/transform";
 import {
+  clampEffortAfterRejection,
+  clampUnsupportedEffortInBody,
+  parseEffortCapabilityRejection,
+} from "../../../providers/claude-code/src/effort-capability";
+import {
   addExcludedBeta,
   ensureOauthBeta,
   extractRejectedBetas,
@@ -263,6 +268,7 @@ export interface PacingTestOverrides {
 export class AccountRuntimeFactory {
   private runtimes = new Map<string, AccountRuntime>();
   private initLocks = new Map<string, Promise<AccountRuntime>>();
+  private effortSupportByModel = new Map<string, string[]>();
   private lastRequestTime = 0;
   private pacingGate = Promise.resolve();
   private pacingTestOverrides: PacingTestOverrides = {};
@@ -460,14 +466,46 @@ export class AccountRuntimeFactory {
       }
     };
 
-    let outboundBody = transformedRequest.body;
+    let outboundBody = clampUnsupportedEffortInBody(
+      transformedRequest.body,
+      this.effortSupportByModel,
+    ).body;
+    const retryEffortCapability = async (
+      currentResponse: Response,
+      requestHeaders: HeadersInit,
+    ): Promise<Response> => {
+      if (currentResponse.status !== 400) {
+        return currentResponse;
+      }
+
+      const responseBody = await currentResponse.clone().text().catch(() => "");
+      const rejection = parseEffortCapabilityRejection(responseBody);
+      if (!rejection) {
+        return currentResponse;
+      }
+
+      const clamped = clampEffortAfterRejection(
+        outboundBody,
+        rejection,
+        this.effortSupportByModel,
+      );
+      if (!clamped.changed) {
+        return currentResponse;
+      }
+
+      outboundBody = clamped.body;
+      return performFetch(requestHeaders, outboundBody);
+    };
+
     let response = await performFetch(headers, outboundBody);
+    response = await retryEffortCapability(response, headers);
 
     if (await isAssistantPrefillUnsupportedResponse(response)) {
       const retryBody = removeTrailingAssistantPrefillBody(outboundBody);
       if (retryBody) {
         outboundBody = retryBody;
         response = await performFetch(headers, outboundBody);
+        response = await retryEffortCapability(response, headers);
       }
     }
 
@@ -510,6 +548,7 @@ export class AccountRuntimeFactory {
       );
 
       response = await performFetch(retryHeaders, outboundBody);
+      response = await retryEffortCapability(response, retryHeaders);
     }
 
     return applyResponseReverseLookup(response, transformedRequest.reverseLookup);
