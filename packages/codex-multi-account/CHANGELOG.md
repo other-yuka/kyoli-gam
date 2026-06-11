@@ -1,5 +1,14 @@
 # opencode-codex-multi-account
 
+## 0.2.55
+
+### Patch Changes
+
+- [#70](https://github.com/other-yuka/kyoli-gam/pull/70) [`39c26b5`](https://github.com/other-yuka/kyoli-gam/commit/39c26b5b66ac9e91d18752eb489727fbec5d1284) Thanks [@other-yuka](https://github.com/other-yuka)! - Refresh the bundled Claude Code 2.1.173 fingerprint after human-gated template/wire validation and retry hard effort-capability 400s by caching each model's supported effort set.
+
+- Updated dependencies [[`39c26b5`](https://github.com/other-yuka/kyoli-gam/commit/39c26b5b66ac9e91d18752eb489727fbec5d1284)]:
+  - opencode-multi-account-core@0.2.55
+
 ## 0.2.54
 
 ### Patch Changes
