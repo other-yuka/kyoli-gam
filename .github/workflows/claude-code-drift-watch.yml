@@ -211,7 +211,7 @@ jobs:
             --description "Claude Code package drift requires kyoli compatibility review" \
             2>/dev/null || true
 
-      - name: Open PR and arm auto-merge
+      - name: Open PR for manual review
         env:
           GH_TOKEN: ${{ secrets.KYOLI_DRIFT_BOT_PAT }}
           BRANCH: ${{ steps.auto_draft.outputs.branch_name }}
@@ -224,8 +224,7 @@ jobs:
 
           existing_pr=$(gh pr list --repo "${{ github.repository }}" --head "$BRANCH" --state open --json number --jq '.[0].number')
           if [ -n "$existing_pr" ]; then
-            echo "PR #$existing_pr already exists for $BRANCH; arming auto-merge."
-            gh pr merge "$existing_pr" --repo "${{ github.repository }}" --auto --squash --delete-branch
+            echo "PR #$existing_pr already exists for $BRANCH; leaving it for manual review."
             exit 0
           fi
 
@@ -243,7 +242,7 @@ jobs:
           fi
 
           git commit -m "$COMMIT_MESSAGE"
-          git push --force-with-lease origin "$BRANCH"
+          git push origin "$BRANCH"
 
           pr_url=$(gh pr create \
             --repo "${{ github.repository }}" \
@@ -253,9 +252,7 @@ jobs:
             --body-file "$PR_BODY_PATH" \
             --label claude-code-drift)
           echo "Opened $pr_url"
-
-          gh pr merge "$pr_url" --repo "${{ github.repository }}" --auto --squash --delete-branch
-          echo "Auto-merge armed."
+          echo "Leaving Claude Code drift PR for human template/wire validation."
 
 
   manual_issue:
