@@ -1,5 +1,7 @@
 # opencode-multi-account-core
 
+## 0.2.57
+
 ## 0.2.56
 
 ## 0.2.55
