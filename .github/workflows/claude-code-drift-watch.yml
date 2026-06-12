@@ -222,15 +222,20 @@ jobs:
         run: |
           set -euo pipefail
 
-          existing_pr=$(gh pr list --repo "${{ github.repository }}" --head "$BRANCH" --state open --json number --jq '.[0].number')
+          existing_pr=$(gh pr list \
+            --repo "${{ github.repository }}" \
+            --state open \
+            --limit 100 \
+            --json number,headRefName \
+            --jq 'map(select(.headRefName == env.BRANCH or (.headRefName | startswith(env.BRANCH + "-")))) | .[0].number // ""')
           if [ -n "$existing_pr" ]; then
-            echo "PR #$existing_pr already exists for $BRANCH; leaving it for manual review."
+            echo "PR #$existing_pr already exists for $BRANCH or its run-scoped fallback; leaving it for manual review."
             exit 0
           fi
 
           branch_to_push="$BRANCH"
           if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
-            branch_to_push="${BRANCH}-${GITHUB_RUN_ID}"
+            branch_to_push="${BRANCH}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}"
             echo "::notice::Remote branch $BRANCH already exists without an open PR; using $branch_to_push instead of force-pushing."
           fi
 
