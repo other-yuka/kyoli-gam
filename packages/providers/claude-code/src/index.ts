@@ -436,19 +436,21 @@ async function dispatchClaudeRequest(
   excludedBetas: Set<string>,
   retryCount: number,
 ): Promise<Response> {
+  const headers = buildUpstreamHeaders({
+    headers: input.context.request.headers,
+    accessToken: input.accessToken,
+    excludedBetas,
+    fingerprint: input.fingerprint,
+    retryCount,
+    sessionId: input.sessionId,
+    trustClientFingerprint: input.trustClientFingerprint,
+    model: input.context.model,
+  });
+
   await input.pacer();
   return input.fetchImpl(input.url, {
     method: input.context.request.method,
-    headers: buildUpstreamHeaders({
-      headers: input.context.request.headers,
-      accessToken: input.accessToken,
-      excludedBetas,
-      fingerprint: input.fingerprint,
-      retryCount,
-      sessionId: input.sessionId,
-      trustClientFingerprint: input.trustClientFingerprint,
-      model: input.context.model,
-    }),
+    headers,
     body: input.body,
     duplex: "half",
   } as RequestInit);
