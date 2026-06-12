@@ -228,9 +228,15 @@ jobs:
             exit 0
           fi
 
+          branch_to_push="$BRANCH"
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            branch_to_push="${BRANCH}-${GITHUB_RUN_ID}"
+            echo "::notice::Remote branch $BRANCH already exists without an open PR; using $branch_to_push instead of force-pushing."
+          fi
+
           git config user.email "actions@github.com"
           git config user.name "kyoli-drift-watch[bot]"
-          git checkout -B "$BRANCH"
+          git checkout -B "$branch_to_push"
 
           echo "$CHANGED_FILES" \
             | node -pe "JSON.parse(require('fs').readFileSync(0,'utf8')).join('\n')" \
@@ -242,11 +248,11 @@ jobs:
           fi
 
           git commit -m "$COMMIT_MESSAGE"
-          git push origin "$BRANCH"
+          git push origin "$branch_to_push"
 
           pr_url=$(gh pr create \
             --repo "${{ github.repository }}" \
-            --head "$BRANCH" \
+            --head "$branch_to_push" \
             --base main \
             --title "$PR_TITLE" \
             --body-file "$PR_BODY_PATH" \
