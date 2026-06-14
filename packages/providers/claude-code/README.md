@@ -74,6 +74,7 @@ kyoli doctor claude --binary
 kyoli doctor claude
 kyoli doctor claude --template
 kyoli doctor claude --wire
+kyoli doctor claude --obedience
 kyoli doctor claude --smoke
 ```
 

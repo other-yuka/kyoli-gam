@@ -49,18 +49,12 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: "true"
 
-      - name: Enable auto-merge for release PR
+      - name: Report release PR for manual merge
         if: steps.changesets.outputs.published != 'true'
         env:
-          KYOLI_RELEASE_BOT_PAT: ${{ secrets.KYOLI_RELEASE_BOT_PAT }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          if [ -z "$KYOLI_RELEASE_BOT_PAT" ]; then
-            echo "::warning::KYOLI_RELEASE_BOT_PAT is not configured; leaving the Changesets release PR for manual merge so publish is not suppressed by GITHUB_TOKEN loop protection."
-            exit 0
-          fi
-          export GH_TOKEN="$KYOLI_RELEASE_BOT_PAT"
-
           pr=$(gh pr list \
             --repo "${{ github.repository }}" \
             --head changeset-release/main \
@@ -73,5 +67,5 @@ jobs:
             exit 0
           fi
 
-          echo "Arming auto-merge for Changesets release PR #$pr."
-          gh pr merge "$pr" --repo "${{ github.repository }}" --auto --squash --delete-branch
+          echo "::notice::Changesets release PR #$pr is ready for manual review and merge."
+          echo "Release publishing will run only after the release PR is merged."

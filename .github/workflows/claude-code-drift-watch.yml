@@ -211,7 +211,7 @@ jobs:
             --description "Claude Code package drift requires kyoli compatibility review" \
             2>/dev/null || true
 
-      - name: Open PR and arm auto-merge
+      - name: Open PR for manual review
         env:
           GH_TOKEN: ${{ secrets.KYOLI_DRIFT_BOT_PAT }}
           BRANCH: ${{ steps.auto_draft.outputs.branch_name }}
@@ -222,16 +222,26 @@ jobs:
         run: |
           set -euo pipefail
 
-          existing_pr=$(gh pr list --repo "${{ github.repository }}" --head "$BRANCH" --state open --json number --jq '.[0].number')
+          existing_pr=$(gh pr list \
+            --repo "${{ github.repository }}" \
+            --state open \
+            --limit 100 \
+            --json number,headRefName \
+            --jq 'map(select(.headRefName == env.BRANCH or (.headRefName | startswith(env.BRANCH + "-")))) | .[0].number // ""')
           if [ -n "$existing_pr" ]; then
-            echo "PR #$existing_pr already exists for $BRANCH; arming auto-merge."
-            gh pr merge "$existing_pr" --repo "${{ github.repository }}" --auto --squash --delete-branch
+            echo "PR #$existing_pr already exists for $BRANCH or its run-scoped fallback; leaving it for manual review."
             exit 0
+          fi
+
+          branch_to_push="$BRANCH"
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            branch_to_push="${BRANCH}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}"
+            echo "::notice::Remote branch $BRANCH already exists without an open PR; using $branch_to_push instead of force-pushing."
           fi
 
           git config user.email "actions@github.com"
           git config user.name "kyoli-drift-watch[bot]"
-          git checkout -B "$BRANCH"
+          git checkout -B "$branch_to_push"
 
           echo "$CHANGED_FILES" \
             | node -pe "JSON.parse(require('fs').readFileSync(0,'utf8')).join('\n')" \
@@ -243,19 +253,17 @@ jobs:
           fi
 
           git commit -m "$COMMIT_MESSAGE"
-          git push --force-with-lease origin "$BRANCH"
+          git push origin "$branch_to_push"
 
           pr_url=$(gh pr create \
             --repo "${{ github.repository }}" \
-            --head "$BRANCH" \
+            --head "$branch_to_push" \
             --base main \
             --title "$PR_TITLE" \
             --body-file "$PR_BODY_PATH" \
             --label claude-code-drift)
           echo "Opened $pr_url"
-
-          gh pr merge "$pr_url" --repo "${{ github.repository }}" --auto --squash --delete-branch
-          echo "Auto-merge armed."
+          echo "Leaving Claude Code drift PR for human template/wire validation."
 
 
   manual_issue:
@@ -314,8 +322,15 @@ jobs:
 
   close_resolved_issues:
     needs:
+      - version_check
       - drift
-    if: always() && needs.drift.outputs.exit_code == '0'
+    if: >-
+      always() &&
+      needs.version_check.outputs.should_run == 'true' &&
+      needs.drift.result == 'success' &&
+      needs.drift.outputs.exit_code == '0' &&
+      needs.drift.outputs.cc_version != '' &&
+      needs.drift.outputs.cc_version != 'unknown'
     runs-on: ubuntu-latest
     permissions:
       issues: write
@@ -325,6 +340,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           CC_VERSION="${{ needs.drift.outputs.cc_version }}"
+          if [ -z "$CC_VERSION" ] || [ "$CC_VERSION" = "unknown" ]; then
+            echo "::notice::Skipping drift issue closure because no concrete Claude Code version was checked."
+            exit 0
+          fi
           {
             gh issue list --repo "${{ github.repository }}" --label claude-code-drift --state open --json number --jq '.[].number'
             gh issue list --repo "${{ github.repository }}" --label fingerprint-drift --state open --json number --jq '.[].number' 2>/dev/null || true

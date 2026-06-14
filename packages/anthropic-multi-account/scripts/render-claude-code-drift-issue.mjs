@@ -44,7 +44,7 @@ Kyoli keeps Claude Code compatibility explicit for both Server Mode and OpenCode
 
 - [ ] Install the new Claude Code locally: \`npm install -g @anthropic-ai/claude-code@${ccVersion}\`.
 - [ ] Run \`pnpm --dir packages/cli doctor claude --binary\`.
-- [ ] Run \`pnpm --dir packages/cli doctor claude --template\` and \`pnpm --dir packages/cli doctor claude --wire\`.
+- [ ] Run \`pnpm --dir packages/cli doctor claude --template\`, \`pnpm --dir packages/cli doctor claude --wire\`, and \`pnpm --dir packages/cli doctor claude --obedience\`.
 - [ ] Re-bake only if fingerprint-sensitive fields changed: \`pnpm --dir packages/anthropic-multi-account bake:fingerprint\`.
 - [ ] Run \`pnpm --filter opencode-anthropic-multi-account test:contract:native\`.
 - [ ] Add a patch changeset for affected packages when a release is needed.
