@@ -1,5 +1,12 @@
 # @kyoli-gam/cli
 
+## 0.0.2
+
+### Patch Changes
+
+- Updated dependencies [[`6e86270`](https://github.com/other-yuka/kyoli-gam/commit/6e86270b294610f445e88ed99662f5e0a5da6daa)]:
+  - @kyoli-gam/provider-claude-code@0.0.2
+
 ## 0.0.1
 
 ### Patch Changes
