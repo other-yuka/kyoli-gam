@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       doctor_commands_json:
-        description: Optional JSON array of command argv arrays for scripts/check-kyoli-doctor-drift.mjs
+        description: Optional JSON array of command argv arrays for scripts/check-kyoli-doctor-drift.mjs. Template/wire doctors require an authenticated Claude Code CLI.
         required: false
         default: ""
 
@@ -25,6 +25,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - uses: pnpm/action-setup@v4
         with:
@@ -38,13 +40,19 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Install Claude Code CLI
+        run: |
+          npm install --global @anthropic-ai/claude-code@latest
+          claude --version
+
       - name: Build doctor dependencies
         run: pnpm --filter @kyoli-gam/cli build && pnpm --filter @kyoli-gam/provider-claude-code build
 
       - name: Run kyoli doctor drift check
         id: check
         env:
-          KYOLI_DOCTOR_COMMANDS_JSON: ${{ inputs.doctor_commands_json || vars.KYOLI_DOCTOR_COMMANDS_JSON }}
+          KYOLI_DOCTOR_COMMANDS_JSON: >-
+            ${{ inputs.doctor_commands_json || vars.KYOLI_DOCTOR_COMMANDS_JSON || '[["pnpm","--dir","packages/cli","run","doctor","claude","--binary","--json"],["pnpm","--dir","packages/cli","run","doctor","claude","--obedience","--json"]]' }}
         run: |
           set +e
           node scripts/check-kyoli-doctor-drift.mjs > kyoli-doctor-drift.json 2> kyoli-doctor-drift.err
