@@ -22,6 +22,7 @@ import {
   ingestProviderModelsCapabilities,
   resetRuntimeModelCapabilitiesForTest,
 } from "../../src/model/capabilities";
+import { CLIENT_SYSTEM_PREFACE } from "../../../providers/claude-code/src/opencode-shared";
 
 afterEach(() => {
   resetUpstreamRequestForTest();
@@ -557,7 +558,7 @@ describe("upstream-request", () => {
 
     expect(systemBlocks[0]?.text).toBe(billingHeader);
     expect(systemBlocks[1]?.text).toBe(template.agent_identity);
-    expect(systemBlocks[2]?.text).toBe(`${template.system_prompt}\n\nLocal reminder`);
+    expect(systemBlocks[2]?.text).toBe(`${template.system_prompt}${CLIENT_SYSTEM_PREFACE}Local reminder`);
     expect(systemBlocks[2]?.text.includes(billingHeader)).toBe(false);
     expect(systemBlocks[2]?.text.includes(template.agent_identity)).toBe(false);
   });

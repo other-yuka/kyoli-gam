@@ -118,7 +118,7 @@ a local registry fallback when the server is offline.
 kyoli doctor [--json]
 kyoli doctor pool [--json]
 kyoli doctor codex [--route /backend-api/codex/responses|/v1/responses|/v1/chat/completions] [--model openai/<model>] [--file|--e2e|--load|--websocket|--sdk] [--json]
-kyoli doctor claude [--binary|--template|--wire|--smoke] [--json]
+kyoli doctor claude [--binary|--template|--wire|--obedience|--smoke] [--json]
 kyoli doctor opencode [--run] [--config-dir ~/.config/opencode] [--json]
 ```
 
@@ -146,6 +146,7 @@ kyoli doctor claude --binary
 kyoli doctor claude
 kyoli doctor claude --template
 kyoli doctor claude --wire
+kyoli doctor claude --obedience
 kyoli doctor claude --smoke
 ```
 

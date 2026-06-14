@@ -162,8 +162,11 @@ function mapProviderModels(
 ): ModelInfo[] {
   const kyoliProvider = toKyoliProviderId(providerId);
   const publicProvider = toPublicProviderId(providerId);
-  return Object.entries(models).map(([modelId, model]) => {
+  return Object.entries(models).flatMap(([modelId, model]) => {
     const upstreamId = model.id ?? modelId;
+    if (isSuspendedModelsDevModel(providerId, upstreamId)) {
+      return [];
+    }
     return {
       id: `${publicProvider}/${modelId}`,
       provider: kyoliProvider,
@@ -174,6 +177,27 @@ function mapProviderModels(
       metadata: pickModelMetadata(model),
     };
   });
+}
+
+function isSuspendedModelsDevModel(
+  providerId: ModelsDevProviderId,
+  upstreamId: string,
+): boolean {
+  if (providerId !== "anthropic") return false;
+  const suspendedFamilies = readSuspendedClaudeFamilies();
+  return suspendedFamilies.has("fable") && upstreamId.toLowerCase().includes("fable");
+}
+
+function readSuspendedClaudeFamilies(): Set<string> {
+  const raw = process.env.KYOLI_SUSPENDED_CLAUDE_CODE_FAMILIES
+    ?? process.env.KYOLI_SUSPENDED_CLAUDE_MODELS
+    ?? "fable";
+  return new Set(
+    raw
+      .split(",")
+      .map((entry) => entry.trim().toLowerCase())
+      .filter(Boolean),
+  );
 }
 
 function buildModelAliases(providerId: ModelsDevProviderId, upstreamId: string): string[] {

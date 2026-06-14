@@ -6,6 +6,7 @@ const DEFAULT_COMMANDS = [
   ["pnpm", "--dir", "packages/cli", "run", "doctor", "claude", "--binary", "--json"],
   ["pnpm", "--dir", "packages/cli", "run", "doctor", "claude", "--template", "--json"],
   ["pnpm", "--dir", "packages/cli", "run", "doctor", "claude", "--wire", "--json"],
+  ["pnpm", "--dir", "packages/cli", "run", "doctor", "claude", "--obedience", "--json"],
 ];
 
 const DRIFT_WARNINGS = new Set([

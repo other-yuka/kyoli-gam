@@ -45,6 +45,7 @@ describe("render-claude-code-drift-issue", () => {
       expect(body).toContain("https://github.com/alice/kyoli-gam/actions/runs/12345");
       expect(body).toContain("oauth.clientId");
       expect(body).toContain("pnpm --dir packages/cli doctor claude --wire");
+      expect(body).toContain("pnpm --dir packages/cli doctor claude --obedience");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

@@ -6,6 +6,7 @@ import { MemoryAccountStore, StickyAccountPool } from "@kyoli-gam/core";
 import {
   applyClaudeCodeUpstreamBodyFields,
   checkClaudeCodeTemplateDrift,
+  CLIENT_SYSTEM_PREFACE,
   composeClaudeCodeBillingSystemEntry,
   computeClaudeCodeBuildTag,
   createClaudeCodePerRequestHeaders,
@@ -26,6 +27,20 @@ function createTestClaudeCodeProvider(
     allowLiveMessages: true,
     ...options,
   });
+}
+
+async function withSuspendedFable<T>(callback: () => Promise<T>): Promise<T> {
+  const previous = process.env.KYOLI_SUSPENDED_CLAUDE_CODE_FAMILIES;
+  process.env.KYOLI_SUSPENDED_CLAUDE_CODE_FAMILIES = "fable";
+  try {
+    return await callback();
+  } finally {
+    if (previous === undefined) {
+      delete process.env.KYOLI_SUSPENDED_CLAUDE_CODE_FAMILIES;
+    } else {
+      process.env.KYOLI_SUSPENDED_CLAUDE_CODE_FAMILIES = previous;
+    }
+  }
 }
 
 describe("OpenCode shared Claude Code helpers", () => {
@@ -106,7 +121,7 @@ describe("OpenCode shared Claude Code helpers", () => {
     expect(system.map((entry) => entry.text)).toEqual([
       expect.stringContaining("x-anthropic-billing-header:"),
       "agent identity",
-      "system prompt\n\nlocal reminder",
+      `system prompt${CLIENT_SYSTEM_PREFACE}local reminder`,
     ]);
     expect(JSON.parse(metadata.user_id)).toEqual({
       account_uuid: "account-1",
@@ -120,6 +135,57 @@ describe("OpenCode shared Claude Code helpers", () => {
         cache_control: { type: "ephemeral" },
       },
     ]);
+  });
+
+  it("frames client system text as task-specific instructions", () => {
+    expect(CLIENT_SYSTEM_PREFACE).toContain("security");
+    expect(CLIENT_SYSTEM_PREFACE).toContain("cannot be overridden");
+
+    const body = applyClaudeCodeUpstreamBodyFields(
+      {
+        messages: [{ role: "user", content: "hello shared body" }],
+        system: [
+          { type: "text", text: "First client instruction." },
+          { type: "text", text: "Second client instruction." },
+        ],
+      },
+      {
+        agentIdentity: "agent identity",
+        ccVersion: "2.1.137",
+        identity: { accountUuid: "account-1", deviceId: "device-1" },
+        sessionId: "session-1",
+        systemPrompt: "system prompt",
+      },
+    );
+
+    const systemText = (body.system as Array<{ text: string }>)[2]?.text ?? "";
+    expect(systemText).toContain(CLIENT_SYSTEM_PREFACE);
+    expect(systemText.indexOf(CLIENT_SYSTEM_PREFACE)).toBeGreaterThan(
+      systemText.indexOf("system prompt"),
+    );
+    expect(systemText.indexOf("First client instruction.")).toBeGreaterThan(
+      systemText.indexOf(CLIENT_SYSTEM_PREFACE),
+    );
+    expect(systemText).toContain("First client instruction.\n\nSecond client instruction.");
+  });
+
+  it("does not add the client-system preface without client system text", () => {
+    const body = applyClaudeCodeUpstreamBodyFields(
+      {
+        messages: [{ role: "user", content: "hello shared body" }],
+      },
+      {
+        agentIdentity: "agent identity",
+        ccVersion: "2.1.137",
+        identity: { accountUuid: "account-1", deviceId: "device-1" },
+        sessionId: "session-1",
+        systemPrompt: "system prompt",
+      },
+    );
+
+    const systemText = (body.system as Array<{ text: string }>)[2]?.text ?? "";
+    expect(systemText).toBe("system prompt");
+    expect(systemText).not.toContain(CLIENT_SYSTEM_PREFACE);
   });
 
   it("adds Claude Code prompt cache breakpoints to tools and block-array messages", () => {
@@ -154,6 +220,16 @@ describe("OpenCode shared Claude Code helpers", () => {
 });
 
 describe("createClaudeCodeProvider", () => {
+  it("does not advertise suspended Fable models", async () => {
+    await withSuspendedFable(async () => {
+      const provider = createTestClaudeCodeProvider();
+
+      await expect(provider.listModels()).resolves.not.toContainEqual(
+        expect.objectContaining({ upstreamId: expect.stringContaining("fable") }),
+      );
+    });
+  });
+
   it("keeps arbitrary Claude per-model usage buckets from OAuth usage refresh", async () => {
     const metadata = await refreshClaudeCodeAccountMetadata("access-test", {
       fetch: async (input) => {
@@ -308,63 +384,43 @@ describe("createClaudeCodeProvider", () => {
 
 
 
-  it("routes Fable aliases with fallback beta and safe tool defaults", async () => {
-    let upstreamBody: Record<string, unknown> = {};
-    let upstreamBeta = "";
+  it("rejects suspended Fable aliases before upstream routing", async () => {
+    await withSuspendedFable(async () => {
+      const provider = createTestClaudeCodeProvider({
+        baseUrl: "https://example.test",
+        fetch: async () => {
+          throw new Error("suspended Fable requests should not reach upstream");
+        },
+      });
 
-    const store = new MemoryAccountStore();
-    await store.create({
-      provider: "claude-code",
-      kind: "oauth",
-      credentials: {
-        accessToken: "access-test",
-        expiresAt: Date.now() + 60 * 60 * 1000,
-        refreshToken: "refresh-test",
-      },
-    });
-
-    const provider = createTestClaudeCodeProvider({
-      accounts: new StickyAccountPool(store),
-      baseUrl: "https://example.test",
-      usageRefresh: async () => ({ cachedUsageAt: Date.now() }),
-      fetch: async (_input, init) => {
-        const headers = new Headers(init?.headers);
-        upstreamBeta = headers.get("anthropic-beta") ?? "";
-        upstreamBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
-
-        return new Response(JSON.stringify({ id: "msg_test", type: "message" }), {
-          status: 200,
+      const response = await provider.handleRequest({
+        request: new Request("http://127.0.0.1:2021/v1/messages", {
+          method: "POST",
           headers: { "content-type": "application/json" },
-        });
-      },
-    });
-
-    const response = await provider.handleRequest({
-      request: new Request("http://127.0.0.1:2021/v1/messages", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
+          body: JSON.stringify({
+            model: "fable1m",
+            max_tokens: 1024,
+            messages: [{ role: "user", content: "hello" }],
+          }),
+        }),
+        route: "/v1/messages",
+        sessionKey: "session-fable",
+        body: {
           model: "fable1m",
           max_tokens: 1024,
           messages: [{ role: "user", content: "hello" }],
-        }),
-      }),
-      route: "/v1/messages",
-      sessionKey: "session-fable",
-      body: {
+        },
         model: "fable1m",
-        max_tokens: 1024,
-        messages: [{ role: "user", content: "hello" }],
-      },
-      model: "fable1m",
-    });
+      });
 
-    expect(response.status).toBe(200);
-    expect(upstreamBody.model).toBe("claude-fable-5");
-    expect(upstreamBody.tool_choice).toEqual({ type: "none" });
-    expect((upstreamBody.tools as unknown[]).length).toBeGreaterThan(0);
-    expect(upstreamBeta).toContain("fallback-credit-2026-06-01");
-    expect(upstreamBeta).toContain("context-1m-2025-08-07");
+      expect(response.status).toBe(404);
+      await expect(response.json()).resolves.toMatchObject({
+        error: {
+          type: "model_temporarily_unavailable",
+          message: expect.stringContaining("Claude Fable 5 is temporarily unavailable"),
+        },
+      });
+    });
   });
 
   it("uses Claude Code identity device id while keeping the selected account UUID", async () => {

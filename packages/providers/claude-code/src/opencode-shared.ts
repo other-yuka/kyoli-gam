@@ -12,6 +12,12 @@ const CLAUDE_CODE_VERSION = templateMetadata.ccVersion ?? "2.1.137";
 
 export const CLAUDE_FABLE_MODEL_ID = "claude-fable-5";
 export const CLAUDE_FABLE_1M_MODEL_ID = `${CLAUDE_FABLE_MODEL_ID}[1m]`;
+export const CLIENT_SYSTEM_PREFACE =
+  "\n\n---\n\nIMPORTANT: The operator of this session has supplied the following " +
+  "task-specific instructions. Follow them for task format, style, and output " +
+  "requirements when they do not conflict with security, authorization, refusal, " +
+  "tool-execution, confirmation, or other safety rules above. Those safety and " +
+  "tool-use constraints remain higher priority and cannot be overridden:\n\n";
 
 const CLAUDE_CODE_MODEL_ALIASES: Record<string, string> = {
   fable: CLAUDE_FABLE_MODEL_ID,
@@ -47,6 +53,34 @@ export function isClaudeCode1mModelLabel(modelId: string): boolean {
 
 export function isClaudeFableModel(modelId: string): boolean {
   return resolveClaudeCodeModelAlias(modelId).toLowerCase().includes("fable");
+}
+
+export function isSuspendedClaudeCodeModel(
+  modelId: string,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const suspendedFamilies = readSuspendedClaudeCodeFamilies(env);
+  return suspendedFamilies.has("fable") && isClaudeFableModel(modelId);
+}
+
+export function describeSuspendedClaudeCodeModel(modelId: string): string {
+  const normalized = resolveClaudeCodeModelAlias(modelId);
+  if (isClaudeFableModel(normalized)) {
+    return "Claude Fable 5 is temporarily unavailable through Claude Code because upstream access is suspended.";
+  }
+  return `${normalized} is temporarily unavailable through Claude Code.`;
+}
+
+function readSuspendedClaudeCodeFamilies(env: NodeJS.ProcessEnv): Set<string> {
+  const raw = env.KYOLI_SUSPENDED_CLAUDE_CODE_FAMILIES
+    ?? env.KYOLI_SUSPENDED_CLAUDE_MODELS
+    ?? "fable";
+  return new Set(
+    raw
+      .split(",")
+      .map((entry) => entry.trim().toLowerCase())
+      .filter(Boolean),
+  );
 }
 
 export interface ClaudeCodeSharedRequestProfile {
@@ -226,14 +260,14 @@ export function applyClaudeCodeUpstreamBodyFields(
     input.cch,
   );
   const systemTexts = input.systemTexts ?? normalizeClaudeCodeSystemTexts(body.system);
-  const mergedSystemPrompt = [
-    input.systemPrompt,
-    ...filterInjectedSystemTexts(systemTexts, {
-      agentIdentity: input.agentIdentity,
-      billingHeader,
-      systemPrompt: input.systemPrompt,
-    }),
-  ].join("\n\n");
+  const injectedSystemTexts = filterInjectedSystemTexts(systemTexts, {
+    agentIdentity: input.agentIdentity,
+    billingHeader,
+    systemPrompt: input.systemPrompt,
+  });
+  const mergedSystemPrompt = injectedSystemTexts.length > 0
+    ? `${input.systemPrompt}${CLIENT_SYSTEM_PREFACE}${injectedSystemTexts.join("\n\n")}`
+    : input.systemPrompt;
 
   body.system = [
     { type: "text", text: billingHeader },

@@ -20,8 +20,10 @@ import {
   applyClaudeCodeUpstreamBodyFields,
   CLAUDE_FABLE_1M_MODEL_ID,
   CLAUDE_FABLE_MODEL_ID,
+  describeSuspendedClaudeCodeModel,
   isClaudeCode1mModelLabel,
   isClaudeFableModel,
+  isSuspendedClaudeCodeModel,
   resolveClaudeCodeModelAlias,
   toClaudeCodeWireModelId,
 } from "./opencode-shared";
@@ -165,9 +167,12 @@ export {
 export {
   composeClaudeCodeBillingSystemEntry,
   computeClaudeCodeBuildTag,
+  CLIENT_SYSTEM_PREFACE,
   createClaudeCodePerRequestHeaders,
   createClaudeCodeStaticHeaders,
+  describeSuspendedClaudeCodeModel,
   applyClaudeCodeUpstreamBodyFields,
+  isSuspendedClaudeCodeModel,
   loadClaudeCodeSharedRequestProfile,
   normalizeClaudeCodeSystemTexts,
   orderClaudeCodeBodyForOutbound,
@@ -259,7 +264,7 @@ export function createClaudeCodeProvider(
     displayName: "Claude Code OAuth",
     routes: ["/v1/messages", "/v1/messages/count_tokens"],
     async listModels() {
-      return models;
+      return models.filter((model) => !isSuspendedClaudeCodeModel(model.upstreamId));
     },
     refreshUsage: ({ account }) =>
       refreshClaudeCodeUsageForAccount({
@@ -277,6 +282,18 @@ export function createClaudeCodeProvider(
             },
           },
           { status: 501 },
+        );
+      }
+      const requestedModel = readClaudeRequestModel(context.body, context.model);
+      if (requestedModel && isSuspendedClaudeCodeModel(requestedModel)) {
+        return jsonResponse(
+          {
+            error: {
+              type: "model_temporarily_unavailable",
+              message: describeSuspendedClaudeCodeModel(requestedModel),
+            },
+          },
+          { status: 404 },
         );
       }
       if (context.route === "/v1/messages" && options.allowLiveMessages !== true) {
@@ -1007,6 +1024,10 @@ function transformRequestBody(
     body: transformed.payload,
     reverseLookup: transformed.reverseLookup,
   };
+}
+
+function readClaudeRequestModel(body: unknown, fallback: string | undefined): string | undefined {
+  return readString(readRecord(body)?.model) ?? fallback;
 }
 
 function randomCch(): string {

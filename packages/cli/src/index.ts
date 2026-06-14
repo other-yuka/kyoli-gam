@@ -26,6 +26,7 @@ import {
 import {
   captureClaudeCodeWireRequest,
   checkClaudeCodeTemplateDrift,
+  CLIENT_SYSTEM_PREFACE,
   createClaudeCodeProvider,
   detectClaudeCodeOAuthConfig,
   findClaudeCodeBinary,
@@ -477,6 +478,8 @@ async function handleDoctorCommand(argv: string[]): Promise<void> {
       report = withDoctorName(await runClaudeWireCompareDoctor({
         timeoutMs: readOptionalNumber(readStringFlag(argv, "--timeout-ms")),
       }), "claude/wire");
+    } else if (argv.includes("--obedience")) {
+      report = withDoctorName(await runClaudeObedienceDoctor(), "claude/obedience");
     } else if (argv.includes("--smoke")) {
       report = withDoctorName(await runClaudeSmokeDoctor(
         new SQLiteAccountStore(cliConfig.databasePath),
@@ -1512,6 +1515,96 @@ async function runClaudeWireCompareDoctor(options: {
   };
 }
 
+async function runClaudeObedienceDoctor(): Promise<DoctorReport> {
+  let upstreamUrl = "";
+  let upstreamBody: Record<string, unknown> = {};
+  const clientSystemText = "Reply with ONLY the word PONG.";
+
+  const store = new MemoryAccountStore();
+  await store.create({
+    provider: "claude-code",
+    kind: "oauth",
+    credentials: {
+      accessToken: "doctor-access",
+      expiresAt: Date.now() + 60 * 60 * 1000,
+      refreshToken: "doctor-refresh",
+    },
+    metadata: {
+      accountId: "doctor-account",
+      cachedUsageAt: Date.now(),
+    },
+  });
+
+  const provider = createClaudeCodeProvider({
+    accounts: new StickyAccountPool(store),
+    allowLiveMessages: true,
+    baseUrl: "https://doctor.invalid",
+    usageRefresh: async () => ({ cachedUsageAt: Date.now() }),
+    fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+      upstreamUrl = String(input);
+      upstreamBody = readRecord(JSON.parse(String(init?.body))) ?? {};
+      return new Response(JSON.stringify({ id: "msg_obedience", type: "message" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch,
+  });
+
+  await provider.handleRequest({
+    request: new Request("http://127.0.0.1:2021/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "anthropic/claude-sonnet-4-5",
+        max_tokens: 16,
+        system: clientSystemText,
+        messages: [{ role: "user", content: "obedience probe" }],
+      }),
+    }),
+    route: "/v1/messages",
+    sessionKey: "doctor-claude-obedience",
+    body: {
+      model: "anthropic/claude-sonnet-4-5",
+      max_tokens: 16,
+      system: clientSystemText,
+      messages: [{ role: "user", content: "obedience probe" }],
+    },
+    model: "anthropic/claude-sonnet-4-5",
+  });
+
+  const systemBlocks = Array.isArray(upstreamBody.system) ? upstreamBody.system : [];
+  const systemText = readRecord(systemBlocks[2])?.text;
+  const systemPrompt = getClaudeCodeTemplateMetadata().systemPrompt ?? "";
+  const checks: DoctorCheck[] = [
+    check("route", upstreamUrl === "https://doctor.invalid/v1/messages?beta=true", upstreamUrl),
+    check("system blocks", systemBlocks.length === 3, `${systemBlocks.length} outbound system block(s)`),
+    check(
+      "client-system preface",
+      typeof systemText === "string" && systemText.includes(CLIENT_SYSTEM_PREFACE),
+      typeof systemText === "string" ? "precedence preface delivered" : "missing outbound system text",
+    ),
+    check(
+      "client-system order",
+      typeof systemText === "string" &&
+        systemText.indexOf(systemPrompt) === 0 &&
+        systemText.indexOf(CLIENT_SYSTEM_PREFACE) > 0 &&
+        systemText.indexOf(clientSystemText) > systemText.indexOf(CLIENT_SYSTEM_PREFACE),
+      "client instructions follow the explicit override preface in block 3",
+    ),
+    check(
+      "client-system content",
+      typeof systemText === "string" && systemText.includes(clientSystemText),
+      clientSystemText,
+    ),
+  ];
+
+  return {
+    name: "claude-obedience",
+    summary: summarizeChecks(checks),
+    checks,
+  };
+}
+
 async function captureKyoliClaudeOutbound(
   captured: ClaudeCodeCapturedRequest,
 ): Promise<{ body: Record<string, unknown>; headers: Headers; rawHeaderNames: string[]; url: string }> {
@@ -2380,7 +2473,7 @@ Usage:
   kyoli doctor [--json]
   kyoli doctor pool [--json]
   kyoli doctor codex [--file|--e2e|--load|--websocket|--sdk] [--json]
-  kyoli doctor claude [--binary|--template|--wire|--smoke] [--json]
+  kyoli doctor claude [--binary|--template|--wire|--obedience|--smoke] [--json]
   kyoli doctor opencode [--run] [--config-dir ~/.config/opencode] [--json]
 
   # Config
