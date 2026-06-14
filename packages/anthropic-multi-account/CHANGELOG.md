@@ -1,5 +1,14 @@
 # opencode-anthropic-multi-account
 
+## 0.2.61
+
+### Patch Changes
+
+- [#88](https://github.com/other-yuka/kyoli-gam/pull/88) [`6e86270`](https://github.com/other-yuka/kyoli-gam/commit/6e86270b294610f445e88ed99662f5e0a5da6daa) Thanks [@other-yuka](https://github.com/other-yuka)! - Refresh the bundled Claude Code fingerprint to 2.1.177 and install the Claude Code CLI in the scheduled doctor drift workflow.
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.61
+
 ## 0.2.60
 
 ### Patch Changes
