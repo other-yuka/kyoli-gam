@@ -46,12 +46,12 @@
     "directory": "packages/anthropic-multi-account"
   },
   "dependencies": {
-    "@opencode-ai/plugin": "^1.16.2",
+    "@opencode-ai/plugin": "^1.17.7",
     "opencode-multi-account-core": "workspace:*",
     "valibot": "^1.4.1"
   },
   "devDependencies": {
-    "@types/node": "^25.9.2",
+    "@types/node": "^25.9.3",
     "typescript": "^6.0.3"
   },
   "publishConfig": {
