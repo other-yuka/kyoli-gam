@@ -238,6 +238,17 @@ describe("anthropic-oauth", () => {
       });
     });
 
+    test("extracts config when Claude Code uses a named client-id field", () => {
+      const buf = Buffer.from(`BASE_API_URL:"${DEFAULT_BASE_API_URL}" CONSOLE_AUTHORIZE_URL:"https://platform.claude.com/oauth/authorize" CLAUDE_AI_AUTHORIZE_URL:"${LEGACY_AUTHORIZE_URL}" TOKEN_URL:"${DEFAULT_TOKEN_URL}" DESIGN_CLIENT_ID:"${FALLBACK.clientId}" SCOPES:"org:create_api_key user:profile user:inference user:sessions:claude_code"`);
+
+      expect(scanBinaryForOAuthConfig(buf)).toMatchObject({
+        clientId: FALLBACK.clientId,
+        authorizeUrl: DEFAULT_AUTHORIZE_URL,
+        tokenUrl: DEFAULT_TOKEN_URL,
+        baseApiUrl: DEFAULT_BASE_API_URL,
+      });
+    });
+
     test("preserves scanned scopes when the binary contains org:create_api_key", () => {
       const buf = Buffer.from('CLIENT_ID:"11111111-1111-4111-8111-111111111111" CLAUDE_AI_AUTHORIZE_URL:"https://claude.ai/oauth/authorize" TOKEN_URL:"https://platform.claude.com/v1/oauth/token" SCOPES:"org:create_api_key user:profile user:inference user:sessions:claude_code" BASE_API_URL:"https://api.anthropic.com"');
 

@@ -35,6 +35,7 @@ import {
   getDanglingToolUseError,
   OPENCODE_OUTPUT_EFFORT_HEADER,
   readOpenCodeVariantEffort,
+  stampClaudeCodeCch,
   getUpstreamSessionId,
   reverseMapResponse,
   type OutputEffortValue,
@@ -59,6 +60,7 @@ interface AccountRuntime {
 
 const TOKEN_REFRESH_PERMANENT_FAILURE_STATUS = 401;
 const ASSISTANT_PREFILL_UNSUPPORTED_MESSAGE = "This model does not support assistant message prefill";
+const NON_SUBSCRIPTION_BILLING_BACKOFF_MS = 24 * 60 * 60 * 1000;
 
 function mergeHeaders(target: Record<string, string>, headers: HeadersInit | undefined): void {
   if (!headers) {
@@ -260,6 +262,43 @@ async function enrichRateLimitResponse(response: Response): Promise<Response> {
   });
 }
 
+function isNonSubscriptionBillingClaim(claim: string | null): claim is string {
+  if (!claim || claim === "unknown") return false;
+  const normalized = claim.toLowerCase();
+  return normalized === "api"
+    || normalized.startsWith("api_")
+    || normalized === "overage"
+    || normalized.startsWith("overage_")
+    || normalized.includes("credit")
+    || normalized.startsWith("sdk");
+}
+
+async function blockNonSubscriptionBillingClaim(response: Response): Promise<Response> {
+  const claim = response.headers.get("anthropic-ratelimit-unified-representative-claim");
+  if (!isNonSubscriptionBillingClaim(claim)) {
+    return response;
+  }
+
+  await response.body?.cancel().catch(() => undefined);
+  const headers = new Headers(response.headers);
+  headers.set("content-type", "application/json");
+  headers.set("retry-after-ms", String(NON_SUBSCRIPTION_BILLING_BACKOFF_MS));
+  headers.set("x-kyoli-non-subscription-billing-claim", claim);
+
+  return new Response(
+    JSON.stringify({
+      error: {
+        type: "non_subscription_billing_claim",
+        message: `Claude Code response used non-subscription billing claim '${claim}'. Kyoli blocked this account to avoid API/credit billing bleed.`,
+      },
+    }),
+    {
+      status: 429,
+      headers,
+    },
+  );
+}
+
 export interface PacingTestOverrides {
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
@@ -450,14 +489,17 @@ export class AccountRuntimeFactory {
 
     const performFetch = async (requestHeaders: HeadersInit, requestBody: BodyInit | null | undefined): Promise<Response> => {
       await reservePacingSlot();
+      const stampedBody = typeof requestBody === "string"
+        ? stampClaudeCodeCch(requestBody)
+        : requestBody;
 
       try {
         const response = await fetch(transformedInput, {
           ...init,
           headers: requestHeaders,
-          body: requestBody,
+          body: stampedBody,
         });
-        return await enrichRateLimitResponse(response);
+        return await enrichRateLimitResponse(await blockNonSubscriptionBillingClaim(response));
       } catch (error) {
         debugLog(this.client, "Anthropic upstream fetch failed", {
           error: sanitizeError(error),

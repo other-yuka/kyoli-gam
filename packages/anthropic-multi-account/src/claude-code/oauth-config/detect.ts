@@ -37,12 +37,13 @@ interface DetectorTestOverrides {
 }
 
 const CONFIG_SCAN_WINDOW_CHARS = 4096;
-const CONFIG_SCAN_LOOKBACK_CHARS = 512;
+const CONFIG_SCAN_LOOKBACK_CHARS = 2048;
 const KNOWN_PROD_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const POLLUTED_CACHED_SCOPE = "https://www.googleapis.com/auth/cloud-platform";
 const SAFE_FALLBACK_SCOPES = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const CLIENT_ID_ASSIGNMENT_PATTERN = /\b(?:CLIENT_ID|[A-Z_]+CLIENT_ID)\s*:\s*"([0-9a-f-]{36})"/gi;
 const CACHE_FILE_NAME = "anthropic-oauth-config-cache.json";
 const DEFAULT_OVERRIDE_FILE_NAME = "oauth-config.override.json";
 const derivedDefaults = derivedDefaultsJson as {
@@ -137,17 +138,22 @@ function isLikelyLocalUrl(value: string | undefined): boolean {
 function extractCandidateBlocks(binaryText: string): string[] {
   const blocks: string[] = [];
   const seenRanges = new Set<string>();
-  const clientIdMatches = [...binaryText.matchAll(/CLIENT_ID\s*:\s*"([0-9a-f-]{36})"/gi)];
+  const clientIdMatches = [...binaryText.matchAll(CLIENT_ID_ASSIGNMENT_PATTERN)];
 
   for (const [index, currentMatch] of clientIdMatches.entries()) {
     const currentIndex = currentMatch.index ?? 0;
     const previousClientIdIndex = clientIdMatches[index - 1]?.index;
     const nextClientIdIndex = clientIdMatches[index + 1]?.index;
-    const { start, end } = getCandidateBlockRange(
+    const range = getCandidateBlockRange(
       currentIndex,
       previousClientIdIndex,
       nextClientIdIndex,
       binaryText.length,
+    );
+    const start = range.start;
+    const end = Math.min(
+      binaryText.length,
+      Math.max(range.end, currentIndex + currentMatch[0].length),
     );
     const key = `${start}:${end}`;
 
@@ -228,20 +234,26 @@ function scoreCandidate(candidate: DetectedOAuthConfigPayload, extractedScopes: 
 }
 
 function extractCandidateFromBlock(block: string): ScoredOAuthCandidate | null {
-  const clientIdMatch = /CLIENT_ID\s*:\s*"([0-9a-f-]{36})"/i.exec(block);
+  const clientIdMatch = /\b(?:CLIENT_ID|[A-Z_]+CLIENT_ID)\s*:\s*"([0-9a-f-]{36})"/i.exec(block);
   if (!clientIdMatch?.[1]) {
     return null;
   }
 
   const clientIdIndex = clientIdMatch.index ?? 0;
-  const authorizeUrl = pickNearestValue(block, clientIdIndex, /CLAUDE_AI_AUTHORIZE_URL\s*:\s*"([^"]+)"/gi);
-  const baseApiUrl = pickNearestValue(block, clientIdIndex, /BASE_API_URL\s*:\s*"([^"]+)"/gi);
+  const authorizeUrl = pickNearestValue(block, clientIdIndex, /CLAUDE_AI_AUTHORIZE_URL\s*:\s*"(https?:\/\/[^\"]*\/oauth\/authorize[^\"]*)"/gi);
+  const baseApiUrl = pickNearestValue(block, clientIdIndex, /BASE_API_URL\s*:\s*"(https?:\/\/[^\"]+)"/gi);
   const tokenUrl = pickNearestValue(block, clientIdIndex, /TOKEN_URL\s*:\s*"(https:\/\/[^\"]*\/oauth\/token[^\"]*)"/gi);
-  const extractedScopes = pickNearestScopes(block, clientIdIndex);
+  const rawExtractedScopes = pickNearestScopes(block, clientIdIndex);
+  const hasPollutedScope = rawExtractedScopes
+    ? rawExtractedScopes.split(/\s+/).some((scope) => scope === POLLUTED_CACHED_SCOPE)
+    : false;
+  const extractedScopes = rawExtractedScopes && !hasPollutedScope
+    ? rawExtractedScopes
+    : null;
 
   const payload: DetectedOAuthConfigPayload = {
     clientId: clientIdMatch[1],
-    authorizeUrl: authorizeUrl || FALLBACK.authorizeUrl,
+    authorizeUrl: normalizeAuthorizeUrl(authorizeUrl || FALLBACK.authorizeUrl),
     tokenUrl: tokenUrl || FALLBACK.tokenUrl,
     scopes: extractedScopes || FALLBACK.scopes,
     baseApiUrl: baseApiUrl || FALLBACK.baseApiUrl,

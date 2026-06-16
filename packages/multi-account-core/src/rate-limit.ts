@@ -1,6 +1,7 @@
 import type { ManagedAccount, PluginClient, PluginConfig, UsageLimits } from "./types";
 
 const USAGE_FETCH_COOLDOWN_MS = 30_000;
+const NON_SUBSCRIPTION_BILLING_BACKOFF_MS = 24 * 60 * 60 * 1000;
 
 export interface RateLimitDependencies {
   fetchUsage: (accessToken: string, accountId?: string) => Promise<{ ok: true; data: UsageLimits } | { ok: false; reason: string }>;
@@ -45,6 +46,17 @@ export function createRateLimitHandlers(dependencies: RateLimitDependencies) {
     return getConfig().default_retry_after_ms;
   }
 
+  function isNonSubscriptionBillingClaim(claim: string | null): claim is string {
+    if (!claim || claim === "unknown") return false;
+    const normalized = claim.toLowerCase();
+    return normalized === "api"
+      || normalized.startsWith("api_")
+      || normalized === "overage"
+      || normalized.startsWith("overage_")
+      || normalized.includes("credit")
+      || normalized.startsWith("sdk");
+  }
+
   function getResetMsFromUsage(account: ManagedAccount): number | null {
     const usage = account.cachedUsage;
     if (!usage) return null;
@@ -82,8 +94,23 @@ export function createRateLimitHandlers(dependencies: RateLimitDependencies) {
   ): Promise<void> {
     if (!account.uuid) return;
 
-    const resetMs = getResetMsFromUsage(account) ?? retryAfterMsFromResponse(response);
+    const nonSubscriptionClaim = response.headers.get("anthropic-ratelimit-unified-representative-claim");
+    const shouldQuarantineBillingClaim = isNonSubscriptionBillingClaim(nonSubscriptionClaim);
+    const resetMs = shouldQuarantineBillingClaim
+      ? Math.max(retryAfterMsFromResponse(response), NON_SUBSCRIPTION_BILLING_BACKOFF_MS)
+      : getResetMsFromUsage(account) ?? retryAfterMsFromResponse(response);
     await manager.markRateLimited(account.uuid, resetMs);
+
+    if (shouldQuarantineBillingClaim) {
+      if (manager.getAccountCount() > 1) {
+        void showToast(
+          client,
+          `${getAccountLabel(account)} blocked non-subscription billing claim (${nonSubscriptionClaim}). Switching...`,
+          "warning",
+        );
+      }
+      return;
+    }
 
     const shouldFetchUsage = account.accessToken
       && (!account.cachedUsageAt || Date.now() - account.cachedUsageAt > USAGE_FETCH_COOLDOWN_MS);

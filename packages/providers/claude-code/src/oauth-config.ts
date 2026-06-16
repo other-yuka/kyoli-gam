@@ -22,9 +22,10 @@ type ClaudeCodeOAuthConfigPayload = Omit<
 >;
 
 const CONFIG_SCAN_WINDOW_CHARS = 4096;
-const CONFIG_SCAN_LOOKBACK_CHARS = 512;
+const CONFIG_SCAN_LOOKBACK_CHARS = 2048;
 const CACHE_FILE_NAME = "claude-code-oauth-config-cache.json";
 const KNOWN_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+const CLIENT_ID_ASSIGNMENT_PATTERN = /\b(?:CLIENT_ID|[A-Z_]+CLIENT_ID)\s*:\s*"([0-9a-f-]{36})"/gi;
 const SAFE_FALLBACK_SCOPES =
   "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 
@@ -171,7 +172,7 @@ async function fingerprintFile(path: string): Promise<string> {
 
 function scanBinaryForOAuthConfig(buffer: Buffer): ClaudeCodeOAuthConfigPayload | undefined {
   const text = buffer.toString("latin1");
-  const matches = [...text.matchAll(/CLIENT_ID\s*:\s*"([0-9a-f-]{36})"/gi)];
+  const matches = [...text.matchAll(CLIENT_ID_ASSIGNMENT_PATTERN)];
 
   const candidates = matches
     .map((match) => {
@@ -183,7 +184,7 @@ function scanBinaryForOAuthConfig(buffer: Buffer): ClaudeCodeOAuthConfigPayload 
       const payload = normalizePayload({
         clientId: match[1] ?? fallbackPayload.clientId,
         authorizeUrl:
-          pickNearestValue(block, index, /CLAUDE_AI_AUTHORIZE_URL\s*:\s*"([^"]+)"/gi)
+          pickNearestValue(block, index, /CLAUDE_AI_AUTHORIZE_URL\s*:\s*"(https?:\/\/[^\"]*\/oauth\/authorize[^\"]*)"/gi)
           ?? fallbackPayload.authorizeUrl,
         tokenUrl:
           pickNearestValue(block, index, /TOKEN_URL\s*:\s*"(https:\/\/[^"]*\/oauth\/token[^"]*)"/gi)
@@ -193,7 +194,7 @@ function scanBinaryForOAuthConfig(buffer: Buffer): ClaudeCodeOAuthConfigPayload 
           ?? pickNearestValue(block, index, /scope[s]?\s*:\s*"([^"]+)"/gi)
           ?? fallbackPayload.scopes,
         baseApiUrl:
-          pickNearestValue(block, index, /BASE_API_URL\s*:\s*"([^"]+)"/gi)
+          pickNearestValue(block, index, /BASE_API_URL\s*:\s*"(https?:\/\/[^\"]+)"/gi)
           ?? fallbackPayload.baseApiUrl,
       });
 

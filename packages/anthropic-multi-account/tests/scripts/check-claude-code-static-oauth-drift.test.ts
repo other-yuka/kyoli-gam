@@ -88,4 +88,19 @@ describe("check-claude-code-static-oauth-drift contract", () => {
       baseApiUrl: "https://api.anthropic.com",
     });
   });
+
+  test("extracts OAuth config when binaries use named client-id fields", () => {
+    const scanned = scanBinaryForOAuthConfig(Buffer.from(`
+      BASE_API_URL: "https://api.anthropic.com",
+      CONSOLE_AUTHORIZE_URL: "https://platform.claude.com/oauth/authorize",
+      CLAUDE_AI_AUTHORIZE_URL: "https://claude.com/cai/oauth/authorize",
+      TOKEN_URL: "${PINNED_OAUTH.tokenUrl}",
+      DESIGN_CLIENT_ID: "${PINNED_OAUTH.clientId}",
+    `));
+
+    expect(scanned).toMatchObject({
+      ...PINNED_OAUTH,
+      baseApiUrl: "https://api.anthropic.com",
+    });
+  });
 });

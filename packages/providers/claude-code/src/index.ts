@@ -25,6 +25,7 @@ import {
   isClaudeFableModel,
   isSuspendedClaudeCodeModel,
   resolveClaudeCodeModelAlias,
+  stampClaudeCodeCch,
   toClaudeCodeWireModelId,
 } from "./opencode-shared";
 import {
@@ -172,11 +173,16 @@ export {
   createClaudeCodeStaticHeaders,
   describeSuspendedClaudeCodeModel,
   applyClaudeCodeUpstreamBodyFields,
+  CCH_SEEDS,
+  cchForBody,
+  cchWithSeed,
   isSuspendedClaudeCodeModel,
   loadClaudeCodeSharedRequestProfile,
   normalizeClaudeCodeSystemTexts,
   orderClaudeCodeBodyForOutbound,
   orderClaudeCodeHeadersForOutbound,
+  stampClaudeCodeCch,
+  xxh64,
   type ClaudeCodeUpstreamBodyOptions,
   type ClaudeCodeUpstreamIdentity,
   type ClaudeCodeSharedRequestProfile,
@@ -454,6 +460,9 @@ async function dispatchClaudeRequest(
   retryCount: number,
 ): Promise<Response> {
   await input.pacer();
+  const body = typeof input.body === "string"
+    ? stampClaudeCodeCch(input.body, CLAUDE_CODE_VERSION)
+    : input.body;
   return input.fetchImpl(input.url, {
     method: input.context.request.method,
     headers: buildUpstreamHeaders({
@@ -466,12 +475,34 @@ async function dispatchClaudeRequest(
       trustClientFingerprint: input.trustClientFingerprint,
       model: input.context.model,
     }),
-    body: input.body,
+    body,
     duplex: "half",
   } as RequestInit);
 }
 
 async function normalizeClaudeCodeStartupFailure(response: Response): Promise<AccountExecutionResult> {
+  const billingClaimFailure = inferClaudeCodeBillingClaimFailure(response);
+  if (billingClaimFailure) {
+    await response.body?.cancel().catch(() => undefined);
+    return {
+      failure: billingClaimFailure,
+      downstreamVisible: false,
+      response: jsonResponse(
+        {
+          error: {
+            type: billingClaimFailure.code ?? "non_subscription_billing_claim",
+            message: billingClaimFailure.message,
+            upstream_status: "error",
+          },
+        },
+        {
+          status: billingClaimFailure.httpStatus ?? 429,
+          headers: createClaudeCodeFailureHeaders(billingClaimFailure, response.headers),
+        },
+      ),
+    };
+  }
+
   if (!response.ok || !response.body || !response.headers.get("content-type")?.includes("text/event-stream")) {
     return { response };
   }
@@ -577,6 +608,35 @@ function inferClaudeCodeHttpFailure(response: Response): AccountFailureSignal | 
     retryAfterSeconds: secondsUntilIso(resetAt),
     retryScope: "next_account",
   };
+}
+
+function inferClaudeCodeBillingClaimFailure(response: Response): AccountFailureSignal | undefined {
+  const parsed = parseClaudeCodeRateLimitHeaders(response.headers);
+  if (!parsed || !isClaudeCodeNonSubscriptionBillingClaim(parsed.claim)) return undefined;
+
+  const resetAt = readClaudeCodeRateLimitResetAt(response.headers);
+  return {
+    class: "quota",
+    code: "non_subscription_billing_claim",
+    httpStatus: 429,
+    message: `Claude Code response used non-subscription billing claim '${parsed.claim}'. Kyoli blocked this account to avoid API/credit billing bleed.`,
+    metadata: readClaudeCodeRateLimitMetadata(response.headers),
+    phase: "startup",
+    resetAt,
+    retryAfterSeconds: secondsUntilIso(resetAt),
+    retryScope: "next_account",
+  };
+}
+
+export function isClaudeCodeNonSubscriptionBillingClaim(claim: string | undefined): boolean {
+  if (!claim || claim === "unknown") return false;
+  const normalized = claim.toLowerCase();
+  return normalized === "api"
+    || normalized.startsWith("api_")
+    || normalized === "overage"
+    || normalized.startsWith("overage_")
+    || normalized.includes("credit")
+    || normalized.startsWith("sdk");
 }
 
 function createClaudeCodeFailureHeaders(

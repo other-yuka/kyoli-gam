@@ -21,14 +21,14 @@ const PINNED_OAUTH = {
 const SUPPORTED_CC_RANGE = readSupportedCCRange();
 
 const CONFIG_SCAN_WINDOW_CHARS = 4096;
-const CONFIG_SCAN_LOOKBACK_CHARS = 512;
+const CONFIG_SCAN_LOOKBACK_CHARS = 2048;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const JS_CANDIDATES = ["cli.js", "cli.mjs", "dist/cli.js", "dist/cli.mjs"];
 const NATIVE_SIZE_FLOOR_BYTES = 1_000_000;
-const CLIENT_ID_PATTERN = /CLIENT_ID\s*:\s*"([0-9a-f-]{36})"/gi;
-const AUTHORIZE_URL_PATTERN = /CLAUDE_AI_AUTHORIZE_URL\s*:\s*"([^"]+)"/gi;
+const CLIENT_ID_PATTERN = /\b(?:CLIENT_ID|[A-Z_]+CLIENT_ID)\s*:\s*"([0-9a-f-]{36})"/gi;
+const AUTHORIZE_URL_PATTERN = /CLAUDE_AI_AUTHORIZE_URL\s*:\s*"(https?:\/\/[^\"]*\/oauth\/authorize[^\"]*)"/gi;
 const TOKEN_URL_PATTERN = /TOKEN_URL\s*:\s*"(https:\/\/[^\"]*\/oauth\/token[^\"]*)"/gi;
-const BASE_API_URL_PATTERN = /BASE_API_URL\s*:\s*"([^"]+)"/gi;
+const BASE_API_URL_PATTERN = /BASE_API_URL\s*:\s*"(https?:\/\/[^\"]+)"/gi;
 
 function compareVersions(left, right) {
   const leftParts = left.split(".").map(Number);
@@ -105,7 +105,10 @@ function extractCandidateBlocks(binaryText) {
       ? Math.min(binaryText.length, currentIndex + CONFIG_SCAN_WINDOW_CHARS)
       : Math.floor((currentIndex + nextClientIdIndex) / 2);
     const start = Math.max(0, leftBoundary);
-    const end = Math.min(binaryText.length, Math.max(currentIndex + 1, rightBoundary));
+    const end = Math.min(
+      binaryText.length,
+      Math.max(currentIndex + currentMatch[0].length, currentIndex + 1, rightBoundary),
+    );
     const key = `${start}:${end}`;
 
     if (seenRanges.has(key)) {
@@ -138,7 +141,7 @@ function scanBinaryForOAuthConfig(buf) {
   const candidates = [];
 
   for (const block of extractCandidateBlocks(binaryText)) {
-    const clientIdMatch = /CLIENT_ID\s*:\s*"([0-9a-f-]{36})"/i.exec(block);
+    const clientIdMatch = /\b(?:CLIENT_ID|[A-Z_]+CLIENT_ID)\s*:\s*"([0-9a-f-]{36})"/i.exec(block);
     if (!clientIdMatch?.[1]) {
       continue;
     }

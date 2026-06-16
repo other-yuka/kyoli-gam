@@ -1,5 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import { getClaudeCodeTemplateMetadata } from "./fingerprint-template";
+export {
+  CCH_SEEDS,
+  cchForBody,
+  cchWithSeed,
+  stampClaudeCodeCch,
+  xxh64,
+} from "./cch";
 
 const CLAUDE_CODE_API_BASE_URL = "https://api.anthropic.com";
 const STAINLESS_PACKAGE_VERSION = "0.81.0";

@@ -7,6 +7,7 @@ import {
   applyClaudeCodeUpstreamBodyFields,
   checkClaudeCodeTemplateDrift,
   CLIENT_SYSTEM_PREFACE,
+  cchForBody,
   composeClaudeCodeBillingSystemEntry,
   computeClaudeCodeBuildTag,
   createClaudeCodePerRequestHeaders,
@@ -14,10 +15,12 @@ import {
   createClaudeCodeProvider,
   getClaudeCodeTemplateMetadata,
   getClaudeCodeTemplateTools,
+  isClaudeCodeNonSubscriptionBillingClaim,
   loadClaudeCodeSharedRequestProfile,
   orderClaudeCodeHeadersForOutbound,
   refreshClaudeCodeAccountMetadata,
   refreshClaudeCodeOAuthToken,
+  stampClaudeCodeCch,
 } from "../src";
 
 function createTestClaudeCodeProvider(
@@ -96,6 +99,59 @@ describe("OpenCode shared Claude Code helpers", () => {
     expect(composeClaudeCodeBillingSystemEntry("hello reviewer", "2.1.137")).toBe(
       `x-anthropic-billing-header: cc_version=2.1.137.${tag}; cc_entrypoint=sdk-cli; cch=00000;`,
     );
+  });
+
+  it("stamps deterministic cch only for verified Claude Code seeds", () => {
+    const body = JSON.stringify({
+      model: "claude-opus-4-8",
+      messages: [{
+        role: "user",
+        content: [
+          { type: "text", text: "earlier log line said cc_entrypoint=sdk-cli; cch=dead1;" },
+          { type: "text", text: "hello stream", cache_control: { type: "ephemeral" } },
+        ],
+      }],
+      system: [
+        { type: "text", text: "x-anthropic-billing-header: cc_version=2.1.177.dd9; cc_entrypoint=sdk-cli; cch=a82da;" },
+        { type: "text", text: "You are a Claude agent, built on Anthropic's Claude Agent SDK.", cache_control: { type: "ephemeral" } },
+        { type: "text", text: "CWD: /tmp\nDate: 2026-06-16", cache_control: { type: "ephemeral" } },
+      ],
+      tools: [],
+      metadata: {
+        user_id: JSON.stringify({
+          device_id: "2310428a2ab526a3f57d940cbb0e3ab42f64116b322a8c26b56498cd4a2ee69d",
+          account_uuid: "",
+          session_id: "00000000-0000-4000-8000-000000000000",
+        }),
+      },
+      max_tokens: 64000,
+      thinking: { type: "adaptive" },
+      context_management: { edits: [{ type: "clear_thinking_20251015", keep: "all" }] },
+      output_config: { effort: "max" },
+      stream: true,
+    });
+
+    const stamped = stampClaudeCodeCch(body.replace("cch=a82da", "cch=00000"), "2.1.177");
+    expect(cchForBody(body, "2.1.177")).toBe("69681");
+    expect(stamped).toContain("cc_entrypoint=sdk-cli; cch=69681;");
+    expect(stamped).toContain("earlier log line said cc_entrypoint=sdk-cli; cch=dead1;");
+    expect(stampClaudeCodeCch(body.replace("cch=a82da", "cch=00000"), "2.1.178")).toContain(
+      "cc_entrypoint=sdk-cli; cch=69681;",
+    );
+
+    const unknownVersionBody = body.replace("cc_version=2.1.177.dd9", "cc_version=2.1.178.dd9");
+    expect(stampClaudeCodeCch(unknownVersionBody)).toBe(unknownVersionBody);
+  });
+
+  it("classifies non-subscription Claude Code billing claims conservatively", () => {
+    expect(isClaudeCodeNonSubscriptionBillingClaim("five_hour")).toBe(false);
+    expect(isClaudeCodeNonSubscriptionBillingClaim("seven_day_sonnet")).toBe(false);
+    expect(isClaudeCodeNonSubscriptionBillingClaim("unknown")).toBe(false);
+    expect(isClaudeCodeNonSubscriptionBillingClaim("workspace")).toBe(false);
+    expect(isClaudeCodeNonSubscriptionBillingClaim("api")).toBe(true);
+    expect(isClaudeCodeNonSubscriptionBillingClaim("overage")).toBe(true);
+    expect(isClaudeCodeNonSubscriptionBillingClaim("sdk_credit")).toBe(true);
+    expect(isClaudeCodeNonSubscriptionBillingClaim("future_credit_bucket")).toBe(true);
   });
 
   it("applies shared Claude Code body fields", () => {
@@ -897,6 +953,97 @@ describe("createClaudeCodeProvider", () => {
     expect(firstUpdated?.rateLimitResetAt).toBeTruthy();
     expect(firstUpdated?.metadata.rateLimitClaim).toBe("five_hour");
     expect(firstUpdated?.metadata.rateLimitStatus).toBe("rejected");
+    expect(secondUpdated?.lastUsedAt).toBeTruthy();
+  });
+
+  it("blocks and fails over when a Claude response bills outside subscription claims", async () => {
+    const store = new MemoryAccountStore();
+    const first = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: {
+        accessToken: "first-access",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-first",
+      },
+    });
+    const second = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: {
+        accessToken: "second-access",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-second",
+      },
+    });
+    const upstreamAuths: string[] = [];
+
+    const provider = createTestClaudeCodeProvider({
+      accounts: new StickyAccountPool(store),
+      baseUrl: "https://example.test",
+      usageRefresh: async () => ({ cachedUsageAt: Date.now() }),
+      fetch: async (_input, init) => {
+        const authorization = new Headers(init?.headers).get("authorization") ?? "";
+        upstreamAuths.push(authorization);
+
+        if (authorization === "Bearer first-access") {
+          return new Response(
+            [
+              "event: message_start",
+              'data: {"type":"message_start","message":{"id":"msg_billed","type":"message"}}',
+              "",
+              "",
+            ].join("\n"),
+            {
+              status: 200,
+              headers: {
+                "anthropic-ratelimit-unified-representative-claim": "api",
+                "anthropic-ratelimit-unified-status": "accepted",
+                "content-type": "text/event-stream",
+              },
+            },
+          );
+        }
+
+        return new Response(JSON.stringify({ id: "msg_second", type: "message" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    const response = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-code/claude-sonnet-4-5",
+          max_tokens: 1024,
+          messages: [{ role: "user", content: "hello" }],
+          stream: true,
+        }),
+      }),
+      route: "/v1/messages",
+      sessionKey: "session-non-sub-billing",
+      body: {
+        model: "claude-code/claude-sonnet-4-5",
+        max_tokens: 1024,
+        messages: [{ role: "user", content: "hello" }],
+        stream: true,
+      },
+      model: "claude-code/claude-sonnet-4-5",
+    });
+
+    const firstUpdated = await store.get(first.id);
+    const secondUpdated = await store.get(second.id);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ id: "msg_second" });
+    expect(upstreamAuths).toEqual(["Bearer first-access", "Bearer second-access"]);
+    expect(firstUpdated?.failureCount).toBe(1);
+    expect(firstUpdated?.lastFailureClass).toBe("quota");
+    expect(firstUpdated?.lastFailureCode).toBe("non_subscription_billing_claim");
+    expect(firstUpdated?.metadata.rateLimitClaim).toBe("api");
+    expect(firstUpdated?.rateLimitBlockedAt).toBeTruthy();
     expect(secondUpdated?.lastUsedAt).toBeTruthy();
   });
 
