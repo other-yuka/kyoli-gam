@@ -6,6 +6,7 @@ import {
   isClaudeFableModel,
   orderClaudeCodeBodyForOutbound,
   resolveClaudeCodeModelAlias,
+  stampClaudeCodeCch,
   toClaudeCodeWireModelId,
 } from "../../../providers/claude-code/src/opencode-shared";
 import { claudeCodeIntegration, type ClaudeIdentity, type TemplateData } from "../claude-code";
@@ -245,9 +246,11 @@ function filterInjectedSystemTexts(
   ));
 }
 
-function getCcVersion(template: TemplateData): string {
-  return template.cc_version ?? claudeCodeIntegration.detectCliVersion();
+export function getCcVersion(template?: TemplateData): string {
+  return template?.cc_version ?? claudeCodeIntegration.detectCliVersion();
 }
+
+export { stampClaudeCodeCch };
 
 function buildBillingHeader(firstUserMessage: string, template: TemplateData): string {
   const version = getCcVersion(template);

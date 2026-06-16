@@ -35,6 +35,7 @@ import {
   getDanglingToolUseError,
   OPENCODE_OUTPUT_EFFORT_HEADER,
   readOpenCodeVariantEffort,
+  stampClaudeCodeCch,
   getUpstreamSessionId,
   reverseMapResponse,
   type OutputEffortValue,
@@ -450,12 +451,15 @@ export class AccountRuntimeFactory {
 
     const performFetch = async (requestHeaders: HeadersInit, requestBody: BodyInit | null | undefined): Promise<Response> => {
       await reservePacingSlot();
+      const stampedBody = typeof requestBody === "string"
+        ? stampClaudeCodeCch(requestBody)
+        : requestBody;
 
       try {
         const response = await fetch(transformedInput, {
           ...init,
           headers: requestHeaders,
-          body: requestBody,
+          body: stampedBody,
         });
         return await enrichRateLimitResponse(response);
       } catch (error) {
