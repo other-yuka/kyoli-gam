@@ -88,4 +88,37 @@ describe("core/rate-limit", () => {
 
     nowSpy.mockRestore();
   });
+
+  test("quarantines non-subscription billing claims without refreshing usage", async () => {
+    const account = createAccount({
+      cachedUsageAt: Date.now() - 50_000,
+    });
+    const manager = {
+      markRateLimited: vi.fn(async () => {}),
+      applyUsageCache: vi.fn(async () => {}),
+      getAccountCount: vi.fn(() => 2),
+    };
+
+    await handlers.handleRateLimitResponse(
+      manager,
+      createClient(),
+      account,
+      new Response(JSON.stringify({ error: { message: "blocked" } }), {
+        status: 429,
+        headers: {
+          "anthropic-ratelimit-unified-representative-claim": "api",
+          "retry-after-ms": "5000",
+        },
+      }),
+    );
+
+    expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", 24 * 60 * 60 * 1000);
+    expect(fetchUsage).not.toHaveBeenCalled();
+    expect(manager.applyUsageCache).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith(
+      expect.anything(),
+      "Account 1 blocked non-subscription billing claim (api). Switching...",
+      "warning",
+    );
+  });
 });

@@ -111,6 +111,47 @@ describe("runtime-factory", () => {
     expect(body.tools[0]?.name).toMatch(/^tool_[a-f0-9]+$/);
   });
 
+  test("runtime.fetch blocks non-subscription Claude Code billing claims", async () => {
+    const uuid = await seedAccount();
+    const factory = new AccountRuntimeFactory(store, client);
+    const runtime = await factory.getRuntime(uuid);
+
+    globalThis.fetch = vi.fn(async () => new Response(
+      [
+        "event: message_start",
+        'data: {"type":"message_start","message":{"id":"msg_billed","type":"message"}}',
+        "",
+        "",
+      ].join("\n"),
+      {
+        status: 200,
+        headers: {
+          "anthropic-ratelimit-unified-representative-claim": "api",
+          "anthropic-ratelimit-unified-status": "accepted",
+          "content-type": "text/event-stream",
+        },
+      },
+    )) as unknown as typeof fetch;
+
+    const response = await runtime.fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    });
+
+    expect(response.status).toBe(429);
+    expect(response.headers.get("x-kyoli-non-subscription-billing-claim")).toBe("api");
+    expect(response.headers.get("retry-after-ms")).toBe(String(24 * 60 * 60 * 1000));
+    expect(await response.json()).toMatchObject({
+      error: {
+        type: "non_subscription_billing_claim",
+      },
+    });
+  });
+
   test("uses OpenCode variant effort bridge header without forwarding it upstream", async () => {
     const uuid = await seedAccount();
     const factory = new AccountRuntimeFactory(store, client);

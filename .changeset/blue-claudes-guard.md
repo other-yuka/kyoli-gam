@@ -1,4 +1,5 @@
 ---
+"opencode-multi-account-core": patch
 "opencode-anthropic-multi-account": patch
 ---
 

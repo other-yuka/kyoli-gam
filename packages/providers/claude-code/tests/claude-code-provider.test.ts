@@ -147,9 +147,11 @@ describe("OpenCode shared Claude Code helpers", () => {
     expect(isClaudeCodeNonSubscriptionBillingClaim("five_hour")).toBe(false);
     expect(isClaudeCodeNonSubscriptionBillingClaim("seven_day_sonnet")).toBe(false);
     expect(isClaudeCodeNonSubscriptionBillingClaim("unknown")).toBe(false);
+    expect(isClaudeCodeNonSubscriptionBillingClaim("workspace")).toBe(false);
     expect(isClaudeCodeNonSubscriptionBillingClaim("api")).toBe(true);
     expect(isClaudeCodeNonSubscriptionBillingClaim("overage")).toBe(true);
     expect(isClaudeCodeNonSubscriptionBillingClaim("sdk_credit")).toBe(true);
+    expect(isClaudeCodeNonSubscriptionBillingClaim("future_credit_bucket")).toBe(true);
   });
 
   it("applies shared Claude Code body fields", () => {

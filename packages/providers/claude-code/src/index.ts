@@ -631,12 +631,12 @@ function inferClaudeCodeBillingClaimFailure(response: Response): AccountFailureS
 export function isClaudeCodeNonSubscriptionBillingClaim(claim: string | undefined): boolean {
   if (!claim || claim === "unknown") return false;
   const normalized = claim.toLowerCase();
-  return !(
-    normalized === "five_hour" ||
-    normalized === "seven_day" ||
-    normalized.startsWith("five_hour_") ||
-    normalized.startsWith("seven_day_")
-  );
+  return normalized === "api"
+    || normalized.startsWith("api_")
+    || normalized === "overage"
+    || normalized.startsWith("overage_")
+    || normalized.includes("credit")
+    || normalized.startsWith("sdk");
 }
 
 function createClaudeCodeFailureHeaders(
