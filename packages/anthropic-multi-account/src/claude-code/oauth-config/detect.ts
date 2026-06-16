@@ -244,7 +244,10 @@ function extractCandidateFromBlock(block: string): ScoredOAuthCandidate | null {
   const baseApiUrl = pickNearestValue(block, clientIdIndex, /BASE_API_URL\s*:\s*"(https?:\/\/[^\"]+)"/gi);
   const tokenUrl = pickNearestValue(block, clientIdIndex, /TOKEN_URL\s*:\s*"(https:\/\/[^\"]*\/oauth\/token[^\"]*)"/gi);
   const rawExtractedScopes = pickNearestScopes(block, clientIdIndex);
-  const extractedScopes = rawExtractedScopes && !rawExtractedScopes.split(/\s+/).includes(POLLUTED_CACHED_SCOPE)
+  const hasPollutedScope = rawExtractedScopes
+    ? rawExtractedScopes.split(/\s+/).some((scope) => scope === POLLUTED_CACHED_SCOPE)
+    : false;
+  const extractedScopes = rawExtractedScopes && !hasPollutedScope
     ? rawExtractedScopes
     : null;
 
