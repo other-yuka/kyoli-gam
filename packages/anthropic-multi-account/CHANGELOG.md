@@ -1,5 +1,14 @@
 # opencode-anthropic-multi-account
 
+## 0.2.62
+
+### Patch Changes
+
+- [#93](https://github.com/other-yuka/kyoli-gam/pull/93) [`6af8050`](https://github.com/other-yuka/kyoli-gam/commit/6af80508876d22b5c263ecf08ae60554ee18e49d) Thanks [@other-yuka](https://github.com/other-yuka)! - Refresh Claude Code 2.1.178 fingerprints, repair native OAuth scanning, and add safer Claude Code billing-claim/cch handling.
+
+- Updated dependencies [[`6af8050`](https://github.com/other-yuka/kyoli-gam/commit/6af80508876d22b5c263ecf08ae60554ee18e49d)]:
+  - opencode-multi-account-core@0.2.62
+
 ## 0.2.61
 
 ### Patch Changes
