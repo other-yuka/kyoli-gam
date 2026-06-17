@@ -10,6 +10,13 @@ export interface EffortClampResult<TBody> {
   effort?: string;
 }
 
+export interface MaxTokensClampResult<TBody> {
+  body: TBody;
+  changed: boolean;
+  maxTokens?: number;
+  modelId?: string;
+}
+
 export const EFFORT_PREFERENCE = ["xhigh", "max", "high", "medium", "low"] as const;
 
 function readRecord(value: unknown): Record<string, unknown> | undefined {
@@ -38,6 +45,17 @@ export function parseEffortCapabilityRejection(body: string): EffortCapabilityRe
     : null;
 }
 
+export function isEffortParamUnsupported(body: string): boolean {
+  return /does not support the effort parameter/i.test(body);
+}
+
+export function parseMaxTokensRejection(body: string): number | null {
+  const match = /max_tokens:\s*\d+\s*>\s*(\d+),?\s*which is the maximum allowed/i.exec(body);
+  if (!match?.[1]) return null;
+  const cap = Number(match[1]);
+  return Number.isFinite(cap) && cap > 0 ? cap : null;
+}
+
 export function bestSupportedEffort(supported: readonly string[]): string {
   for (const effort of EFFORT_PREFERENCE) {
     if (supported.includes(effort)) {
@@ -62,13 +80,21 @@ export function clampUnsupportedEffortInBody<TBody extends BodyInit | null | und
     const modelId = typeof record?.model === "string" ? record.model : undefined;
     const outputConfig = readRecord(record?.output_config);
     const effort = typeof outputConfig?.effort === "string" ? outputConfig.effort : undefined;
-    if (!modelId || !outputConfig || !effort) {
+    if (!record || !modelId || !outputConfig || !effort) {
       return { body, changed: false, modelId };
     }
 
     const supported = supportedEffortsByModel.get(modelId);
     if (!supported || supported.includes(effort)) {
       return { body, changed: false, modelId, effort };
+    }
+
+    if (supported.length === 0) {
+      delete outputConfig.effort;
+      if (Object.keys(outputConfig).length === 0) {
+        delete record.output_config;
+      }
+      return { body: JSON.stringify(record), changed: true, modelId };
     }
 
     const clamped = bestSupportedEffort(supported);
@@ -94,7 +120,7 @@ export function clampEffortAfterRejection<TBody extends BodyInit | null | undefi
     const modelId = typeof record?.model === "string" ? record.model : undefined;
     const outputConfig = readRecord(record?.output_config);
     const effort = typeof outputConfig?.effort === "string" ? outputConfig.effort : undefined;
-    if (!modelId || !outputConfig || !effort) {
+    if (!record || !modelId || !outputConfig || !effort) {
       return { body, changed: false, modelId };
     }
 
@@ -106,6 +132,90 @@ export function clampEffortAfterRejection<TBody extends BodyInit | null | undefi
     const clamped = bestSupportedEffort(rejection.supported);
     outputConfig.effort = clamped;
     return { body: JSON.stringify(record), changed: true, modelId, effort: clamped };
+  } catch {
+    return { body, changed: false };
+  }
+}
+
+export function stripEffortAfterUnsupportedRejection<TBody extends BodyInit | null | undefined>(
+  body: TBody,
+  supportedEffortsByModel: Map<string, string[]>,
+): EffortClampResult<TBody | string> {
+  if (typeof body !== "string") {
+    return { body, changed: false };
+  }
+
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    const record = readRecord(parsed);
+    const modelId = typeof record?.model === "string" ? record.model : undefined;
+    const outputConfig = readRecord(record?.output_config);
+    const effort = typeof outputConfig?.effort === "string" ? outputConfig.effort : undefined;
+    if (!record || !modelId || !outputConfig || !effort) {
+      return { body, changed: false, modelId };
+    }
+
+    supportedEffortsByModel.set(modelId, []);
+    delete outputConfig.effort;
+    if (Object.keys(outputConfig).length === 0) {
+      delete record.output_config;
+    }
+    return { body: JSON.stringify(record), changed: true, modelId };
+  } catch {
+    return { body, changed: false };
+  }
+}
+
+export function clampMaxTokensInBody<TBody extends BodyInit | null | undefined>(
+  body: TBody,
+  maxTokensCapByModel: ReadonlyMap<string, number>,
+): MaxTokensClampResult<TBody | string> {
+  if (typeof body !== "string") {
+    return { body, changed: false };
+  }
+
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    const record = readRecord(parsed);
+    const modelId = typeof record?.model === "string" ? record.model : undefined;
+    const maxTokens = typeof record?.max_tokens === "number" ? record.max_tokens : undefined;
+    if (!record || !modelId || maxTokens === undefined) {
+      return { body, changed: false, modelId };
+    }
+
+    const cap = maxTokensCapByModel.get(modelId);
+    if (cap === undefined || maxTokens <= cap) {
+      return { body, changed: false, modelId, maxTokens };
+    }
+
+    record.max_tokens = cap;
+    return { body: JSON.stringify(record), changed: true, modelId, maxTokens: cap };
+  } catch {
+    return { body, changed: false };
+  }
+}
+
+export function clampMaxTokensAfterRejection<TBody extends BodyInit | null | undefined>(
+  body: TBody,
+  cap: number,
+  maxTokensCapByModel: Map<string, number>,
+): MaxTokensClampResult<TBody | string> {
+  if (typeof body !== "string") {
+    return { body, changed: false };
+  }
+
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    const record = readRecord(parsed);
+    const modelId = typeof record?.model === "string" ? record.model : undefined;
+    const maxTokens = typeof record?.max_tokens === "number" ? record.max_tokens : undefined;
+    if (!record || !modelId || maxTokens === undefined || maxTokens <= cap) {
+      return { body, changed: false, modelId, maxTokens };
+    }
+
+    maxTokensCapByModel.set(modelId, cap);
+    record.max_tokens = cap;
+    return { body: JSON.stringify(record), changed: true, modelId, maxTokens: cap };
   } catch {
     return { body, changed: false };
   }

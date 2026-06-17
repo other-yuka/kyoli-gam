@@ -1505,6 +1505,204 @@ describe("createClaudeCodeProvider", () => {
     expect(retryCounts).toEqual(["0", "1", "0"]);
   });
 
+  it("retries without output_config.effort when the model rejects the parameter", async () => {
+    const efforts: string[] = [];
+    const retryCounts: string[] = [];
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+      },
+    });
+
+    const provider = createTestClaudeCodeProvider({
+      accounts: new StickyAccountPool(store),
+      allowLiveMessages: true,
+      baseUrl: "https://example.test",
+      usageRefresh: async () => ({ cachedUsageAt: Date.now() }),
+      fetch: async (_input, init) => {
+        const body = JSON.parse(String(init?.body)) as { output_config?: { effort?: string } };
+        const headers = new Headers(init?.headers);
+        efforts.push(body.output_config?.effort ?? "");
+        retryCounts.push(headers.get("x-stainless-retry-count") ?? "");
+        if (efforts.length === 1) {
+          return new Response(
+            JSON.stringify({
+              error: {
+                message: "This model does not support the effort parameter.",
+              },
+            }),
+            { status: 400, headers: { "content-type": "application/json" } },
+          );
+        }
+
+        return new Response(JSON.stringify({ id: `msg_${efforts.length}`, type: "message" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    const firstContext = createMessagesContext(
+      "session-no-effort",
+      "anthropic/claude-opus-4-1-20250805",
+    ) as ReturnType<typeof createMessagesContext> & { body: Record<string, unknown> };
+    firstContext.body.output_config = { effort: "high" };
+    const first = await provider.handleRequest(firstContext);
+
+    const secondContext = createMessagesContext(
+      "session-no-effort-2",
+      "anthropic/claude-opus-4-1-20250805",
+    ) as ReturnType<typeof createMessagesContext> & { body: Record<string, unknown> };
+    secondContext.body.output_config = { effort: "high" };
+    const second = await provider.handleRequest(secondContext);
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(efforts).toEqual(["high", "", ""]);
+    expect(retryCounts).toEqual(["0", "1", "0"]);
+  });
+
+  it("retries with a clamped max_tokens cap and caches it per model", async () => {
+    const maxTokens: number[] = [];
+    const retryCounts: string[] = [];
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+      },
+    });
+
+    const provider = createTestClaudeCodeProvider({
+      accounts: new StickyAccountPool(store),
+      allowLiveMessages: true,
+      baseUrl: "https://example.test",
+      usageRefresh: async () => ({ cachedUsageAt: Date.now() }),
+      fetch: async (_input, init) => {
+        const body = JSON.parse(String(init?.body)) as { max_tokens?: number };
+        const headers = new Headers(init?.headers);
+        maxTokens.push(body.max_tokens ?? 0);
+        retryCounts.push(headers.get("x-stainless-retry-count") ?? "");
+        if (maxTokens.length === 1) {
+          return new Response(
+            JSON.stringify({
+              error: {
+                message: "max_tokens: 64000 > 32000, which is the maximum allowed number of output tokens for claude-opus-4-1-20250805.",
+              },
+            }),
+            { status: 400, headers: { "content-type": "application/json" } },
+          );
+        }
+
+        return new Response(JSON.stringify({ id: `msg_${maxTokens.length}`, type: "message" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    const firstContext = createMessagesContext(
+      "session-max-tokens",
+      "anthropic/claude-opus-4-1-20250805",
+    ) as ReturnType<typeof createMessagesContext> & { body: Record<string, unknown> };
+    firstContext.body.max_tokens = 64_000;
+    const first = await provider.handleRequest(firstContext);
+
+    const secondContext = createMessagesContext(
+      "session-max-tokens-2",
+      "anthropic/claude-opus-4-1-20250805",
+    ) as ReturnType<typeof createMessagesContext> & { body: Record<string, unknown> };
+    secondContext.body.max_tokens = 64_000;
+    const second = await provider.handleRequest(secondContext);
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(maxTokens).toEqual([64_000, 32_000, 32_000]);
+    expect(retryCounts).toEqual(["0", "1", "0"]);
+  });
+
+  it("continues capability retries after max_tokens when effort is rejected next", async () => {
+    const calls: Array<{ effort: string; maxTokens: number; retryCount: string }> = [];
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+      },
+    });
+
+    const provider = createTestClaudeCodeProvider({
+      accounts: new StickyAccountPool(store),
+      allowLiveMessages: true,
+      baseUrl: "https://example.test",
+      usageRefresh: async () => ({ cachedUsageAt: Date.now() }),
+      fetch: async (_input, init) => {
+        const body = JSON.parse(String(init?.body)) as {
+          max_tokens?: number;
+          output_config?: { effort?: string };
+        };
+        const headers = new Headers(init?.headers);
+        calls.push({
+          effort: body.output_config?.effort ?? "",
+          maxTokens: body.max_tokens ?? 0,
+          retryCount: headers.get("x-stainless-retry-count") ?? "",
+        });
+        if (calls.length === 1) {
+          return new Response(
+            JSON.stringify({
+              error: {
+                message: "max_tokens: 64000 > 32000, which is the maximum allowed number of output tokens for claude-opus-4-1-20250805.",
+              },
+            }),
+            { status: 400, headers: { "content-type": "application/json" } },
+          );
+        }
+        if (calls.length === 2) {
+          return new Response(
+            JSON.stringify({
+              error: {
+                message: "This model does not support the effort parameter.",
+              },
+            }),
+            { status: 400, headers: { "content-type": "application/json" } },
+          );
+        }
+
+        return new Response(JSON.stringify({ id: `msg_${calls.length}`, type: "message" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    const context = createMessagesContext(
+      "session-max-tokens-and-no-effort",
+      "anthropic/claude-opus-4-1-20250805",
+    ) as ReturnType<typeof createMessagesContext> & { body: Record<string, unknown> };
+    context.body.max_tokens = 64_000;
+    context.body.output_config = { effort: "high" };
+
+    const response = await provider.handleRequest(context);
+
+    expect(response.status).toBe(200);
+    expect(calls).toEqual([
+      { effort: "high", maxTokens: 64_000, retryCount: "0" },
+      { effort: "high", maxTokens: 32_000, retryCount: "1" },
+      { effort: "", maxTokens: 32_000, retryCount: "1" },
+    ]);
+  });
+
   it("retries without long-context betas after subscription errors", async () => {
     const betas: string[] = [];
     const store = new MemoryAccountStore();

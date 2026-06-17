@@ -228,6 +228,99 @@ describe("runtime-factory", () => {
     expect(efforts).toEqual(["max", "high", "high"]);
   });
 
+  test("retries without effort when the model rejects the effort parameter", async () => {
+    const uuid = await seedAccount();
+    const factory = new AccountRuntimeFactory(store, client);
+    const runtime = await factory.getRuntime(uuid);
+    const efforts: string[] = [];
+
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { output_config?: { effort?: string } };
+      efforts.push(body.output_config?.effort ?? "");
+      if (efforts.length === 1) {
+        return new Response(
+          JSON.stringify({
+            error: {
+              type: "invalid_request_error",
+              message: "This model does not support the effort parameter.",
+            },
+          }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        );
+      }
+
+      return new Response(JSON.stringify({ id: `msg_${efforts.length}`, type: "message" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const request = {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-kyoli-opencode-effort": "high",
+      },
+      body: JSON.stringify({
+        model: "claude-opus-4-1-20250805",
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    };
+
+    const first = await runtime.fetch("https://api.anthropic.com/v1/messages", request);
+    const second = await runtime.fetch("https://api.anthropic.com/v1/messages", request);
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(efforts).toEqual(["high", "", ""]);
+  });
+
+  test("retries with a clamped max_tokens cap and caches it per model", async () => {
+    const uuid = await seedAccount();
+    const factory = new AccountRuntimeFactory(store, client);
+    const runtime = await factory.getRuntime(uuid);
+    const maxTokens: number[] = [];
+
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { max_tokens?: number };
+      maxTokens.push(body.max_tokens ?? 0);
+      if (maxTokens.length === 1) {
+        return new Response(
+          JSON.stringify({
+            error: {
+              type: "invalid_request_error",
+              message: "max_tokens: 32000 > 8192, which is the maximum allowed number of output tokens for claude-small-cap.",
+            },
+          }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        );
+      }
+
+      return new Response(JSON.stringify({ id: `msg_${maxTokens.length}`, type: "message" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const request = {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-small-cap",
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    };
+
+    const first = await runtime.fetch("https://api.anthropic.com/v1/messages", request);
+    const second = await runtime.fetch("https://api.anthropic.com/v1/messages", request);
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(maxTokens).toEqual([32_000, 8192, 8192]);
+  });
+
   test("prefers stored per-account Claude identity over process identity", async () => {
     const uuid = await seedAccount({
       accountId: "provider-account",

@@ -10,8 +10,13 @@ import {
 } from "../request/transform";
 import {
   clampEffortAfterRejection,
+  clampMaxTokensAfterRejection,
+  clampMaxTokensInBody,
   clampUnsupportedEffortInBody,
+  isEffortParamUnsupported,
   parseEffortCapabilityRejection,
+  parseMaxTokensRejection,
+  stripEffortAfterUnsupportedRejection,
 } from "../../../providers/claude-code/src/effort-capability";
 import {
   addExcludedBeta,
@@ -308,6 +313,7 @@ export class AccountRuntimeFactory {
   private runtimes = new Map<string, AccountRuntime>();
   private initLocks = new Map<string, Promise<AccountRuntime>>();
   private effortSupportByModel = new Map<string, string[]>();
+  private maxTokensCapByModel = new Map<string, number>();
   private lastRequestTime = 0;
   private pacingGate = Promise.resolve();
   private pacingTestOverrides: PacingTestOverrides = {};
@@ -512,42 +518,74 @@ export class AccountRuntimeFactory {
       transformedRequest.body,
       this.effortSupportByModel,
     ).body;
-    const retryEffortCapability = async (
+    outboundBody = clampMaxTokensInBody(outboundBody, this.maxTokensCapByModel).body;
+    const retryClaudeCapability = async (
       currentResponse: Response,
       requestHeaders: HeadersInit,
     ): Promise<Response> => {
-      if (currentResponse.status !== 400) {
-        return currentResponse;
+      let response = currentResponse;
+
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        if (response.status !== 400) {
+          return response;
+        }
+
+        const responseBody = await response.clone().text().catch(() => "");
+        const rejection = parseEffortCapabilityRejection(responseBody);
+        if (rejection) {
+          const clamped = clampEffortAfterRejection(
+            outboundBody,
+            rejection,
+            this.effortSupportByModel,
+          );
+          if (clamped.changed) {
+            outboundBody = clamped.body;
+            response = await performFetch(requestHeaders, outboundBody);
+            continue;
+          }
+        }
+
+        if (isEffortParamUnsupported(responseBody)) {
+          const stripped = stripEffortAfterUnsupportedRejection(
+            outboundBody,
+            this.effortSupportByModel,
+          );
+          if (stripped.changed) {
+            outboundBody = stripped.body;
+            response = await performFetch(requestHeaders, outboundBody);
+            continue;
+          }
+        }
+
+        const maxTokensCap = parseMaxTokensRejection(responseBody);
+        if (maxTokensCap !== null) {
+          const clamped = clampMaxTokensAfterRejection(
+            outboundBody,
+            maxTokensCap,
+            this.maxTokensCapByModel,
+          );
+          if (clamped.changed) {
+            outboundBody = clamped.body;
+            response = await performFetch(requestHeaders, outboundBody);
+            continue;
+          }
+        }
+
+        return response;
       }
 
-      const responseBody = await currentResponse.clone().text().catch(() => "");
-      const rejection = parseEffortCapabilityRejection(responseBody);
-      if (!rejection) {
-        return currentResponse;
-      }
-
-      const clamped = clampEffortAfterRejection(
-        outboundBody,
-        rejection,
-        this.effortSupportByModel,
-      );
-      if (!clamped.changed) {
-        return currentResponse;
-      }
-
-      outboundBody = clamped.body;
-      return performFetch(requestHeaders, outboundBody);
+      return response;
     };
 
     let response = await performFetch(headers, outboundBody);
-    response = await retryEffortCapability(response, headers);
+    response = await retryClaudeCapability(response, headers);
 
     if (await isAssistantPrefillUnsupportedResponse(response)) {
       const retryBody = removeTrailingAssistantPrefillBody(outboundBody);
       if (retryBody) {
         outboundBody = retryBody;
         response = await performFetch(headers, outboundBody);
-        response = await retryEffortCapability(response, headers);
+        response = await retryClaudeCapability(response, headers);
       }
     }
 
@@ -590,7 +628,7 @@ export class AccountRuntimeFactory {
       );
 
       response = await performFetch(retryHeaders, outboundBody);
-      response = await retryEffortCapability(response, retryHeaders);
+      response = await retryClaudeCapability(response, retryHeaders);
     }
 
     return applyResponseReverseLookup(response, transformedRequest.reverseLookup);

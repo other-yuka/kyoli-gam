@@ -41,8 +41,13 @@ import {
 } from "./tool-flow";
 import {
   clampEffortAfterRejection,
+  clampMaxTokensAfterRejection,
+  clampMaxTokensInBody,
   clampUnsupportedEffortInBody,
+  isEffortParamUnsupported,
   parseEffortCapabilityRejection,
+  parseMaxTokensRejection,
+  stripEffortAfterUnsupportedRejection,
 } from "./effort-capability";
 import {
   getClaudeCodeTemplateMetadata,
@@ -256,6 +261,7 @@ export function createClaudeCodeProvider(
     refreshClaudeCodeAccountMetadata(accessToken, { fetch: fetchImpl }));
   const rejectedBetasByAccount = new Map<string, Set<string>>();
   const effortSupportByModel = new Map<string, string[]>();
+  const maxTokensCapByModel = new Map<string, number>();
   const pacer = createClaudeCodePacer(resolvePacingOptions(options.pacing));
   const drainOnCancel = options.drainOnCancel ?? readBooleanEnv("KYOLI_CLAUDE_DRAIN_ON_CANCEL");
   const drainTimeoutMs = readNonNegativeInteger(options.drainTimeoutMs) ??
@@ -358,6 +364,7 @@ export function createClaudeCodeProvider(
                 : JSON.stringify(transformed.body),
             context,
             effortSupportByModel,
+            maxTokensCapByModel,
             fetchImpl,
             fingerprint,
             pacer,
@@ -397,6 +404,7 @@ async function fetchWithClaudeRetries(input: {
   body: BodyInit | undefined;
   context: Parameters<ProviderAdapter["handleRequest"]>[0];
   effortSupportByModel: Map<string, string[]>;
+  maxTokensCapByModel: Map<string, number>;
   fetchImpl: typeof fetch;
   fingerprint: ClaudeCodeRequestFingerprint;
   pacer: () => Promise<void>;
@@ -409,6 +417,7 @@ async function fetchWithClaudeRetries(input: {
 }): Promise<Response> {
   const excludedBetas = getRejectedBetaSet(input.rejectedBetasByAccount, input.accountKey);
   let body = clampUnsupportedEffortInBody(input.body, input.effortSupportByModel).body;
+  body = clampMaxTokensInBody(body, input.maxTokensCapByModel).body;
   const dispatchInput = (nextBody: BodyInit | undefined): Parameters<typeof dispatchClaudeRequest>[0] => ({
     ...input,
     body: nextBody,
@@ -417,22 +426,48 @@ async function fetchWithClaudeRetries(input: {
 
   if (response.status !== 400 && response.status !== 429) return response;
 
-  let bodyText = await response.clone().text().catch(() => "");
-  const effortRejection = response.status === 400
-    ? parseEffortCapabilityRejection(bodyText)
-    : null;
-  if (effortRejection) {
-    const clamped = clampEffortAfterRejection(
-      body,
-      effortRejection,
-      input.effortSupportByModel,
-    );
-    if (clamped.changed) {
-      body = clamped.body;
-      response = await dispatchClaudeRequest(dispatchInput(body), excludedBetas, 1);
-      if (response.status !== 400 && response.status !== 429) return response;
-      bodyText = await response.clone().text().catch(() => "");
+  let bodyText = "";
+  for (let capabilityRetry = 0; capabilityRetry < 3; capabilityRetry += 1) {
+    bodyText = await response.clone().text().catch(() => "");
+    if (response.status !== 400) break;
+
+    const effortRejection = parseEffortCapabilityRejection(bodyText);
+    if (effortRejection) {
+      const clamped = clampEffortAfterRejection(
+        body,
+        effortRejection,
+        input.effortSupportByModel,
+      );
+      if (clamped.changed) {
+        body = clamped.body;
+        response = await dispatchClaudeRequest(dispatchInput(body), excludedBetas, 1);
+        if (response.status !== 400 && response.status !== 429) return response;
+        continue;
+      }
     }
+
+    if (isEffortParamUnsupported(bodyText)) {
+      const stripped = stripEffortAfterUnsupportedRejection(body, input.effortSupportByModel);
+      if (stripped.changed) {
+        body = stripped.body;
+        response = await dispatchClaudeRequest(dispatchInput(body), excludedBetas, 1);
+        if (response.status !== 400 && response.status !== 429) return response;
+        continue;
+      }
+    }
+
+    const maxTokensCap = parseMaxTokensRejection(bodyText);
+    if (maxTokensCap !== null) {
+      const clamped = clampMaxTokensAfterRejection(body, maxTokensCap, input.maxTokensCapByModel);
+      if (clamped.changed) {
+        body = clamped.body;
+        response = await dispatchClaudeRequest(dispatchInput(body), excludedBetas, 1);
+        if (response.status !== 400 && response.status !== 429) return response;
+        continue;
+      }
+    }
+
+    break;
   }
 
   const rejectedBetas = input.retryRejectedBetas && response.status === 400
@@ -989,16 +1024,25 @@ function createClaudeCodePacer(options: ClaudeCodePacingOptions): () => Promise<
   const minGapMs = Math.max(0, options.minGapMs);
   const jitterMs = Math.max(0, options.jitterMs);
 
+  let queue = Promise.resolve();
+
   return async () => {
     if (minGapMs === 0 && jitterMs === 0) return;
 
-    const now = Date.now();
-    const delayMs = Math.max(0, nextStartAt - now);
-    const jitter = jitterMs > 0 ? Math.floor(Math.random() * jitterMs) : 0;
-    nextStartAt = Math.max(now, nextStartAt) + minGapMs + jitter;
-    if (delayMs > 0) {
-      await sleep(delayMs);
-    }
+    const release = queue.then(async () => {
+      const now = Date.now();
+      if (nextStartAt > 0) {
+        const delayMs = Math.max(0, nextStartAt - now);
+        if (delayMs > 0) {
+          await sleep(delayMs);
+        }
+      }
+
+      const jitter = jitterMs > 0 ? Math.floor(Math.random() * jitterMs) : 0;
+      nextStartAt = Date.now() + minGapMs + jitter;
+    });
+    queue = release.catch(() => undefined);
+    await release;
   };
 }
 
