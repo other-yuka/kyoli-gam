@@ -5,6 +5,7 @@ import type {
   AccountSuccessInput,
   AccountUpdateInput,
 } from "./accounts";
+import { scoreQuotaResetPace, type QuotaRoutingWindow } from "opencode-multi-account-core";
 import {
   isCurrentlyAuthCoolingDown,
   isCurrentlyRateLimited,
@@ -84,6 +85,12 @@ export interface AccountPool {
 }
 
 type RuntimeAccountPoolOptions = Required<Omit<AccountPoolOptions, "stickySessionStore">>;
+type UsageTier = {
+  key: string;
+  utilization: number;
+  hasUtilization: boolean;
+  resetAt?: string;
+};
 
 const DEFAULT_PLAN_WEIGHTS: Record<string, number> = {
   max: 3,
@@ -364,11 +371,12 @@ function scoreAccount(
   const maxUtilization = getMaxUtilization(account);
   const planWeight = readPlanWeight(account, options.planWeights);
   const usageScore = ((100 - maxUtilization) / 100) * 450 * planWeight;
+  const resetPaceScore = getResetPaceScore(account) * planWeight;
   const healthScore = Math.max(0, 250 - account.failureCount * 60);
   const freshnessScore = getFreshnessScore(account);
   const stickinessBonus = isSticky ? 120 : 0;
 
-  return usageScore + healthScore + freshnessScore + stickinessBonus;
+  return usageScore + resetPaceScore + healthScore + freshnessScore + stickinessBonus;
 }
 
 function getMaxUtilization(account: AccountRecord): number {
@@ -400,15 +408,34 @@ function readUsageUtilization(account: AccountRecord, key: string): number | und
   return window ? readNumber(window.utilization) : undefined;
 }
 
-function readUsageTiers(account: AccountRecord): Array<{ utilization: number }> {
+function readUsageTiers(account: AccountRecord): UsageTier[] {
   const usage = readRecord(account.metadata.cachedUsage) ?? readRecord(account.metadata.usage);
   if (!usage) return [];
 
   return Object.entries(usage)
     .filter(([key]) => key === "five_hour" || key === "seven_day" || key.startsWith("seven_day_"))
-    .map(([, value]) => readRecord(value))
-    .filter((tier): tier is Record<string, unknown> => Boolean(tier))
-    .map((tier) => ({ utilization: readNumber(tier.utilization) ?? 0 }));
+    .map(([key, value]) => ({ key, tier: readRecord(value) }))
+    .filter((item): item is { key: string; tier: Record<string, unknown> } => Boolean(item.tier))
+    .map(({ key, tier }) => {
+      const utilization = readNumber(tier.utilization);
+      return {
+        key,
+        utilization: utilization ?? 0,
+        hasUtilization: utilization !== undefined,
+        resetAt: readUsageWindowResetAt(tier),
+      };
+    });
+}
+
+function getResetPaceScore(account: AccountRecord): number {
+  return scoreQuotaResetPace(readUsageTiers(account).map(toQuotaRoutingWindow));
+}
+
+function readUsageWindowResetAt(tier: Record<string, unknown>): string | undefined {
+  return readString(tier.reset_at) ??
+    readString(tier.resetAt) ??
+    readString(tier.resets_at) ??
+    readString(tier.resetsAt);
 }
 
 function readPlanWeight(
@@ -445,6 +472,18 @@ function readNumber(value: unknown): number | undefined {
   if (!trimmed) return undefined;
   const parsed = Number(trimmed);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function toQuotaRoutingWindow(tier: UsageTier): QuotaRoutingWindow {
+  return {
+    key: tier.key,
+    utilization: tier.hasUtilization ? tier.utilization : undefined,
+    resetAt: tier.resetAt,
+  };
 }
 
 function clampPercent(value: number): number {

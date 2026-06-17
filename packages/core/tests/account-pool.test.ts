@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { MemoryAccountStore } from "../src/accounts";
 import { StickyAccountPool } from "../src/account-pool";
 import { summarizeAccountStatus, listFailedAccounts } from "../src/account-status";
@@ -531,6 +531,53 @@ describe("StickyAccountPool", () => {
 
     expect(selected?.id).toBe(available.id);
     expect(selected?.id).not.toBe(saturated.id);
+  });
+
+  it("prefers accounts that are under pace for their reset window", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-18T00:00:00.000Z"));
+    try {
+      const store = new MemoryAccountStore();
+      const overPace = await store.create({
+        provider: "codex",
+        kind: "oauth",
+        name: "over-pace",
+        metadata: {
+          cachedUsage: {
+            seven_day: {
+              utilization: 40,
+              resets_at: new Date(Date.now() + 6 * 24 * 60 * 60 * 1000).toISOString(),
+            },
+          },
+        },
+      });
+      const underPace = await store.create({
+        provider: "codex",
+        kind: "oauth",
+        name: "under-pace",
+        metadata: {
+          cachedUsage: {
+            seven_day: {
+              utilization: 60,
+              resets_at: new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString(),
+            },
+          },
+        },
+      });
+      const pool = new StickyAccountPool(store, { strategy: "weighted" });
+
+      const result = await pool.selectWithDiagnostics({
+        provider: "codex",
+        kind: "oauth",
+        sessionKey: "session-a",
+      });
+
+      expect(result.account?.id).toBe(underPace.id);
+      expect(result.account?.id).not.toBe(overPace.id);
+      expect(result.diagnostics.selectedReason).toBe("weighted_best");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("ignores blank utilization strings for soft quota inputs", async () => {

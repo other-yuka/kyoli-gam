@@ -7,6 +7,7 @@ export * from "./executor";
 export * from "./file-lock";
 export * from "./proactive-refresh";
 export * from "./rate-limit";
+export * from "./routing";
 export * from "./storage";
 export * from "./types";
 export * from "./utils";

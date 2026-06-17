@@ -4,7 +4,8 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "paths": {
-      "@kyoli-gam/core": ["../core/src/index.ts"]
+      "@kyoli-gam/core": ["../core/src/index.ts"],
+      "opencode-multi-account-core": ["../multi-account-core/src/index.ts"]
     },
     "esModuleInterop": true,
     "strict": true,
