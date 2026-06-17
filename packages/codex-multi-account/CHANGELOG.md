@@ -1,5 +1,14 @@
 # opencode-codex-multi-account
 
+## 0.2.63
+
+### Patch Changes
+
+- [#99](https://github.com/other-yuka/kyoli-gam/pull/99) [`3822a0c`](https://github.com/other-yuka/kyoli-gam/commit/3822a0ca370e8d604591a415d144a2368cbb8da3) Thanks [@other-yuka](https://github.com/other-yuka)! - Add Codex reset-credit redemption for operator flows, including credit listing, explicit consumption, quota-state refresh, JSON confirmation guards, and missing account-id recovery.
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.63
+
 ## 0.2.62
 
 ### Patch Changes
