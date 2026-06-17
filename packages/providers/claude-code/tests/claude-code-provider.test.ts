@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { MemoryAccountStore, StickyAccountPool } from "@kyoli-gam/core";
 import {
   applyClaudeCodeUpstreamBodyFields,
@@ -1588,37 +1588,46 @@ describe("createClaudeCodeProvider", () => {
   });
 
   it("can pace outbound Claude Code requests", async () => {
-    const startedAt: number[] = [];
-    const store = new MemoryAccountStore();
-    await store.create({
-      provider: "claude-code",
-      kind: "oauth",
-      credentials: {
-        accessToken: "access-test",
-        expiresAt: Date.now() + 60 * 60 * 1000,
-        refreshToken: "refresh-test",
-      },
-    });
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-17T00:00:00.000Z"));
 
-    const provider = createTestClaudeCodeProvider({
-      accounts: new StickyAccountPool(store),
-      baseUrl: "https://example.test",
-      pacing: { minGapMs: 20 },
-      usageRefresh: async () => ({ cachedUsageAt: Date.now() }),
-      fetch: async () => {
-        startedAt.push(Date.now());
-        return new Response(JSON.stringify({ id: "msg_test", type: "message" }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      },
-    });
+    try {
+      const startedAt: number[] = [];
+      const store = new MemoryAccountStore();
+      await store.create({
+        provider: "claude-code",
+        kind: "oauth",
+        credentials: {
+          accessToken: "access-test",
+          expiresAt: Date.now() + 60 * 60 * 1000,
+          refreshToken: "refresh-test",
+        },
+      });
 
-    await provider.handleRequest(createMessagesContext("session-pace-1"));
-    await provider.handleRequest(createMessagesContext("session-pace-2"));
+      const provider = createTestClaudeCodeProvider({
+        accounts: new StickyAccountPool(store),
+        baseUrl: "https://example.test",
+        pacing: { minGapMs: 20 },
+        usageRefresh: async () => ({ cachedUsageAt: Date.now() }),
+        fetch: async () => {
+          startedAt.push(Date.now());
+          return new Response(JSON.stringify({ id: "msg_test", type: "message" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        },
+      });
 
-    expect(startedAt).toHaveLength(2);
-    expect(startedAt[1]! - startedAt[0]!).toBeGreaterThanOrEqual(15);
+      await provider.handleRequest(createMessagesContext("session-pace-1"));
+      const paced = provider.handleRequest(createMessagesContext("session-pace-2"));
+      await vi.advanceTimersByTimeAsync(20);
+      await paced;
+
+      expect(startedAt).toHaveLength(2);
+      expect(startedAt[1]! - startedAt[0]!).toBe(20);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("drains streaming upstream responses instead of cancelling when enabled", async () => {
