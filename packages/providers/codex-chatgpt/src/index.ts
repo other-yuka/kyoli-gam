@@ -116,6 +116,14 @@ export interface CodexChatGPTProviderOptions {
 }
 
 export { startCodexOAuthLogin, type CodexOAuthTokens } from "./oauth";
+export {
+  consumeCodexRateLimitResetCredit,
+  fetchCodexRateLimitResetCredits,
+  type CodexRateLimitResetConsumeResult,
+  type CodexRateLimitResetCredit,
+  CodexRateLimitResetError,
+  type CodexRateLimitResetCreditsStatus,
+} from "./reset-credits";
 
 interface CodexCredential extends SelectedCredential {
   accountId?: string;
