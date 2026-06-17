@@ -84,6 +84,12 @@ export interface AccountPool {
 }
 
 type RuntimeAccountPoolOptions = Required<Omit<AccountPoolOptions, "stickySessionStore">>;
+type UsageTier = {
+  key: string;
+  utilization: number;
+  hasUtilization: boolean;
+  resetAt?: string;
+};
 
 const DEFAULT_PLAN_WEIGHTS: Record<string, number> = {
   max: 3,
@@ -92,6 +98,9 @@ const DEFAULT_PLAN_WEIGHTS: Record<string, number> = {
   free: 1,
 };
 const DEFAULT_WEIGHTED_SWITCH_MARGIN = 80;
+const QUOTA_TARGET_AT_RESET_PERCENT = 90;
+const FIVE_HOUR_WINDOW_MS = 5 * 60 * 60 * 1000;
+const SEVEN_DAY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 export class StickyAccountPool implements AccountPool {
   private readonly roundRobinCursorByPool = new Map<string, number>();
@@ -364,11 +373,12 @@ function scoreAccount(
   const maxUtilization = getMaxUtilization(account);
   const planWeight = readPlanWeight(account, options.planWeights);
   const usageScore = ((100 - maxUtilization) / 100) * 450 * planWeight;
+  const resetPaceScore = getResetPaceScore(account) * planWeight;
   const healthScore = Math.max(0, 250 - account.failureCount * 60);
   const freshnessScore = getFreshnessScore(account);
   const stickinessBonus = isSticky ? 120 : 0;
 
-  return usageScore + healthScore + freshnessScore + stickinessBonus;
+  return usageScore + resetPaceScore + healthScore + freshnessScore + stickinessBonus;
 }
 
 function getMaxUtilization(account: AccountRecord): number {
@@ -400,15 +410,59 @@ function readUsageUtilization(account: AccountRecord, key: string): number | und
   return window ? readNumber(window.utilization) : undefined;
 }
 
-function readUsageTiers(account: AccountRecord): Array<{ utilization: number }> {
+function readUsageTiers(account: AccountRecord): UsageTier[] {
   const usage = readRecord(account.metadata.cachedUsage) ?? readRecord(account.metadata.usage);
   if (!usage) return [];
 
   return Object.entries(usage)
     .filter(([key]) => key === "five_hour" || key === "seven_day" || key.startsWith("seven_day_"))
-    .map(([, value]) => readRecord(value))
-    .filter((tier): tier is Record<string, unknown> => Boolean(tier))
-    .map((tier) => ({ utilization: readNumber(tier.utilization) ?? 0 }));
+    .map(([key, value]) => ({ key, tier: readRecord(value) }))
+    .filter((item): item is { key: string; tier: Record<string, unknown> } => Boolean(item.tier))
+    .map(({ key, tier }) => {
+      const utilization = readNumber(tier.utilization);
+      return {
+        key,
+        utilization: utilization ?? 0,
+        hasUtilization: utilization !== undefined,
+        resetAt: readUsageWindowResetAt(tier),
+      };
+    });
+}
+
+function getResetPaceScore(account: AccountRecord): number {
+  const scores = readUsageTiers(account)
+    .map((tier) => scoreUsageResetPace(tier))
+    .filter((score): score is number => score !== undefined);
+
+  return scores.length > 0 ? Math.min(...scores) : 0;
+}
+
+function scoreUsageResetPace(tier: UsageTier): number | undefined {
+  const windowMs = usageWindowMs(tier.key);
+  const resetAt = tier.resetAt ? new Date(tier.resetAt).getTime() : Number.NaN;
+  if (!tier.hasUtilization || !windowMs || !Number.isFinite(resetAt)) return undefined;
+
+  const resetInMs = Math.max(0, resetAt - Date.now());
+  const elapsedRatio = clampRatio(1 - resetInMs / windowMs);
+  const targetUtilization = QUOTA_TARGET_AT_RESET_PERCENT * elapsedRatio;
+  const slack = targetUtilization - tier.utilization;
+
+  return slack >= 0
+    ? Math.min(120, slack * 3)
+    : Math.max(-160, slack * 4);
+}
+
+function usageWindowMs(key: string): number | undefined {
+  if (key === "five_hour") return FIVE_HOUR_WINDOW_MS;
+  if (key === "seven_day" || key.startsWith("seven_day_")) return SEVEN_DAY_WINDOW_MS;
+  return undefined;
+}
+
+function readUsageWindowResetAt(tier: Record<string, unknown>): string | undefined {
+  return readString(tier.reset_at) ??
+    readString(tier.resetAt) ??
+    readString(tier.resets_at) ??
+    readString(tier.resetsAt);
 }
 
 function readPlanWeight(
@@ -447,7 +501,16 @@ function readNumber(value: unknown): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+function readString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
 function clampPercent(value: number): number {
   if (!Number.isFinite(value)) return 100;
   return Math.max(0, Math.min(100, value));
+}
+
+function clampRatio(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(1, value));
 }
