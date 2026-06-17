@@ -32,6 +32,7 @@ type ProviderFilter = "all" | ProviderId;
 type AccountStateFilter = "all" | "ready" | "blocked" | "rate_limited" | "quota" | "auth" | "disabled";
 type LogStatusFilter = "all" | "success" | "failed" | "retry";
 type LogTimeframe = "all" | "1h" | "24h" | "7d";
+type AccountAction = "pause" | "reactivate" | "reset" | "reset-credit";
 
 interface HealthResponse {
   ok?: boolean;
@@ -140,7 +141,7 @@ type Command =
     label: string;
     meta: string;
     keywords: string;
-    icon: "nav" | "filter" | "pause" | "reactivate" | "reset" | "delete";
+    icon: "nav" | "filter" | "pause" | "reactivate" | "reset" | "reset-credit" | "delete";
     dangerous?: boolean;
     run(): void | Promise<void>;
   };
@@ -445,15 +446,34 @@ export function App() {
   );
   const performAccountAction = useCallback(async (
     account: AccountRecord,
-    action: "pause" | "reactivate" | "reset",
+    action: AccountAction,
   ) => {
-    const verb = action === "pause" ? "pause" : action === "reactivate" ? "reactivate" : "reset";
-    if (!window.confirm(`${verb} ${account.name}?`)) return;
-    await requestJson(`/admin/accounts/${encodeURIComponent(account.id)}/${action}`, {
-      method: "POST",
-      body: action === "reset" ? JSON.stringify({ enable: true }) : undefined,
-    });
-    await refresh("manual");
+    const accountId = encodeURIComponent(account.id);
+    const verb = action === "pause" ? "pause"
+      : action === "reactivate" ? "reactivate"
+      : action === "reset-credit" ? "redeem a Codex reset credit for"
+      : "reset";
+    const detail = action === "reset-credit"
+      ? " This consumes one available reset credit and clears the matching Codex quota window."
+      : "";
+    if (!window.confirm(`${verb} ${account.name}?${detail}`)) return;
+
+    try {
+      if (action === "reset-credit") {
+        await requestJson(`/admin/accounts/${accountId}/codex-reset`, {
+          method: "POST",
+        });
+      } else {
+        await requestJson(`/admin/accounts/${accountId}/${action}`, {
+          method: "POST",
+          body: action === "reset" ? JSON.stringify({ enable: true }) : undefined,
+        });
+      }
+      await refresh("manual");
+    } catch (caught) {
+      if (caught instanceof UnauthorizedError) return;
+      setError(caught instanceof Error ? caught.message : "Account action failed.");
+    }
   }, [refresh, requestJson]);
 
   const deleteStickySession = useCallback(async (session: StickySession) => {
@@ -541,6 +561,17 @@ export function App() {
         dangerous: true,
         run: () => performAccountAction(account, "reset"),
       },
+      ...(account.provider === "codex"
+        ? [{
+            id: `account:${account.id}:reset-credit`,
+            label: `Redeem reset credit for ${account.name}`,
+            meta: account.provider,
+            keywords: `${account.name} ${account.id} ${account.provider} codex reset credit redeem quota`,
+            icon: "reset-credit" as const,
+            dangerous: true,
+            run: () => performAccountAction(account, "reset-credit"),
+          }]
+        : []),
     ]);
   const sessionActions = data.sessions.slice(0, 30).map((session) => ({
     id: `session:${session.key}:delete`,
@@ -1519,7 +1550,7 @@ function InsightMetric({ label, value }: { label: string; value: string | number
 function AccountsTable(props: {
   accounts: AccountRecord[];
   status: AccountStatusSummary[];
-  onAction(account: AccountRecord, action: "pause" | "reactivate" | "reset"): Promise<void>;
+  onAction(account: AccountRecord, action: AccountAction): Promise<void>;
 }) {
   if (props.accounts.length === 0) return <EmptyPanel label="No accounts match this filter" />;
   const groups = groupAccountsByProvider(props.accounts, props.status);
@@ -1590,6 +1621,11 @@ function AccountsTable(props: {
                     <IconButton label="Reset failure state" onClick={() => void props.onAction(account, "reset")}>
                       <RotateCcw size={16} aria-hidden="true" />
                     </IconButton>
+                    {account.provider === "codex" ? (
+                      <IconButton label="Redeem Codex reset credit" onClick={() => void props.onAction(account, "reset-credit")}>
+                        <KeyRound size={16} aria-hidden="true" />
+                      </IconButton>
+                    ) : null}
                   </div>
                 </td>
               </tr>
@@ -1909,6 +1945,7 @@ function CommandIcon(props: { kind: Command["icon"]; dangerous?: boolean }) {
   const icon = props.kind === "pause" ? <PauseCircle size={16} aria-hidden="true" />
     : props.kind === "reactivate" ? <PlayCircle size={16} aria-hidden="true" />
     : props.kind === "reset" ? <RotateCcw size={16} aria-hidden="true" />
+    : props.kind === "reset-credit" ? <KeyRound size={16} aria-hidden="true" />
     : props.kind === "delete" ? <Trash2 size={16} aria-hidden="true" />
     : props.kind === "filter" ? <CircleDashed size={16} aria-hidden="true" />
     : <ArrowUpRight size={16} aria-hidden="true" />;

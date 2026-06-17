@@ -8,6 +8,7 @@
       "@kyoli-gam/gateway": ["../gateway/src/index.ts"],
       "@kyoli-gam/model-registry": ["../model-registry/src/index.ts"],
       "@kyoli-gam/provider-claude-code": ["../providers/claude-code/src/index.ts"],
+      "@kyoli-gam/provider-codex-chatgpt/reset-credits": ["../providers/codex-chatgpt/src/reset-credits.ts"],
       "@kyoli-gam/provider-codex-chatgpt": ["../providers/codex-chatgpt/src/index.ts"]
     },
     "esModuleInterop": true,

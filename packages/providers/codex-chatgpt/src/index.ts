@@ -1597,7 +1597,7 @@ async function refreshCodexUsageForAccount(input: {
   let credentials = input.account.credentials;
   let metadata = input.account.metadata;
 
-  if (!accessToken || !expiresAt || expiresAt <= Date.now() + TOKEN_EXPIRY_BUFFER_MS) {
+  if (!accessToken || !expiresAt || expiresAt <= Date.now() + TOKEN_EXPIRY_BUFFER_MS || (!chatgptAccountId && refreshToken)) {
     if (!refreshToken) {
       return {
         ok: false,

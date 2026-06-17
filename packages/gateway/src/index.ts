@@ -1,5 +1,6 @@
 import type {
   AccountCreateInput,
+  AccountRecord,
   AccountStore,
   AccountUpdateInput,
   GatewayConfig,
@@ -42,6 +43,14 @@ import {
   ModelsDevRegistrySource,
   toOpenAIModelList,
 } from "@kyoli-gam/model-registry";
+import {
+  CodexRateLimitResetError,
+  consumeCodexRateLimitResetCredit,
+  fetchCodexRateLimitResetCredits,
+  type CodexRateLimitResetConsumeResult,
+  type CodexRateLimitResetCredit,
+  type CodexRateLimitResetCreditsStatus,
+} from "@kyoli-gam/provider-codex-chatgpt/reset-credits";
 import {
   createUpgradeRequest,
   NodeGatewayWebSocket,
@@ -137,6 +146,7 @@ export function createGateway(options: GatewayOptions): Gateway {
         request,
         url,
         accounts,
+        options.providers,
         options.stickySessions,
         options.requestLogs,
         options.adminToken,
@@ -541,6 +551,7 @@ async function handleAdminRequest(
   request: Request,
   url: URL,
   accounts: AccountStore,
+  providers: ProviderAdapter[],
   stickySessions: StickySessionRegistry | undefined,
   requestLogs: RequestLogStore | undefined,
   adminToken: string | undefined,
@@ -697,6 +708,29 @@ async function handleAdminRequest(
     return jsonResponse(toPublicAccount(account), { status: 201 });
   }
 
+  const codexResetMatch = url.pathname.match(/^\/admin\/accounts\/([^/]+)\/codex-reset$/);
+  if (codexResetMatch) {
+    if (request.method !== "GET" && request.method !== "POST") {
+      return jsonResponse(
+        {
+          error: {
+            type: "method_not_allowed",
+            message: `${request.method} is not supported for ${url.pathname}.`,
+          },
+        },
+        { status: 405 },
+      );
+    }
+
+    return handleAdminCodexResetRequest({
+      accounts,
+      providers,
+      accountId: decodeURIComponent(codexResetMatch[1] ?? ""),
+      body: request.method === "POST" ? await readJsonObject(request) : undefined,
+      consume: request.method === "POST",
+    });
+  }
+
   const resetMatch = url.pathname.match(/^\/admin\/accounts\/([^/]+)\/reset$/);
   if (resetMatch && request.method === "POST") {
     const resetId = decodeURIComponent(resetMatch[1] ?? "");
@@ -770,6 +804,233 @@ async function handleAdminRequest(
     },
     { status: 405 },
   );
+}
+
+async function handleAdminCodexResetRequest(options: {
+  accounts: AccountStore;
+  providers: ProviderAdapter[];
+  accountId: string;
+  body: Record<string, unknown> | undefined;
+  consume: boolean;
+}): Promise<Response> {
+  const account = await options.accounts.get(options.accountId);
+  if (!account) {
+    return jsonResponse({ error: { type: "not_found", message: "Account not found." } }, { status: 404 });
+  }
+
+  if (account.provider !== "codex" || account.kind !== "oauth") {
+    return jsonResponse(
+      {
+        error: {
+          type: "invalid_request",
+          message: `Codex reset credits require a codex/oauth account, got ${account.provider}/${account.kind}.`,
+        },
+      },
+      { status: 400 },
+    );
+  }
+
+  let credential: Awaited<ReturnType<typeof resolveCodexResetAdminCredential>>;
+  try {
+    credential = await resolveCodexResetAdminCredential(options.accounts, options.providers, account);
+  } catch (error) {
+    return jsonResponse(
+      {
+        error: {
+          type: "codex_reset_unavailable",
+          message: error instanceof Error ? error.message : "Codex reset credit credential resolution failed.",
+        },
+      },
+      { status: 400 },
+    );
+  }
+
+  let credits: CodexRateLimitResetCreditsStatus;
+  try {
+    credits = await fetchCodexRateLimitResetCredits({
+      accessToken: credential.accessToken,
+      chatgptAccountId: credential.chatgptAccountId,
+    });
+  } catch (error) {
+    return codexResetUpstreamErrorResponse(error, "Codex reset credit status failed.");
+  }
+
+  if (!options.consume) {
+    return jsonResponse({
+      object: "codex_reset_credit_status",
+      account: toPublicAccount(credential.account),
+      credits: toPublicCodexResetCredits(credits),
+    });
+  }
+
+  const requestedCreditId = readString(options.body?.creditId) ?? readString(options.body?.credit_id);
+  const available = credits.credits.filter((credit) => credit.status === "available");
+  const target = requestedCreditId
+    ? available.find((credit) => credit.id === requestedCreditId)
+    : available[0];
+
+  if (!target) {
+    return jsonResponse(
+      {
+        object: "codex_reset_credit_redemption",
+        account: toPublicAccount(credential.account),
+        consumed: false,
+        reason: requestedCreditId
+          ? `credit_id not available: ${requestedCreditId}`
+          : "no available credits",
+        credits: toPublicCodexResetCredits(credits),
+      },
+      { status: 409 },
+    );
+  }
+
+  let result: CodexRateLimitResetConsumeResult;
+  try {
+    result = await consumeCodexRateLimitResetCredit({
+      accessToken: credential.accessToken,
+      chatgptAccountId: credential.chatgptAccountId,
+      creditId: target.id,
+    });
+  } catch (error) {
+    return codexResetUpstreamErrorResponse(error, "Codex reset credit consume failed.");
+  }
+
+  const resetAccount = await options.accounts.resetState(credential.account.id) ?? credential.account;
+  const usageRefresh = await refreshAccountUsageFromProvider(options.accounts, options.providers, resetAccount);
+  const finalAccount = usageRefresh.ok ? usageRefresh.account : resetAccount;
+
+  return jsonResponse({
+    object: "codex_reset_credit_redemption",
+    account: toPublicAccount(finalAccount),
+    consumed: true,
+    credit: toPublicCodexResetCredit(result.credit ?? target),
+    result: toPublicCodexResetConsumeResult(result),
+    usage_refresh: usageRefresh.ok
+      ? { ok: true }
+      : { ok: false, message: usageRefresh.message, status: usageRefresh.status },
+  });
+}
+
+async function resolveCodexResetAdminCredential(
+  accounts: AccountStore,
+  providers: ProviderAdapter[],
+  account: AccountRecord,
+): Promise<{ account: AccountRecord; accessToken: string; chatgptAccountId: string }> {
+  let current = account;
+  if (shouldRefreshCodexResetCredential(current)) {
+    const refresh = await refreshAccountUsageFromProvider(accounts, providers, current);
+    if (refresh.ok) current = refresh.account;
+  }
+
+  const accessToken = readString(current.credentials.accessToken);
+  const chatgptAccountId = readString(current.credentials.accountId) ?? readString(current.metadata.accountId);
+
+  if (!accessToken) {
+    throw new Error("Codex account has no access token and cannot list reset credits.");
+  }
+  if (!chatgptAccountId) {
+    throw new Error("Codex account has no ChatGPT account id for reset credit calls.");
+  }
+
+  return { account: current, accessToken, chatgptAccountId };
+}
+
+function shouldRefreshCodexResetCredential(account: AccountRecord): boolean {
+  return !readString(account.credentials.accessToken) ||
+    !readString(account.credentials.accountId) ||
+    isCredentialExpired(account.credentials.expiresAt);
+}
+
+function isCredentialExpired(value: unknown): boolean {
+  const expiresAt = readTimestampMs(value);
+  return expiresAt === undefined || expiresAt <= Date.now() + 60_000;
+}
+
+function readTimestampMs(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value < 10_000_000_000 ? value * 1000 : value;
+  }
+  if (typeof value !== "string" || value.length === 0) return undefined;
+  const numeric = Number(value);
+  if (Number.isFinite(numeric)) return numeric < 10_000_000_000 ? numeric * 1000 : numeric;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+async function refreshAccountUsageFromProvider(
+  accounts: AccountStore,
+  providers: ProviderAdapter[],
+  account: AccountRecord,
+): Promise<
+  | { ok: true; account: AccountRecord }
+  | { ok: false; message: string; status?: number }
+> {
+  const provider = providers.find((candidate) => candidate.id === account.provider && candidate.refreshUsage);
+  if (!provider?.refreshUsage) {
+    return { ok: false, message: `${account.provider} provider does not expose usage refresh.` };
+  }
+
+  const result = await provider.refreshUsage({ account });
+  if (!result.ok) {
+    return { ok: false, message: result.message, status: result.status };
+  }
+
+  const updated = await accounts.update(account.id, {
+    credentials: result.credentials ? { ...account.credentials, ...result.credentials } : account.credentials,
+    metadata: result.metadata ? { ...account.metadata, ...result.metadata } : account.metadata,
+  });
+  return { ok: true, account: updated ?? account };
+}
+
+function codexResetUpstreamErrorResponse(error: unknown, fallbackMessage: string): Response {
+  if (error instanceof CodexRateLimitResetError) {
+    return jsonResponse(
+      {
+        error: {
+          type: "codex_reset_upstream_failed",
+          message: error.message || fallbackMessage,
+          upstream_status: error.status,
+        },
+      },
+      { status: 502 },
+    );
+  }
+
+  return jsonResponse(
+    {
+      error: {
+        type: "codex_reset_failed",
+        message: error instanceof Error ? error.message : fallbackMessage,
+      },
+    },
+    { status: 500 },
+  );
+}
+
+function toPublicCodexResetCredits(status: CodexRateLimitResetCreditsStatus) {
+  return {
+    available_count: status.availableCount,
+    credits: status.credits.map(toPublicCodexResetCredit),
+  };
+}
+
+function toPublicCodexResetCredit(credit: CodexRateLimitResetCredit) {
+  return {
+    id: credit.id,
+    status: credit.status,
+    reset_type: credit.resetType,
+    title: credit.title,
+    granted_at: credit.grantedAt,
+    expires_at: credit.expiresAt,
+    redeemed_at: credit.redeemedAt,
+  };
+}
+
+function toPublicCodexResetConsumeResult(result: CodexRateLimitResetConsumeResult) {
+  return {
+    code: result.code,
+    windows_reset: result.windowsReset,
+  };
 }
 
 function createAccountStatusResponse(records: Awaited<ReturnType<AccountStore["list"]>>) {
