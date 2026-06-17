@@ -1,5 +1,11 @@
 # opencode-multi-account-core
 
+## 0.2.64
+
+### Patch Changes
+
+- [#102](https://github.com/other-yuka/kyoli-gam/pull/102) [`3d7669a`](https://github.com/other-yuka/kyoli-gam/commit/3d7669ad95da945d24a83d90d62fbfd22ac82430) Thanks [@other-yuka](https://github.com/other-yuka)! - Share reset-aware quota pacing for account routing so OpenCode plugins and kyoli core use the same canonical selection heuristic.
+
 ## 0.2.63
 
 ## 0.2.62
