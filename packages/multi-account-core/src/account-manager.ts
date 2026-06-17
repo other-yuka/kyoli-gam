@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readClaims, writeClaim, isClaimedByOther, type ClaimsMap } from "./claims";
 import { getConfig } from "./config";
+import { scoreQuotaResetPace, type QuotaRoutingWindow } from "./routing";
 import { getClearedOAuthBody } from "./utils";
 import type { AccountStore } from "./account-store";
 import type {
@@ -24,6 +25,11 @@ interface StickyBinding {
   accountUuid: string;
   updatedAt: number;
 }
+
+type ManagedUsageTier = QuotaRoutingWindow & {
+  utilization: number;
+  resetAt: string | null;
+};
 
 export interface ProfileData {
   email?: string;
@@ -242,8 +248,7 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       const usage = account.cachedUsage;
       if (!usage) return false;
 
-      const tiers = [usage.five_hour, usage.seven_day];
-      return tiers.some((tier) => tier != null && tier.utilization >= threshold);
+      return readUsageTiers(usage).some((tier) => tier.utilization >= threshold);
     }
 
     hasAnyUsableAccount(): boolean {
@@ -262,12 +267,10 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       if (!usage) return false;
 
       const now = Date.now();
-      const tiers = [usage.five_hour, usage.seven_day];
-      return tiers.some((tier) =>
-        tier != null
-        && tier.utilization >= 100
-        && tier.resets_at != null
-        && Date.parse(tier.resets_at) > now,
+      return readUsageTiers(usage).some((tier) =>
+        tier.utilization >= 100
+        && tier.resetAt != null
+        && Date.parse(tier.resetAt) > now,
       );
     }
 
@@ -309,11 +312,10 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
 
       const now = Date.now();
       const candidates: number[] = [];
-      const tiers = [usage.five_hour, usage.seven_day];
 
-      for (const tier of tiers) {
-        if (tier != null && tier.utilization >= 100 && tier.resets_at != null) {
-          const ms = Date.parse(tier.resets_at) - now;
+      for (const tier of readUsageTiers(usage)) {
+        if (tier.utilization >= 100 && tier.resetAt != null) {
+          const ms = Date.parse(tier.resetAt) - now;
           if (ms > 0) candidates.push(ms);
         }
       }
@@ -556,6 +558,7 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
     private calculateHybridScore(account: ManagedAccount, isActive: boolean, claims: ClaimsMap): number {
       const maxUtilization = Math.min(100, Math.max(0, this.getMaxUtilization(account)));
       const usageScore = ((100 - maxUtilization) / 100) * 450;
+      const resetPaceScore = scoreQuotaResetPace(readRoutingUsageTiers(account.cachedUsage));
 
       const maxFailures = Math.max(1, getProviderConfig().max_consecutive_auth_failures);
       const healthScore = Math.max(0, ((maxFailures - account.consecutiveAuthFailures) / maxFailures) * 250);
@@ -566,16 +569,14 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       const stickinessBonus = isActive ? 120 : 0;
       const claimPenalty = isClaimedByOtherProvider(claims, account.uuid) ? -200 : 0;
 
-      return usageScore + healthScore + freshnessScore + stickinessBonus + claimPenalty;
+      return usageScore + resetPaceScore + healthScore + freshnessScore + stickinessBonus + claimPenalty;
     }
 
     private getMaxUtilization(account: ManagedAccount): number {
       const usage = account.cachedUsage;
       if (!usage) return 65;
 
-      const tiers = [usage.five_hour, usage.seven_day];
-      const utilizations = tiers
-        .filter((tier): tier is NonNullable<typeof tier> => tier != null)
+      const utilizations = readUsageTiers(usage)
         .map((tier) => tier.utilization);
 
       return utilizations.length > 0 ? Math.max(...utilizations) : 65;
@@ -681,12 +682,12 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
     async applyUsageCache(uuid: string, usage: UsageLimits): Promise<void> {
       await this.store.mutateAccount(uuid, (account) => {
         const now = Date.now();
-        const exhaustedTierResetTimes = [usage.five_hour, usage.seven_day]
+        const exhaustedTierResetTimes = readUsageTiers(usage)
           .flatMap((tier) => {
-            if (tier == null || tier.utilization < 100 || tier.resets_at == null) {
+            if (tier.utilization < 100 || tier.resetAt == null) {
               return [];
             }
-            return [Date.parse(tier.resets_at)];
+            return [Date.parse(tier.resetAt)];
           })
           .filter((resetAt) => Number.isFinite(resetAt) && resetAt > now);
 
@@ -904,4 +905,31 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       return result;
     }
   };
+}
+
+function readUsageTiers(usage: UsageLimits | undefined): ManagedUsageTier[] {
+  if (!usage) return [];
+
+  return [
+    { key: "five_hour", tier: usage.five_hour },
+    { key: "seven_day", tier: usage.seven_day },
+  ].flatMap(({ key, tier }) =>
+    tier == null
+      ? []
+      : [{ key, utilization: tier.utilization, resetAt: tier.resets_at }]
+  );
+}
+
+function readRoutingUsageTiers(usage: UsageLimits | undefined): ManagedUsageTier[] {
+  if (!usage) return [];
+
+  const sonnetTier = usage.seven_day_sonnet == null
+    ? []
+    : [{
+      key: "seven_day_sonnet",
+      utilization: usage.seven_day_sonnet.utilization,
+      resetAt: usage.seven_day_sonnet.resets_at,
+    }];
+
+  return [...readUsageTiers(usage), ...sonnetTier];
 }

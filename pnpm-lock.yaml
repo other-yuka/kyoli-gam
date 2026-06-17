@@ -95,6 +95,9 @@ importers:
       better-sqlite3:
         specifier: ^12.10.1
         version: 12.10.1
+      opencode-multi-account-core:
+        specifier: workspace:*
+        version: link:../multi-account-core
     devDependencies:
       '@types/better-sqlite3':
         specifier: ^7.6.13

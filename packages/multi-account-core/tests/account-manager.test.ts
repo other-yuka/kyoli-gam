@@ -136,6 +136,44 @@ describe("core/account-manager", () => {
     expect(stickyAgain?.uuid).toBe(reboundUuid);
   });
 
+  test("hybrid selection prefers accounts under pace for their reset window", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-18T00:00:00.000Z"));
+    try {
+      await updateConfigField("account_selection_strategy", "hybrid");
+      const AccountManager = createAccountManagerForProvider({
+        providerAuthId: "openai",
+        isTokenExpired: () => false,
+        refreshToken: async () => ({ ok: false, permanent: false }),
+      });
+      const manager = await AccountManager.create(new AccountStore(), createAuth("a1"));
+      await manager.addAccount(createAuth("a2"));
+      const accounts = manager.getAccounts();
+      const overPace = accounts[0];
+      const underPace = accounts[1];
+      if (!overPace?.uuid || !underPace?.uuid) {
+        throw new Error("Expected two accounts");
+      }
+
+      await manager.applyUsageCache(overPace.uuid, {
+        five_hour: null,
+        seven_day: { utilization: 80, resets_at: new Date(Date.now() + 6 * 24 * 60 * 60 * 1000).toISOString() },
+        seven_day_sonnet: null,
+      });
+      await manager.applyUsageCache(underPace.uuid, {
+        five_hour: null,
+        seven_day: { utilization: 60, resets_at: new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString() },
+        seven_day_sonnet: null,
+      });
+
+      const selected = await manager.selectAccount();
+
+      expect(selected?.uuid).toBe(underPace.uuid);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   test("ensureValidToken refreshes expired token and syncs active account", async () => {
     const refreshToken = vi.fn(async () => ({
       ok: true,

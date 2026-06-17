@@ -5,6 +5,7 @@ import type {
   AccountSuccessInput,
   AccountUpdateInput,
 } from "./accounts";
+import { scoreQuotaResetPace, type QuotaRoutingWindow } from "opencode-multi-account-core";
 import {
   isCurrentlyAuthCoolingDown,
   isCurrentlyRateLimited,
@@ -98,9 +99,6 @@ const DEFAULT_PLAN_WEIGHTS: Record<string, number> = {
   free: 1,
 };
 const DEFAULT_WEIGHTED_SWITCH_MARGIN = 80;
-const QUOTA_TARGET_AT_RESET_PERCENT = 90;
-const FIVE_HOUR_WINDOW_MS = 5 * 60 * 60 * 1000;
-const SEVEN_DAY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 export class StickyAccountPool implements AccountPool {
   private readonly roundRobinCursorByPool = new Map<string, number>();
@@ -430,32 +428,7 @@ function readUsageTiers(account: AccountRecord): UsageTier[] {
 }
 
 function getResetPaceScore(account: AccountRecord): number {
-  const scores = readUsageTiers(account)
-    .map((tier) => scoreUsageResetPace(tier))
-    .filter((score): score is number => score !== undefined);
-
-  return scores.length > 0 ? Math.min(...scores) : 0;
-}
-
-function scoreUsageResetPace(tier: UsageTier): number | undefined {
-  const windowMs = usageWindowMs(tier.key);
-  const resetAt = tier.resetAt ? new Date(tier.resetAt).getTime() : Number.NaN;
-  if (!tier.hasUtilization || !windowMs || !Number.isFinite(resetAt)) return undefined;
-
-  const resetInMs = Math.max(0, resetAt - Date.now());
-  const elapsedRatio = clampRatio(1 - resetInMs / windowMs);
-  const targetUtilization = QUOTA_TARGET_AT_RESET_PERCENT * elapsedRatio;
-  const slack = targetUtilization - tier.utilization;
-
-  return slack >= 0
-    ? Math.min(120, slack * 3)
-    : Math.max(-160, slack * 4);
-}
-
-function usageWindowMs(key: string): number | undefined {
-  if (key === "five_hour") return FIVE_HOUR_WINDOW_MS;
-  if (key === "seven_day" || key.startsWith("seven_day_")) return SEVEN_DAY_WINDOW_MS;
-  return undefined;
+  return scoreQuotaResetPace(readUsageTiers(account).map(toQuotaRoutingWindow));
 }
 
 function readUsageWindowResetAt(tier: Record<string, unknown>): string | undefined {
@@ -505,12 +478,15 @@ function readString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+function toQuotaRoutingWindow(tier: UsageTier): QuotaRoutingWindow {
+  return {
+    key: tier.key,
+    utilization: tier.hasUtilization ? tier.utilization : undefined,
+    resetAt: tier.resetAt,
+  };
+}
+
 function clampPercent(value: number): number {
   if (!Number.isFinite(value)) return 100;
   return Math.max(0, Math.min(100, value));
-}
-
-function clampRatio(value: number): number {
-  if (!Number.isFinite(value)) return 0;
-  return Math.max(0, Math.min(1, value));
 }
