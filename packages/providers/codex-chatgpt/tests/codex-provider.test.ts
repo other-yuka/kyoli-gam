@@ -423,6 +423,48 @@ describe("createCodexChatGPTProvider", () => {
       .toBe(4);
   });
 
+  it("falls back to valid access tokens when account id backfill refresh fails", async () => {
+    let tokenRefreshCalled = false;
+    let sawChatGptAccountIdHeader = false;
+    const store = new MemoryAccountStore();
+    const account = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "valid-access-without-account-id",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "revoked-refresh",
+      },
+    });
+
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      tokenRefresh: async () => {
+        tokenRefreshCalled = true;
+        throw new Error("refresh unavailable");
+      },
+      fetch: async (_input, init) => {
+        sawChatGptAccountIdHeader = new Headers(init?.headers).has("ChatGPT-Account-Id");
+        return Response.json({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: { used_percent: 6, reset_after_seconds: 60 },
+            secondary_window: { used_percent: 12, reset_after_seconds: 120 },
+          },
+        });
+      },
+    });
+
+    const refreshed = await provider.refreshUsage?.({ account });
+
+    expect(refreshed?.ok).toBe(true);
+    if (!refreshed?.ok) throw new Error("usage refresh failed");
+    expect(tokenRefreshCalled).toBe(true);
+    expect(sawChatGptAccountIdHeader).toBe(false);
+    expect((refreshed.metadata?.cachedUsage as { five_hour?: { utilization: number } }).five_hour?.utilization)
+      .toBe(6);
+  });
+
   it("preserves native Codex originator and user-agent headers", async () => {
     let upstreamOriginator = "";
     let upstreamUserAgent = "";

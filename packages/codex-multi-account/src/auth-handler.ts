@@ -544,10 +544,14 @@ async function handleResetCreditForAccount(
   const effectiveClient = client ?? createMinimalClient();
   if (client) manager.setClient(client);
 
+  const needsAccountIdRefresh = needsResetCreditAccountIdRefresh(account);
+
   let lookupUuid = account.uuid;
-  if (!account.accessToken || isTokenExpired(account)) {
+  if (!account.accessToken || isTokenExpired(account) || needsAccountIdRefresh) {
     console.log(`\nRefreshing token for ${label}...\n`);
-    const result = await manager.ensureValidToken(account.uuid, effectiveClient);
+    const result = needsAccountIdRefresh
+      ? await manager.retryAuth(account.uuid, effectiveClient)
+      : await manager.ensureValidToken(account.uuid, effectiveClient);
     if (!result.ok) {
       console.log(`\n❌ ${label} cannot redeem reset credits: failed to refresh token.\n`);
       await showResetCreditToast(client, "error", `${label}: failed to refresh token`);
@@ -657,6 +661,14 @@ function printResetCreditStatus(
 
 function isAvailableResetCredit(credit: CodexRateLimitResetCredit): boolean {
   return credit.status?.toLowerCase() === "available";
+}
+
+export function needsResetCreditAccountIdRefresh(
+  account: Pick<ManagedAccount, "accountId" | "accessToken">,
+): boolean {
+  if (account.accountId) return false;
+  if (!account.accessToken) return true;
+  return !extractAccountId({ access_token: account.accessToken });
 }
 
 function formatResetCreditDate(value: string): string {

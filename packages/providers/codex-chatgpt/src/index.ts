@@ -1597,7 +1597,10 @@ async function refreshCodexUsageForAccount(input: {
   let credentials = input.account.credentials;
   let metadata = input.account.metadata;
 
-  if (!accessToken || !expiresAt || expiresAt <= Date.now() + TOKEN_EXPIRY_BUFFER_MS || (!chatgptAccountId && refreshToken)) {
+  const tokenNeedsRefresh = !accessToken || !expiresAt || expiresAt <= Date.now() + TOKEN_EXPIRY_BUFFER_MS;
+  const shouldBackfillAccountId = !tokenNeedsRefresh && !chatgptAccountId && Boolean(refreshToken);
+
+  if (tokenNeedsRefresh || shouldBackfillAccountId) {
     if (!refreshToken) {
       return {
         ok: false,
@@ -1611,30 +1614,36 @@ async function refreshCodexUsageForAccount(input: {
       error: codexOAuthRefreshFailureInput(error),
     }));
     if ("error" in refreshed) {
-      return {
-        ok: false,
-        status: refreshed.error.status,
-        message: refreshed.error.message,
-        reauthRequiredReason: "Codex OAuth token refresh failed",
+      if (shouldBackfillAccountId && accessToken) {
+        // Account id backfill is opportunistic for usage refresh. WHAM usage can
+        // still work without ChatGPT-Account-Id, so keep valid access-token
+        // accounts usable when the refresh token is temporarily unavailable.
+      } else {
+        return {
+          ok: false,
+          status: refreshed.error.status,
+          message: refreshed.error.message,
+          reauthRequiredReason: "Codex OAuth token refresh failed",
+        };
+      }
+    } else {
+      accessToken = refreshed.accessToken;
+      expiresAt = refreshed.expiresAt;
+      chatgptAccountId = refreshed.accountId ?? chatgptAccountId;
+      credentials = {
+        ...credentials,
+        accessToken,
+        expiresAt,
+        refreshToken: refreshed.refreshToken ?? refreshToken,
+        accountId: chatgptAccountId,
+      };
+      metadata = {
+        ...metadata,
+        email: refreshed.email ?? metadata.email,
+        accountId: refreshed.accountId ?? metadata.accountId,
+        planTier: refreshed.planTier ?? metadata.planTier,
       };
     }
-
-    accessToken = refreshed.accessToken;
-    expiresAt = refreshed.expiresAt;
-    chatgptAccountId = refreshed.accountId ?? chatgptAccountId;
-    credentials = {
-      ...credentials,
-      accessToken,
-      expiresAt,
-      refreshToken: refreshed.refreshToken ?? refreshToken,
-      accountId: chatgptAccountId,
-    };
-    metadata = {
-      ...metadata,
-      email: refreshed.email ?? metadata.email,
-      accountId: refreshed.accountId ?? metadata.accountId,
-      planTier: refreshed.planTier ?? metadata.planTier,
-    };
   }
 
   if (!accessToken) {

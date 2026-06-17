@@ -93,6 +93,10 @@ import {
   formatPoolBanner,
   formatPoolDoctorDetail,
 } from "./pool-status";
+import {
+  requiresCodexResetConsumeConfirmation,
+  shouldEmitJsonConfirmationRequired,
+} from "./codex-reset-command";
 
 const command = process.argv[2] ?? "help";
 const cliConfig = await loadCliConfig(process.argv, process.env);
@@ -731,17 +735,34 @@ async function handleCodexResetCommand(argv: string[], store: AccountStore): Pro
     printCodexResetCredit(target, "  ");
   }
 
-  if (!argv.includes("--dry-run") && !argv.includes("--yes") && !argv.includes("-y")) {
+  const jsonMode = argv.includes("--json");
+  const confirmationRequired = requiresCodexResetConsumeConfirmation(argv);
+
+  if (shouldEmitJsonConfirmationRequired(argv)) {
+    console.log(JSON.stringify({
+      account: codexResetAccountPayload(credential.account),
+      consumed: false,
+      error: {
+        type: "confirmation_required",
+        message: "Pass --yes to redeem a Codex reset credit in --json mode.",
+      },
+      credit: target,
+    }, null, 2));
+    process.exitCode = 1;
+    return;
+  }
+
+  if (confirmationRequired) {
     const confirmed = await promptYesNo("proceed? [y/N] ");
     if (!confirmed) {
-      if (!argv.includes("--json")) console.log("aborted.");
+      if (!jsonMode) console.log("aborted.");
       process.exitCode = 1;
       return;
     }
   }
 
   if (argv.includes("--dry-run")) {
-    if (!argv.includes("--json")) console.log("\n--dry-run: skipping POST.");
+    if (!jsonMode) console.log("\n--dry-run: skipping POST.");
     return;
   }
 
