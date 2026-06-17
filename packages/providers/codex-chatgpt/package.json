@@ -12,6 +12,12 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./reset-credits": {
+      "source": "./src/reset-credits.ts",
+      "types": "./dist/reset-credits.d.ts",
+      "import": "./dist/reset-credits.js",
+      "default": "./dist/reset-credits.js"
     }
   },
   "scripts": {

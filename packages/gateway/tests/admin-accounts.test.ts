@@ -3,6 +3,111 @@ import { MemoryAccountStore, MemoryRequestLogStore, StickyAccountPool } from "@k
 import { createGateway } from "../src";
 
 describe("admin accounts API", () => {
+  it("redeems one Codex reset credit and refreshes cached usage", async () => {
+    const accounts = new MemoryAccountStore();
+    const account = await accounts.create({
+      provider: "codex",
+      kind: "oauth",
+      name: "Codex reset target",
+      credentials: {
+        accessToken: "access-token",
+        accountId: "chatgpt-account",
+      },
+      metadata: {
+        cachedUsage: {
+          five_hour: { utilization: 0, resets_at: "2026-06-17T10:00:00.000Z" },
+          seven_day: { utilization: 95, resets_at: "2026-06-18T10:00:00.000Z" },
+          seven_day_sonnet: null,
+        },
+      },
+    });
+    const gateway = createGateway({
+      accounts,
+      providers: [{
+        id: "codex",
+        displayName: "Codex",
+        routes: [],
+        async listModels() {
+          return [];
+        },
+        async handleRequest() {
+          return new Response(null, { status: 501 });
+        },
+        async refreshUsage() {
+          return {
+            ok: true,
+            metadata: {
+              cachedUsage: {
+                five_hour: { utilization: 0, resets_at: "2026-06-17T10:00:00.000Z" },
+                seven_day: { utilization: 0, resets_at: "2026-06-24T10:00:00.000Z" },
+                seven_day_sonnet: null,
+              },
+              cachedUsageAt: 1781760000000,
+            },
+          };
+        },
+      }],
+    });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/wham/rate-limit-reset-credits")) {
+        expect(init?.headers).toEqual(expect.objectContaining({
+          authorization: "Bearer access-token",
+          "ChatGPT-Account-Id": "chatgpt-account",
+        }));
+        return Response.json({
+          available_count: 1,
+          credits: [{
+            id: "RateLimitResetCredit_test",
+            status: "available",
+            reset_type: "codex_rate_limits",
+          }],
+        });
+      }
+      if (url.endsWith("/wham/rate-limit-reset-credits/consume")) {
+        expect(init?.method).toBe("POST");
+        expect(JSON.parse(String(init?.body))).toMatchObject({
+          credit_id: "RateLimitResetCredit_test",
+          redeem_request_id: expect.any(String),
+        });
+        return Response.json({
+          code: "reset",
+          windows_reset: 1,
+          credit: {
+            id: "RateLimitResetCredit_test",
+            status: "redeemed",
+            redeemed_at: "2026-06-17T05:54:29.338356Z",
+          },
+        });
+      }
+      return Response.json({ error: { message: `unexpected fetch: ${url}` } }, { status: 500 });
+    };
+
+    try {
+      const response = await gateway.fetch(
+        new Request(`http://127.0.0.1:2021/admin/accounts/${account.id}/codex-reset`, {
+          method: "POST",
+        }),
+      );
+      const body = (await response.json()) as {
+        consumed: boolean;
+        result: { code: string; windows_reset: number };
+        account: { metadata?: Record<string, unknown>; credentials?: unknown };
+      };
+
+      expect(response.status).toBe(200);
+      expect(body.consumed).toBe(true);
+      expect(body.result).toMatchObject({ code: "reset", windows_reset: 1 });
+      expect(body.account.credentials).toBeUndefined();
+      expect(body.account.metadata?.cachedUsage).toMatchObject({
+        seven_day: { utilization: 0 },
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("protects admin routes when an admin token is configured", async () => {
     const gateway = createGateway({
       accounts: new MemoryAccountStore(),

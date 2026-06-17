@@ -274,6 +274,24 @@ describe("Kyoli dashboard", () => {
       );
     });
   });
+
+  it("redeems Codex reset credits from the account table after confirmation", async () => {
+    const fetchMock = createFetchMock();
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<App />);
+    await screen.findAllByText("Codex Primary");
+
+    await userEvent.click(screen.getByRole("button", { name: "Redeem Codex reset credit" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/admin/accounts/acct_codex_1/codex-reset",
+        expect.objectContaining({ method: "POST" }),
+      );
+    });
+  });
 });
 
 function createFetchMock(options: { unauthorized?: boolean; responses?: typeof defaultResponses } = {}) {
@@ -296,6 +314,16 @@ function createFetchMock(options: { unauthorized?: boolean; responses?: typeof d
     if (path === "/admin/sticky-sessions") return Response.json(responses.sessions);
     if (path === "/admin/accounts/acct_codex_1/pause" && init?.method === "POST") {
       return Response.json({ ...account, enabled: false });
+    }
+    if (path === "/admin/accounts/acct_codex_1/codex-reset" && init?.method === "POST") {
+      return Response.json({
+        object: "codex_reset_credit_redemption",
+        account,
+        consumed: true,
+        credit: { id: "RateLimitResetCredit_test", status: "redeemed" },
+        result: { code: "reset", windows_reset: 1 },
+        usage_refresh: { ok: true },
+      });
     }
     return Response.json({ error: { message: `Unhandled ${path}` } }, { status: 404 });
   });

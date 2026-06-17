@@ -5,7 +5,8 @@
     "moduleResolution": "bundler",
     "paths": {
       "@kyoli-gam/core": ["../core/src/index.ts"],
-      "@kyoli-gam/model-registry": ["../model-registry/src/index.ts"]
+      "@kyoli-gam/model-registry": ["../model-registry/src/index.ts"],
+      "@kyoli-gam/provider-codex-chatgpt/reset-credits": ["../providers/codex-chatgpt/src/reset-credits.ts"]
     },
     "esModuleInterop": true,
     "strict": true,

@@ -1,7 +1,7 @@
 import { defineConfig } from "tsup";
 
 export default defineConfig({
-  entry: ["src/index.ts"],
+  entry: ["src/index.ts", "src/reset-credits.ts"],
   format: ["esm"],
   dts: {
     compilerOptions: {

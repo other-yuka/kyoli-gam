@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { createInterface } from "node:readline";
 import {
   MemoryAccountStore,
   SQLiteRequestLogStore,
@@ -39,9 +40,13 @@ import {
   startClaudeCodeOAuthLogin,
 } from "@kyoli-gam/provider-claude-code";
 import {
+  consumeCodexRateLimitResetCredit,
   createCodexChatGPTProvider,
+  fetchCodexRateLimitResetCredits,
   refreshCodexOAuthToken,
   startCodexOAuthLogin,
+  type CodexRateLimitResetCredit,
+  type CodexRateLimitResetCreditsStatus,
 } from "@kyoli-gam/provider-codex-chatgpt";
 import { createGateway, serveGateway } from "@kyoli-gam/gateway";
 import {
@@ -88,6 +93,10 @@ import {
   formatPoolBanner,
   formatPoolDoctorDetail,
 } from "./pool-status";
+import {
+  requiresCodexResetConsumeConfirmation,
+  shouldEmitJsonConfirmationRequired,
+} from "./codex-reset-command";
 
 const command = process.argv[2] ?? "help";
 const cliConfig = await loadCliConfig(process.argv, process.env);
@@ -214,6 +223,8 @@ if (command === "serve") {
   } finally {
     login.stop();
   }
+} else if (command === "codex-reset") {
+  await handleCodexResetCommand(process.argv, new SQLiteAccountStore(cliConfig.databasePath));
 } else if (command === "accounts") {
   await handleAccountsCommand(process.argv, new SQLiteAccountStore(cliConfig.databasePath), {
     stickySessions: new SQLiteStickySessionStore(cliConfig.databasePath),
@@ -665,6 +676,278 @@ async function handleAccountsCommand(
   }
 
   printHelp();
+}
+
+async function handleCodexResetCommand(argv: string[], store: AccountStore): Promise<void> {
+  const { action, accountId } = parseCodexResetCommand(argv);
+  const account = await requireAccount(store, accountId);
+  const credential = await resolveCodexResetCredential(store, account);
+  const credits = await fetchCodexRateLimitResetCredits({
+    accessToken: credential.accessToken,
+    chatgptAccountId: credential.chatgptAccountId,
+  });
+
+  if (action === "status") {
+    const usage = await refreshCodexUsageForStatus(store, credential.account);
+    if (argv.includes("--json")) {
+      console.log(JSON.stringify(createCodexResetStatusPayload(credential.account, credits, usage), null, 2));
+      return;
+    }
+    printCodexResetStatus(credential.account, credits, usage);
+    return;
+  }
+
+  const available = credits.credits.filter((credit) => credit.status === "available");
+  const requestedCreditId = readStringFlag(argv, "--credit-id");
+  const target = requestedCreditId
+    ? available.find((credit) => credit.id === requestedCreditId)
+    : available[0];
+
+  if (!target) {
+    if (argv.includes("--json")) {
+      console.log(JSON.stringify({
+        account: codexResetAccountPayload(credential.account),
+        credits,
+        consumed: false,
+        reason: requestedCreditId
+          ? `credit_id not available: ${requestedCreditId}`
+          : "no available credits",
+      }, null, 2));
+      return;
+    }
+    console.log(requestedCreditId
+      ? `credit_id not found among available credits: ${requestedCreditId}`
+      : "No available Codex reset credits to redeem.");
+    return;
+  }
+
+  if (argv.includes("--json") && argv.includes("--dry-run")) {
+    console.log(JSON.stringify({
+      account: codexResetAccountPayload(credential.account),
+      dryRun: true,
+      credit: target,
+    }, null, 2));
+    return;
+  }
+
+  if (!argv.includes("--json")) {
+    console.log("about to redeem:");
+    printCodexResetCredit(target, "  ");
+  }
+
+  const jsonMode = argv.includes("--json");
+  const confirmationRequired = requiresCodexResetConsumeConfirmation(argv);
+
+  if (shouldEmitJsonConfirmationRequired(argv)) {
+    console.log(JSON.stringify({
+      account: codexResetAccountPayload(credential.account),
+      consumed: false,
+      error: {
+        type: "confirmation_required",
+        message: "Pass --yes to redeem a Codex reset credit in --json mode.",
+      },
+      credit: target,
+    }, null, 2));
+    process.exitCode = 1;
+    return;
+  }
+
+  if (confirmationRequired) {
+    const confirmed = await promptYesNo("proceed? [y/N] ");
+    if (!confirmed) {
+      if (!jsonMode) console.log("aborted.");
+      process.exitCode = 1;
+      return;
+    }
+  }
+
+  if (argv.includes("--dry-run")) {
+    if (!jsonMode) console.log("\n--dry-run: skipping POST.");
+    return;
+  }
+
+  const result = await consumeCodexRateLimitResetCredit({
+    accessToken: credential.accessToken,
+    chatgptAccountId: credential.chatgptAccountId,
+    creditId: target.id,
+  });
+  await store.resetState(credential.account.id);
+  const refreshed = await store.get(credential.account.id);
+  const usage = await refreshCodexUsageForStatus(store, refreshed ?? credential.account);
+
+  if (argv.includes("--json")) {
+    console.log(JSON.stringify({
+      account: codexResetAccountPayload(refreshed ?? credential.account),
+      consumed: true,
+      result,
+      usage,
+    }, null, 2));
+    return;
+  }
+
+  console.log(`\nconsumed. windows_reset=${result.windowsReset ?? "unknown"}, code=${result.code ?? "unknown"}, redeemed_at=${result.credit?.redeemedAt ?? "unknown"}`);
+  console.log("\nnew usage:");
+  printCodexUsageSummary(usage);
+}
+
+function parseCodexResetCommand(argv: string[]): { action: "status" | "consume"; accountId: string } {
+  const first = argv[3];
+  const action = first === "consume" ? "consume" : "status";
+  const accountId = action === "consume"
+    ? argv[4]
+    : first === "status"
+      ? argv[4]
+      : first;
+
+  if (!accountId || accountId.startsWith("--")) {
+    throw new Error("Usage: kyoli codex-reset [status] <account-id> [--json] | kyoli codex-reset consume <account-id> [--credit-id <id>] [--yes] [--dry-run] [--json]");
+  }
+  return { action, accountId };
+}
+
+async function resolveCodexResetCredential(
+  store: AccountStore,
+  account: AccountRecord,
+): Promise<{ account: AccountRecord; accessToken: string; chatgptAccountId: string }> {
+  if (account.provider !== "codex" || account.kind !== "oauth") {
+    throw new Error(`Codex reset credits require a codex/oauth account, got ${account.provider}/${account.kind}.`);
+  }
+
+  const refreshToken = readString(account.credentials.refreshToken);
+  let accessToken = readString(account.credentials.accessToken);
+  let chatgptAccountId = readString(account.credentials.accountId) ?? readString(account.metadata.accountId);
+  let current = account;
+
+  if ((!accessToken || isExpired(account.credentials.expiresAt) || !chatgptAccountId) && refreshToken) {
+    const refreshed = await refreshCodexOAuthToken(refreshToken);
+    accessToken = refreshed.accessToken;
+    chatgptAccountId = refreshed.accountId ?? chatgptAccountId;
+    current = await store.update(account.id, {
+      credentials: {
+        ...account.credentials,
+        accessToken,
+        refreshToken: refreshed.refreshToken ?? refreshToken,
+        expiresAt: refreshed.expiresAt,
+        accountId: chatgptAccountId,
+      },
+      metadata: {
+        ...account.metadata,
+        email: refreshed.email ?? account.metadata.email,
+        accountId: chatgptAccountId ?? account.metadata.accountId,
+        planTier: refreshed.planTier ?? account.metadata.planTier,
+      },
+    }) ?? account;
+  }
+
+  if (!accessToken) throw new Error("Codex account has no access token and cannot list reset credits.");
+  if (!chatgptAccountId) throw new Error("Codex account has no ChatGPT account id for reset credit calls.");
+  return { account: current, accessToken, chatgptAccountId };
+}
+
+async function refreshCodexUsageForStatus(
+  store: AccountStore,
+  account: AccountRecord,
+): Promise<{ ok: true; cachedUsage?: Record<string, unknown>; cachedUsageAt?: number } | { ok: false; message: string; status?: number }> {
+  const provider = createCodexChatGPTProvider();
+  const result = await provider.refreshUsage?.({ account });
+  if (!result) return { ok: false, message: "Codex provider does not expose usage refresh." };
+  if (!result.ok) return { ok: false, message: result.message, status: result.status };
+
+  const updated = await store.update(account.id, {
+    credentials: result.credentials ? { ...account.credentials, ...result.credentials } : account.credentials,
+    metadata: result.metadata ? { ...account.metadata, ...result.metadata } : account.metadata,
+  });
+  const metadata = updated?.metadata ?? { ...account.metadata, ...result.metadata };
+  return {
+    ok: true,
+    cachedUsage: readRecord(metadata.cachedUsage),
+    cachedUsageAt: readOptionalNumber(String(metadata.cachedUsageAt)),
+  };
+}
+
+function createCodexResetStatusPayload(
+  account: AccountRecord,
+  credits: CodexRateLimitResetCreditsStatus,
+  usage: Awaited<ReturnType<typeof refreshCodexUsageForStatus>>,
+): Record<string, unknown> {
+  return {
+    account: codexResetAccountPayload(account),
+    credits,
+    usage,
+  };
+}
+
+function codexResetAccountPayload(account: AccountRecord): Record<string, unknown> {
+  return {
+    id: account.id,
+    name: account.name,
+    provider: account.provider,
+    chatgpt_account_id: readString(account.credentials.accountId) ?? readString(account.metadata.accountId),
+  };
+}
+
+function printCodexResetStatus(
+  account: AccountRecord,
+  credits: CodexRateLimitResetCreditsStatus,
+  usage: Awaited<ReturnType<typeof refreshCodexUsageForStatus>>,
+): void {
+  console.log(`Codex account: ${account.name} (${account.id})`);
+  console.log(`banked credits: ${credits.availableCount} available`);
+  for (const credit of credits.credits) {
+    const flag = credit.status === "available" ? "●" : "○";
+    printCodexResetCredit(credit, `  ${flag} `);
+  }
+  if (credits.credits.length === 0) console.log("  none");
+
+  console.log("\ncurrent usage:");
+  printCodexUsageSummary(usage);
+  if (credits.availableCount > 0) {
+    console.log(`\nrun \`kyoli codex-reset consume ${account.id}\` to redeem one credit now.`);
+  }
+}
+
+function printCodexResetCredit(credit: CodexRateLimitResetCredit, prefix = ""): void {
+  console.log(`${prefix}${credit.id}  status=${credit.status ?? "unknown"}  granted=${credit.grantedAt ?? "unknown"}  expires=${credit.expiresAt ?? "unknown"}`);
+  if (credit.resetType) console.log(`${prefix}  reset_type=${credit.resetType}`);
+  if (credit.title) console.log(`${prefix}  «${credit.title}»`);
+}
+
+function printCodexUsageSummary(usage: Awaited<ReturnType<typeof refreshCodexUsageForStatus>>): void {
+  if (!usage.ok) {
+    console.log(`  unavailable: ${usage.message}`);
+    return;
+  }
+
+  const cachedUsage = usage.cachedUsage;
+  if (!cachedUsage) {
+    console.log("  no usage data");
+    return;
+  }
+
+  console.log(`  primary  : ${formatCodexUsageWindow(cachedUsage.five_hour)}`);
+  console.log(`  secondary: ${formatCodexUsageWindow(cachedUsage.seven_day)}`);
+}
+
+function formatCodexUsageWindow(value: unknown): string {
+  const window = readRecord(value);
+  if (!window) return "n/a";
+  const utilization = readOptionalNumber(String(window.utilization));
+  const resetAt = readString(window.resets_at);
+  const parts = [utilization === undefined ? "?% used" : `${utilization}% used`];
+  if (resetAt) parts.push(`resets in ${formatRelativeFuture(resetAt)}`);
+  return parts.join(", ");
+}
+
+function promptYesNo(message: string): Promise<boolean> {
+  if (!process.stdin.isTTY) return Promise.resolve(false);
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) => {
+    rl.question(message, (answer) => {
+      rl.close();
+      const normalized = answer.trim().toLowerCase();
+      resolve(normalized === "y" || normalized === "yes");
+    });
+  });
 }
 
 function printOpenCodeImportResult(
@@ -2448,6 +2731,8 @@ Usage:
   kyoli serve [--port 2021] [--config ~/.config/kyoli-gam/config.json]
   kyoli login codex [--manual|--headless|--no-browser] [--account <id>] [--force]
   kyoli login claude [--manual|--headless|--no-browser]
+  kyoli codex-reset [status] <account-id> [--json]
+  kyoli codex-reset consume <account-id> [--credit-id <id>] [--yes] [--dry-run] [--json]
 
   # Accounts
   kyoli accounts list [codex|claude-code]
