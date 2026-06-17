@@ -3,9 +3,15 @@ import { AccountManager } from "./account-manager";
 import { isTokenExpired } from "./token";
 import { getConfig, updateConfigField } from "./config";
 import { isTTY } from "./ui/ansi";
-import { showAuthMenu, showManageAccounts, showMethodSelect, showStrategySelect, printQuotaError, printQuotaReport } from "./ui/auth-menu";
-import { createMinimalClient, getAccountLabel } from "./utils";
+import { showAuthMenu, showManageAccounts, showMethodSelect, showResetCreditAccountSelect, showStrategySelect, printQuotaError, printQuotaReport } from "./ui/auth-menu";
+import { createMinimalClient, getAccountLabel, showToast as showPluginToast } from "./utils";
 import { fetchUsage, fetchProfile, derivePlanTier } from "./usage";
+import {
+  CodexRateLimitResetError,
+  consumeCodexRateLimitResetCredit,
+  fetchCodexRateLimitResetCredits,
+  type CodexRateLimitResetCredit,
+} from "./reset-credits";
 import { AccountStore } from "./account-store";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
@@ -408,6 +414,10 @@ async function runAccountManagementMenu(
         await handleCheckQuotas(manager, client);
         continue;
 
+      case "reset-credit":
+        await handleResetCreditMenu(manager, client);
+        continue;
+
       case "manage": {
         const result = await showManageAccounts(allAccounts);
         if (result.action === "back" || result.action === "cancel") continue;
@@ -506,6 +516,196 @@ async function handleCheckQuotas(manager: AccountManager, client?: PluginClient)
   }
 }
 
+async function handleResetCreditMenu(manager: AccountManager, client?: PluginClient): Promise<void> {
+  await manager.refresh();
+  const account = await showResetCreditAccountSelect(manager.getAccounts());
+  if (!account) return;
+
+  await handleResetCreditForAccount(manager, account, client);
+}
+
+async function handleResetCreditForAccount(
+  manager: AccountManager,
+  account: ManagedAccount,
+  client?: PluginClient,
+): Promise<void> {
+  const label = getAccountLabel(account);
+
+  if (!account.uuid) {
+    console.log(`\n❌ ${label} cannot redeem reset credits: missing account UUID.\n`);
+    return;
+  }
+
+  if (account.isAuthDisabled) {
+    console.log(`\n❌ ${label} auth is disabled. Re-authenticate before redeeming a reset credit.\n`);
+    return;
+  }
+
+  const effectiveClient = client ?? createMinimalClient();
+  if (client) manager.setClient(client);
+
+  let lookupUuid = account.uuid;
+  if (!account.accessToken || isTokenExpired(account)) {
+    console.log(`\nRefreshing token for ${label}...\n`);
+    const result = await manager.ensureValidToken(account.uuid, effectiveClient);
+    if (!result.ok) {
+      console.log(`\n❌ ${label} cannot redeem reset credits: failed to refresh token.\n`);
+      await showResetCreditToast(client, "error", `${label}: failed to refresh token`);
+      return;
+    }
+    lookupUuid = result.patch.uuid ?? lookupUuid;
+    await manager.refresh();
+  }
+
+  await manager.refresh();
+  const freshAccounts = manager.getAccounts();
+  const freshAccount = freshAccounts.find((candidate) => candidate.uuid === lookupUuid)
+    ?? freshAccounts.find((candidate) => candidate.uuid === account.uuid);
+
+  if (!freshAccount?.accessToken || !freshAccount.uuid) {
+    console.log(`\n❌ ${label} cannot redeem reset credits: no access token available.\n`);
+    return;
+  }
+
+  const chatgptAccountId = freshAccount.accountId
+    ?? extractAccountId({ access_token: freshAccount.accessToken });
+  if (!chatgptAccountId) {
+    console.log(`\n❌ ${label} cannot redeem reset credits: no ChatGPT account id available.\n`);
+    return;
+  }
+
+  try {
+    console.log(`\n🔎 Checking reset credits for ${getAccountLabel(freshAccount)}...\n`);
+    const status = await fetchCodexRateLimitResetCredits({
+      accessToken: freshAccount.accessToken,
+      chatgptAccountId,
+    });
+
+    printResetCreditStatus(freshAccount, status.credits, status.availableCount);
+
+    const credit = status.credits.find(isAvailableResetCredit);
+    if (!credit) {
+      console.log("No available reset credit found. Nothing was redeemed.\n");
+      await showResetCreditToast(client, "info", `${getAccountLabel(freshAccount)}: no available reset credit`);
+      return;
+    }
+
+    const shouldRedeem = await promptYesNo(
+      `Redeem "${credit.title ?? credit.id}" for ${getAccountLabel(freshAccount)} now? (y/n): `,
+    );
+    if (!shouldRedeem) {
+      console.log("\nReset credit redemption cancelled. Nothing was redeemed.\n");
+      return;
+    }
+
+    const redeemResult = await consumeCodexRateLimitResetCredit({
+      accessToken: freshAccount.accessToken,
+      chatgptAccountId,
+      creditId: credit.id,
+    });
+
+    await manager.markSuccess(freshAccount.uuid);
+    await manager.refresh();
+
+    console.log(`\n✅ Reset credit redeemed for ${getAccountLabel(freshAccount)}.`);
+    console.log(`   Credit: ${redeemResult.credit?.id ?? credit.id}`);
+    if (redeemResult.code) console.log(`   Code: ${redeemResult.code}`);
+    if (redeemResult.windowsReset !== undefined) console.log(`   Windows reset: ${redeemResult.windowsReset}`);
+    if (redeemResult.credit?.redeemedAt) console.log(`   Redeemed: ${formatResetCreditDate(redeemResult.credit.redeemedAt)}`);
+    console.log("");
+
+    await showResetCreditToast(client, "success", `${getAccountLabel(freshAccount)} reset credit redeemed`);
+    await refreshAndPrintQuotaAfterReset(manager, freshAccount, chatgptAccountId);
+  } catch (error) {
+    const message = error instanceof CodexRateLimitResetError
+      ? `${error.message} (HTTP ${error.status})`
+      : error instanceof Error ? error.message : "Unknown error";
+    console.log(`\n❌ Reset credit redemption failed for ${getAccountLabel(freshAccount)}: ${message}\n`);
+    await showResetCreditToast(client, "error", `${getAccountLabel(freshAccount)} reset credit redemption failed`);
+  }
+}
+
+function printResetCreditStatus(
+  account: ManagedAccount,
+  credits: CodexRateLimitResetCredit[],
+  availableCount: number,
+): void {
+  const label = getAccountLabel(account);
+  console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+  console.log(`  Reset credits: ${label}`);
+  if (account.email) {
+    console.log(`  📧 ${account.email}`);
+  }
+  console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+  console.log(`  Available: ${availableCount}`);
+
+  if (credits.length === 0) {
+    console.log("  No reset credits returned by the backend.\n");
+    return;
+  }
+
+  for (const credit of credits) {
+    const status = credit.status ?? "unknown";
+    const statusBadge = isAvailableResetCredit(credit) ? "available" : status;
+    const title = credit.title ?? credit.id;
+    console.log(`  • ${title} (${statusBadge})`);
+    if (credit.expiresAt) console.log(`    expires: ${formatResetCreditDate(credit.expiresAt)}`);
+    if (credit.redeemedAt) console.log(`    redeemed: ${formatResetCreditDate(credit.redeemedAt)}`);
+  }
+  console.log("");
+}
+
+function isAvailableResetCredit(credit: CodexRateLimitResetCredit): boolean {
+  return credit.status?.toLowerCase() === "available";
+}
+
+function formatResetCreditDate(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString();
+}
+
+async function refreshAndPrintQuotaAfterReset(
+  manager: AccountManager,
+  account: ManagedAccount,
+  chatgptAccountId: string,
+): Promise<void> {
+  if (!account.accessToken || !account.uuid) return;
+
+  const usageResult = await fetchUsage(account.accessToken, chatgptAccountId);
+  if (!usageResult.ok) {
+    console.log(`⚠️  Reset was redeemed, but quota refresh failed: ${usageResult.reason}\n`);
+    return;
+  }
+
+  await manager.applyUsageCache(account.uuid, usageResult.data);
+
+  const profileResult = fetchProfile(account.accessToken);
+  let email = account.email;
+  let planTier = account.planTier ?? "";
+
+  if (profileResult.ok) {
+    email = profileResult.data.email ?? email;
+    planTier = profileResult.data.planTier;
+  }
+
+  if ((!planTier || planTier === "free") && usageResult.planType) {
+    planTier = derivePlanTier(usageResult.planType);
+  }
+
+  await manager.applyProfileCache(account.uuid, { email, planTier });
+  printQuotaReport({ ...account, email, planTier, cachedUsage: usageResult.data }, usageResult.data);
+}
+
+async function showResetCreditToast(
+  client: PluginClient | undefined,
+  variant: "info" | "warning" | "success" | "error",
+  message: string,
+): Promise<void> {
+  if (!client) return;
+  await showPluginToast(client, message, variant);
+}
+
 async function handleLoadBalancing(): Promise<void> {
   const current = getConfig().account_selection_strategy;
   const selected = await showStrategySelect(current);
@@ -563,6 +763,10 @@ async function handleManageAction(
       }
       break;
     }
+
+    case "reset-credit":
+      await handleResetCreditForAccount(manager, account, client);
+      break;
   }
 
   return { triggerOAuth: false };

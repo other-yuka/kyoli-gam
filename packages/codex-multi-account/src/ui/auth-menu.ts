@@ -8,12 +8,13 @@ import type { AccountSelectionStrategy, ManagedAccount, UsageLimits } from "../t
 export type AuthMenuAction =
   | { type: "add" }
   | { type: "check-quotas" }
+  | { type: "reset-credit" }
   | { type: "manage" }
   | { type: "load-balancing" }
   | { type: "delete-all" }
   | { type: "cancel" };
 
-export type AccountAction = "back" | "toggle" | "delete" | "retry-auth" | "cancel";
+export type AccountAction = "back" | "toggle" | "delete" | "retry-auth" | "reset-credit" | "cancel";
 
 function formatRelativeTime(timestamp: number | undefined): string {
   if (!timestamp) return "never";
@@ -81,6 +82,7 @@ export async function showAuthMenu(accounts: ManagedAccount[]): Promise<AuthMenu
   const items: MenuItem<AuthMenuAction>[] = [
     { label: "Add new account", value: { type: "add" }, color: "green" },
     { label: "Check quotas", value: { type: "check-quotas" }, color: "cyan" },
+    { label: "Redeem reset credit", value: { type: "reset-credit" }, color: "yellow" },
     { label: "Manage accounts", value: { type: "manage" } },
     { label: "Load balancing", value: { type: "load-balancing" } },
     { label: "", value: { type: "cancel" }, separator: true },
@@ -122,6 +124,19 @@ export async function showManageAccounts(accounts: ManagedAccount[]): Promise<{ 
   return showAccountDetails(selected);
 }
 
+export async function showResetCreditAccountSelect(accounts: ManagedAccount[]): Promise<ManagedAccount | null> {
+  const items: MenuItem<ManagedAccount | null>[] = [
+    { label: "Back", value: null },
+    { label: "", value: null, separator: true },
+    ...accounts.map(buildAccountMenuItem),
+  ];
+
+  return await select(items, {
+    message: "Redeem Reset Credit",
+    subtitle: "Select an account",
+  }) ?? null;
+}
+
 async function showAccountDetails(account: ManagedAccount): Promise<{ action: AccountAction; account: ManagedAccount }> {
   const label = getAccountLabel(account);
   const status = getAccountStatus(account);
@@ -147,6 +162,8 @@ async function showAccountDetails(account: ManagedAccount): Promise<{ action: Ac
     items.push({ label: toggleLabel, value: "toggle", color: toggleColor });
 
     items.push({ label: "Re-authenticate", value: "retry-auth", color: "cyan" });
+
+    items.push({ label: "Redeem reset credit", value: "reset-credit", color: "yellow" });
 
     items.push({ label: "Delete this account", value: "delete", color: "red" });
 

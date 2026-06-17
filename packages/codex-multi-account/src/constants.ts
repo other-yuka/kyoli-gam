@@ -9,6 +9,8 @@ export const OPENAI_PROFILE_ENDPOINT = OPENAI_OAUTH_ADAPTER.profileEndpoint;
 
 export const CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses";
 export const CODEX_USAGE_ENDPOINT = "https://chatgpt.com/backend-api/wham/usage";
+export const CODEX_RATE_LIMIT_RESET_CREDITS_ENDPOINT = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
+export const CODEX_RATE_LIMIT_RESET_CONSUME_ENDPOINT = `${CODEX_RATE_LIMIT_RESET_CREDITS_ENDPOINT}/consume`;
 
 export const OAUTH_ISSUER = "https://auth.openai.com";
 export const OAUTH_PORT = 1455;
