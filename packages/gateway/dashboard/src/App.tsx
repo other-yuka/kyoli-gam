@@ -832,63 +832,94 @@ function OperationsOverview(props: {
   onLogStatusFilter(value: LogStatusFilter): void;
   onNavigate(section: SectionId): void;
 }) {
-  const blockedAccounts = props.accounts
+  const allBlockedAccounts = props.accounts
     .filter((account) => readAccountState(account).tone !== "good")
-    .sort((a, b) => resetTimestamp(a) - resetTimestamp(b))
-    .slice(0, 4);
-  const failedLogs = props.logs
-    .filter((log) => typeof log.finalStatus === "number" && log.finalStatus >= 400)
-    .slice(0, 4);
+    .sort((a, b) => resetTimestamp(a) - resetTimestamp(b));
+  const blockedAccounts = allBlockedAccounts.slice(0, 5);
+  const allFailedLogs = props.logs
+    .filter((log) => typeof log.finalStatus === "number" && log.finalStatus >= 400);
+  const failedLogs = allFailedLogs.slice(0, 5);
+  const retriedLogs = props.logs.filter((log) => log.retryCount > 0).length;
+  const stalePins = props.sessions.filter((session) => isStalePromptCache(session) || isOldRoutePin(session)).length;
   const nextReset = props.status
     .map((summary) => summary.next_reset_at ?? summary.next_auth_retry_at)
     .filter((value): value is string => Boolean(value))
     .sort((a, b) => Date.parse(a) - Date.parse(b))[0];
+  const readyTone = props.stats.ready > 0 && props.stats.failures === 0 ? "good" : props.stats.ready > 0 ? "warn" : "bad";
+  const headline = props.stats.ready > 0
+    ? props.stats.failures > 0
+      ? "Traffic can route, but failures need triage"
+      : "Traffic is ready to route"
+    : "No ready account capacity";
+  const actionCount = allBlockedAccounts.length + allFailedLogs.length + stalePins;
+  const scopeLabel = props.accounts.length === 0
+    ? "No accounts in scope"
+    : `${props.stats.ready}/${props.stats.accounts} ready accounts`;
 
   return (
-    <section id="overview" className="grid min-w-0 scroll-mt-36 gap-3 lg:grid-cols-[minmax(0,1.25fr)_minmax(340px,0.75fr)]">
-      <div className="min-w-0 rounded-lg bg-white p-4 shadow-[0_1px_2px_rgba(23,33,27,0.08),0_12px_36px_rgba(23,33,27,0.08)]">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-          <div>
-            <div className="text-xs font-semibold uppercase tracking-[0.08em] text-[#116a61]">Overview</div>
-            <h2 className="balanced-text mt-1 text-xl font-semibold">What needs attention</h2>
+    <section id="overview" className="grid min-w-0 scroll-mt-36 gap-4 xl:grid-cols-[minmax(0,1.55fr)_minmax(340px,0.7fr)]">
+      <div className="min-w-0 rounded-2xl bg-[#17211b] p-5 text-white shadow-[0_18px_50px_rgba(23,33,27,0.18)]">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="min-w-0">
+            <div className="text-xs font-semibold uppercase tracking-[0.12em] text-white/55">Command center</div>
+            <h2 className="balanced-text mt-2 text-2xl font-semibold tracking-[-0.02em]">{headline}</h2>
+            <p className="pretty-text mt-2 max-w-2xl text-sm leading-6 text-white/62">
+              Focused on the few signals that change routing decisions: ready capacity, blocked accounts, failed requests, and stale route pins.
+            </p>
           </div>
-          <div className="text-sm text-[#59645d]">
-            {nextReset ? `Next reset ${relativeTime(nextReset)}` : "No pending reset window"}
-          </div>
+          <StatusPill tone={readyTone}>{scopeLabel}</StatusPill>
         </div>
 
-        <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <button type="button" className="focus-ring rounded-lg bg-[#eef1e7] p-3 text-left transition-transform duration-150 active:scale-[0.96]" onClick={() => props.onNavigate("accounts")}>
-            <div className="text-xs text-[#59645d]">Capacity</div>
-            <div className="numeric mt-1 text-2xl font-semibold">{props.stats.ready}/{props.stats.accounts}</div>
-            <div className="mt-1 text-xs text-[#59645d]">ready accounts</div>
-          </button>
-          <button type="button" className="focus-ring rounded-lg bg-[#fff8e6] p-3 text-left transition-transform duration-150 active:scale-[0.96]" onClick={() => {
-            props.onAccountFilter("blocked");
-            props.onNavigate("accounts");
-          }}>
-            <div className="text-xs text-[#7a4d00]">Blocked</div>
-            <div className="numeric mt-1 text-2xl font-semibold text-[#7a4d00]">{props.stats.blocked}</div>
-            <div className="mt-1 text-xs text-[#7a4d00]/75">rate/quota/auth</div>
-          </button>
-          <button type="button" className="focus-ring rounded-lg bg-[#eef1e7] p-3 text-left transition-transform duration-150 active:scale-[0.96]" onClick={() => props.onNavigate("sessions")}>
-            <div className="text-xs text-[#59645d]">Sticky sessions</div>
-            <div className="numeric mt-1 text-2xl font-semibold">{props.sessions.length}</div>
-            <div className="mt-1 text-xs text-[#59645d]">active bindings</div>
-          </button>
-          <button type="button" className="focus-ring rounded-lg bg-[#ffe4df] p-3 text-left transition-transform duration-150 active:scale-[0.96]" onClick={() => {
-            props.onLogStatusFilter("failed");
-            props.onNavigate("logs");
-          }}>
-            <div className="text-xs text-[#b42318]">Recent failures</div>
-            <div className="numeric mt-1 text-2xl font-semibold text-[#b42318]">{props.stats.failures}</div>
-            <div className="mt-1 text-xs text-[#b42318]/75">{props.stats.successRate}% success</div>
-          </button>
+        <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <CommandMetric
+            label="Ready pool"
+            value={`${props.stats.ready}/${props.stats.accounts}`}
+            detail="eligible now"
+            tone={props.stats.ready > 0 ? "good" : "bad"}
+            onClick={() => props.onNavigate("accounts")}
+          />
+          <CommandMetric
+            label="Needs operator"
+            value={actionCount}
+            detail="accounts, failures, pins"
+            tone={actionCount > 0 ? "warn" : "good"}
+            onClick={() => {
+              if (allBlockedAccounts.length > 0) {
+                props.onAccountFilter("blocked");
+                props.onNavigate("accounts");
+              } else if (allFailedLogs.length > 0) {
+                props.onLogStatusFilter("failed");
+                props.onNavigate("logs");
+              } else if (stalePins > 0) {
+                props.onNavigate("sessions");
+              } else {
+                props.onAccountFilter("all");
+                props.onNavigate("accounts");
+              }
+            }}
+          />
+          <CommandMetric
+            label="Failed requests"
+            value={props.stats.failures}
+            detail={`${props.stats.successRate}% success`}
+            tone={props.stats.failures > 0 ? "bad" : "good"}
+            onClick={() => {
+              props.onLogStatusFilter("failed");
+              props.onNavigate("logs");
+            }}
+          />
+          <CommandMetric
+            label="Next reset"
+            value={nextReset ? relativeTime(nextReset) : "unknown"}
+            detail={nextReset ? formatLocalClock(nextReset) : "no reset signal"}
+            tone={nextReset && isResetSoon(nextReset) ? "warn" : "neutral"}
+            onClick={() => props.onNavigate("accounts")}
+          />
         </div>
 
-        <div className="mt-4 grid items-start gap-3 lg:grid-cols-2">
-          <AttentionList
-            title="Blocked accounts"
+        <div className="mt-5 grid items-start gap-3 lg:grid-cols-2">
+          <OperatorQueue
+            title="Account triage"
             empty="No blocked accounts in this provider scope"
             items={blockedAccounts.map((account) => ({
               id: account.id,
@@ -897,29 +928,103 @@ function OperationsOverview(props: {
               meta: joinMeta([readAccountState(account).label, readPlan(account)]),
               detail: account.rateLimitResetAt ? `reset ${relativeTime(account.rateLimitResetAt)}` : account.lastFailureMessage ?? "needs review",
             }))}
-            onClick={() => props.onNavigate("accounts")}
+            onClick={() => {
+              props.onAccountFilter("blocked");
+              props.onNavigate("accounts");
+            }}
           />
-          <AttentionList
-            title="Failed requests"
-            empty="No failed requests in the current log window"
+          <OperatorQueue
+            title="Request triage"
+            empty={retriedLogs > 0 ? `${retriedLogs} retried request${retriedLogs === 1 ? "" : "s"}, no hard failures` : "No failed requests in the current log window"}
             items={failedLogs.map((log) => ({
               id: log.requestId,
               provider: log.provider,
               label: requestRouteLabel(log),
               meta: joinMeta([displayModelName(log.model), log.retryCount > 0 ? `${log.retryCount} retries` : undefined]),
-              detail: log.events.find((event) => event.message)?.message ?? `${log.finalStatus ?? "error"} · ${relativeTime(log.startedAt)}`,
+              detail: requestLogErrorMessage(log) ?? `${log.finalStatus ?? "error"} · ${relativeTime(log.startedAt)}`,
             }))}
-            onClick={() => props.onNavigate("logs")}
+            onClick={() => {
+              props.onLogStatusFilter(failedLogs.length > 0 ? "failed" : retriedLogs > 0 ? "retry" : "all");
+              props.onNavigate("logs");
+            }}
           />
         </div>
       </div>
 
       <div className="grid min-w-0 content-start gap-3">
-        {props.status.length > 0 ? props.status.map((summary) => (
-          <ProviderOpsCard key={summary.provider} summary={summary} />
-        )) : <EmptyPanel label="No provider capacity data yet" />}
+        <div className="rounded-2xl bg-white p-4 shadow-[0_1px_2px_rgba(23,33,27,0.08),0_12px_36px_rgba(23,33,27,0.08)]">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#116a61]">Provider readiness</div>
+              <div className="mt-1 text-sm text-[#59645d]">Per-provider capacity and blockers.</div>
+            </div>
+            <StatusPill tone={stalePins > 0 ? "warn" : "good"}>{stalePins > 0 ? `${stalePins} stale pins` : "pins clean"}</StatusPill>
+          </div>
+          <div className="mt-3 grid gap-3">
+            {props.status.length > 0 ? props.status.map((summary) => (
+              <ProviderOpsCard key={summary.provider} summary={summary} />
+            )) : <EmptyPanel label="No provider capacity data yet" />}
+          </div>
+        </div>
       </div>
     </section>
+  );
+}
+
+function CommandMetric(props: {
+  label: string;
+  value: string | number;
+  detail: string;
+  tone: "good" | "warn" | "bad" | "neutral";
+  onClick(): void;
+}) {
+  const toneClass = props.tone === "good"
+    ? "bg-[#dff3ee] text-[#0f5f57]"
+    : props.tone === "warn"
+      ? "bg-[#fff1c2] text-[#7a4d00]"
+      : props.tone === "bad"
+        ? "bg-[#ffe4df] text-[#b42318]"
+        : "bg-white/10 text-white";
+  return (
+    <button
+      type="button"
+      className={`focus-ring min-h-[108px] rounded-xl p-3 text-left shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)] transition-transform duration-150 active:scale-[0.96] ${toneClass}`}
+      onClick={props.onClick}
+    >
+      <div className="text-xs font-medium opacity-75">{props.label}</div>
+      <div className="numeric mt-2 text-2xl font-semibold tracking-[-0.02em]">{props.value}</div>
+      <div className="mt-1 text-xs opacity-70">{props.detail}</div>
+    </button>
+  );
+}
+
+function OperatorQueue(props: {
+  title: string;
+  empty: string;
+  items: Array<{ id: string; provider?: ProviderId; label: string; meta?: string; detail: string }>;
+  onClick(): void;
+}) {
+  return (
+    <button type="button" className="focus-ring min-w-0 rounded-xl bg-white/[0.07] p-3 text-left shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)] transition-transform duration-150 active:scale-[0.96]" onClick={props.onClick}>
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-sm font-semibold text-white">{props.title}</div>
+        <div className="numeric text-xs text-white/45">{props.items.length}</div>
+      </div>
+      <div className="mt-2 grid gap-2">
+        {props.items.length === 0 ? (
+          <div className="rounded-lg bg-white/[0.06] px-3 py-2 text-sm text-white/58">{props.empty}</div>
+        ) : props.items.map((item) => (
+          <div key={item.id} className="min-w-0 rounded-lg bg-white p-2.5 text-[#17211b] shadow-[0_1px_2px_rgba(0,0,0,0.16)]">
+            <div className="flex min-w-0 items-center gap-2">
+              {item.provider ? <ProviderIcon provider={item.provider} size={16} /> : null}
+              <div className="truncate text-sm font-medium">{item.label}</div>
+            </div>
+            {item.meta ? <div className="mt-0.5 truncate text-xs text-[#59645d]">{item.meta}</div> : null}
+            <div className="mt-0.5 truncate text-xs text-[#7a4d00]">{item.detail}</div>
+          </div>
+        ))}
+      </div>
+    </button>
   );
 }
 
@@ -956,32 +1061,6 @@ function MiniStat({ label, value }: { label: string; value: number }) {
   );
 }
 
-function AttentionList(props: {
-  title: string;
-  empty: string;
-  items: Array<{ id: string; provider?: ProviderId; label: string; meta?: string; detail: string }>;
-  onClick(): void;
-}) {
-  return (
-    <button type="button" className="focus-ring min-w-0 rounded-lg bg-[#f7f8f3] p-3 text-left transition-transform duration-150 active:scale-[0.96]" onClick={props.onClick}>
-      <div className="text-sm font-semibold">{props.title}</div>
-      <div className="mt-2 grid gap-2">
-        {props.items.length === 0 ? (
-          <div className="text-sm text-[#59645d]">{props.empty}</div>
-        ) : props.items.map((item) => (
-          <div key={item.id} className="min-w-0 rounded-md bg-white p-2 shadow-[0_1px_2px_rgba(23,33,27,0.08)]">
-            <div className="flex min-w-0 items-center gap-2">
-              {item.provider ? <ProviderIcon provider={item.provider} size={16} /> : null}
-              <div className="truncate text-sm font-medium">{item.label}</div>
-            </div>
-            {item.meta ? <div className="mt-0.5 truncate text-xs text-[#59645d]">{item.meta}</div> : null}
-            <div className="mt-0.5 truncate text-xs text-[#7a4d00]">{item.detail}</div>
-          </div>
-        ))}
-      </div>
-    </button>
-  );
-}
 
 function AccountFilters(props: {
   query: string;
@@ -1248,23 +1327,46 @@ function RequestTrafficPanel({
 }: {
   insights: TrafficInsights;
 }) {
+  const failureTone = insights.failures > 0 ? "bad" : "good";
+  const retryTone = insights.retried > 0 ? "warn" : "good";
   return (
-    <article className="mt-3 min-w-0 rounded-lg bg-[#17211b] p-4 text-white shadow-[0_12px_36px_rgba(23,33,27,0.16)]">
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <div className="text-sm text-white/60">Traffic health</div>
-          <div className="numeric mt-1 text-3xl font-semibold">{insights.successRate}%</div>
-          <div className="mt-1 text-sm text-white/60">success across recent gateway traffic</div>
+    <article className="mt-3 min-w-0 rounded-2xl bg-white p-4 shadow-[0_1px_2px_rgba(23,33,27,0.08),0_12px_36px_rgba(23,33,27,0.08)]">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0">
+          <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#116a61]">Request signal</div>
+          <div className="mt-1 flex flex-wrap items-end gap-x-3 gap-y-1">
+            <div className="numeric text-3xl font-semibold tracking-[-0.02em] text-[#17211b]">{insights.successRate}%</div>
+            <div className="pb-1 text-sm text-[#59645d]">successful in the current filtered window</div>
+          </div>
+          <p className="pretty-text mt-2 max-w-2xl text-sm text-[#59645d]">
+            Kept intentionally small: use this panel to spot failed routes and retry pressure, then drill into the request table below.
+          </p>
         </div>
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-          <InsightMetric label="Requests" value={insights.total} />
-          <InsightMetric label="Retried" value={`${insights.retryRate}%`} />
-          <InsightMetric label="P50" value={insights.p50Ms == null ? "-" : formatDuration(insights.p50Ms)} />
-          <InsightMetric label="P95" value={insights.p95Ms == null ? "-" : formatDuration(insights.p95Ms)} />
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:min-w-[420px]">
+          <SignalMetric label="Requests" value={insights.total} tone="neutral" />
+          <SignalMetric label="Failures" value={insights.failures} tone={failureTone} />
+          <SignalMetric label="Retried" value={`${insights.retryRate}%`} tone={retryTone} />
+          <SignalMetric label="Median" value={insights.p50Ms == null ? "-" : formatDuration(insights.p50Ms)} tone="neutral" />
         </div>
       </div>
       <UsageGraph buckets={insights.buckets} />
     </article>
+  );
+}
+
+function SignalMetric({ label, value, tone }: { label: string; value: string | number; tone: "good" | "warn" | "bad" | "neutral" }) {
+  const className = tone === "good"
+    ? "bg-[#dff3ee] text-[#116a61]"
+    : tone === "warn"
+      ? "bg-[#fff1c2] text-[#7a4d00]"
+      : tone === "bad"
+        ? "bg-[#ffe4df] text-[#b42318]"
+        : "bg-[#eef1e7] text-[#17211b]";
+  return (
+    <div className={`rounded-xl p-3 ${className}`}>
+      <div className="numeric text-lg font-semibold">{value}</div>
+      <div className="mt-1 text-xs opacity-70">{label}</div>
+    </div>
   );
 }
 
@@ -1497,31 +1599,31 @@ function UsageGraph({ buckets }: { buckets: UsageBucket[] }) {
   const max = Math.max(1, ...buckets.map((bucket) => bucket.total));
   return (
     <div className="mt-5 min-w-0">
-      <div className="rounded-lg bg-white/[0.06] p-3 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)]">
-        <div className="mb-3 flex flex-wrap gap-3 text-xs text-white/60">
+      <div className="rounded-xl bg-[#f7f8f3] p-3 shadow-[inset_0_0_0_1px_rgba(23,33,27,0.08)]">
+        <div className="mb-3 flex flex-wrap gap-3 text-xs text-[#59645d]">
           <span className="inline-flex items-center gap-1"><span className="size-2 rounded-full bg-[#35c46f]" />Requests</span>
           <span className="inline-flex items-center gap-1"><span className="size-2 rounded-full bg-[#f2b84b]" />Retries</span>
           <span className="inline-flex items-center gap-1"><span className="size-2 rounded-full bg-[#ef604d]" />Failures</span>
         </div>
-        <div className="flex h-36 items-end gap-1">
+        <div className="flex h-32 items-end gap-1">
         {buckets.map((bucket) => (
           <div key={bucket.label} className="flex min-w-0 flex-1 flex-col items-center gap-2">
-            <div className="flex h-28 w-full items-end rounded-t-md bg-white/[0.04]" title={`${bucket.label}: ${bucket.total} requests, ${bucket.retried} retried, ${bucket.failed} failed`}>
+            <div className="flex h-24 w-full items-end rounded-t-md bg-[#e9eee4]" title={`${bucket.label}: ${bucket.total} requests, ${bucket.retried} retried, ${bucket.failed} failed`}>
               <div className="grid w-full items-end">
                 <div
-                  className="w-full rounded-t-md bg-[#35c46f] shadow-[0_0_16px_rgba(53,196,111,0.22)]"
-                  style={{ height: `${Math.max(6, (bucket.total / max) * 112)}px`, gridArea: "1 / 1" }}
+                  className="w-full rounded-t-md bg-[#35c46f] shadow-[0_0_16px_rgba(53,196,111,0.18)]"
+                  style={{ height: `${Math.max(6, (bucket.total / max) * 96)}px`, gridArea: "1 / 1" }}
                 />
                 {bucket.retried > 0 ? (
                   <div
                     className="w-full rounded-t-md bg-[#f2b84b]"
-                    style={{ height: `${Math.max(4, (bucket.retried / max) * 112)}px`, gridArea: "1 / 1" }}
+                    style={{ height: `${Math.max(4, (bucket.retried / max) * 96)}px`, gridArea: "1 / 1" }}
                   />
                 ) : null}
                 {bucket.failed > 0 ? (
                   <div
                     className="w-full rounded-t-md bg-[#ef604d]"
-                    style={{ height: `${Math.max(4, (bucket.failed / max) * 112)}px`, gridArea: "1 / 1" }}
+                    style={{ height: `${Math.max(4, (bucket.failed / max) * 96)}px`, gridArea: "1 / 1" }}
                   />
                 ) : null}
               </div>
@@ -1530,7 +1632,7 @@ function UsageGraph({ buckets }: { buckets: UsageBucket[] }) {
         ))}
         </div>
       </div>
-      <div className="mt-2 flex justify-between text-[10px] text-white/45">
+      <div className="mt-2 flex justify-between text-[10px] text-[#8a948d]">
         <span>{buckets[0]?.label ?? "-"}</span>
         <span>{buckets[buckets.length - 1]?.label ?? "-"}</span>
       </div>
@@ -1538,14 +1640,6 @@ function UsageGraph({ buckets }: { buckets: UsageBucket[] }) {
   );
 }
 
-function InsightMetric({ label, value }: { label: string; value: string | number }) {
-  return (
-    <div className="rounded-lg bg-white/10 p-3">
-      <div className="numeric text-lg font-semibold">{value}</div>
-      <div className="mt-1 text-xs text-white/55">{label}</div>
-    </div>
-  );
-}
 
 function AccountsTable(props: {
   accounts: AccountRecord[];

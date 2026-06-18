@@ -108,9 +108,10 @@ describe("Kyoli dashboard", () => {
   it("renders provider summaries and account rows from admin data", async () => {
     render(<App />);
 
-    expect(await screen.findByText("What needs attention")).toBeTruthy();
+    expect(await screen.findByText("Command center")).toBeTruthy();
+    expect(await screen.findByText("Traffic is ready to route")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Usage" })).toBeNull();
-    expect(screen.getByText("Traffic health")).toBeTruthy();
+    expect(screen.getByText("Request signal")).toBeTruthy();
     expect(screen.getByText("Account pool health")).toBeTruthy();
     expect(screen.getByText("Quota coverage")).toBeTruthy();
     expect(screen.getByText("Account controls")).toBeTruthy();
