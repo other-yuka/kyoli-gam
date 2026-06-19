@@ -437,8 +437,8 @@ export function App() {
     };
   }, [filteredAccounts, filteredLogs]);
   const trafficInsights = useMemo(
-    () => buildTrafficInsights(filteredLogs, filteredAccounts, filteredSessions, accountById),
-    [accountById, filteredAccounts, filteredLogs, filteredSessions],
+    () => buildTrafficInsights(visibleLogs, filteredAccounts, filteredSessions, accountById),
+    [accountById, filteredAccounts, filteredSessions, visibleLogs],
   );
   const quotaEntries = useMemo(
     () => buildAccountQuotaEntries(filteredAccounts),

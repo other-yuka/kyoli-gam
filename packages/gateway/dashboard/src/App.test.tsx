@@ -244,6 +244,45 @@ describe("Kyoli dashboard", () => {
     expect(screen.queryByText("WebSocket response.create model discovered after account selection.")).toBeNull();
   });
 
+  it("scopes request signal metrics to active log filters", async () => {
+    const responses = structuredClone(defaultResponses);
+    responses.logs.data = [
+      responses.logs.data[0],
+      {
+        ...responses.logs.data[0],
+        requestId: "req_failed",
+        route: "/v1/hidden",
+        finalStatus: 500,
+        retryCount: 1,
+        startedAt: "2026-05-15T00:00:03.000Z",
+        completedAt: "2026-05-15T00:00:04.000Z",
+        events: [{
+          ...responses.logs.data[0].events[0],
+          id: 2,
+          requestId: "req_failed",
+          route: "/v1/hidden",
+          status: 500,
+          message: "hidden route failed",
+          createdAt: "2026-05-15T00:00:04.000Z",
+        }],
+      },
+    ] as typeof responses.logs.data;
+    vi.stubGlobal("fetch", createFetchMock({ responses }));
+
+    render(<App />);
+
+    const requestSignal = await screen.findByText("Request signal");
+    const panel = requestSignal.closest("article");
+    expect(panel).toBeTruthy();
+    expect(within(panel!).getAllByText("50%").length).toBeGreaterThan(0);
+
+    await userEvent.type(screen.getByPlaceholderText("Search route, request id, model, session, account..."), "/v1/responses");
+
+    expect(await screen.findByText("1 of 2 grouped requests · 100% success")).toBeTruthy();
+    expect(within(panel!).getByText("100%")).toBeTruthy();
+    expect(within(panel!).queryByText("50%")).toBeNull();
+  });
+
   it("opens the command palette with the keyboard shortcut and filters commands", async () => {
     render(<App />);
     await screen.findAllByText("Codex Primary");
