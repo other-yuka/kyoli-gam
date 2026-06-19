@@ -16,6 +16,7 @@ const BILLING_SEED = "59cf53e54c78";
 const templateMetadata = getClaudeCodeTemplateMetadata();
 const templateHeaders = templateMetadata.headerValues;
 const CLAUDE_CODE_VERSION = templateMetadata.ccVersion ?? "2.1.137";
+const CCH_REMOVED_VERSION = "2.1.183";
 
 export const CLAUDE_FABLE_MODEL_ID = "claude-fable-5";
 export const CLAUDE_FABLE_1M_MODEL_ID = `${CLAUDE_FABLE_MODEL_ID}[1m]`;
@@ -215,7 +216,30 @@ export function composeClaudeCodeBillingSystemEntry(
   cch = "00000",
 ): string {
   const buildTag = computeClaudeCodeBuildTag(firstUserMessage, version);
-  return `x-anthropic-billing-header: cc_version=${version}.${buildTag}; cc_entrypoint=sdk-cli; cch=${cch};`;
+  const base = `x-anthropic-billing-header: cc_version=${version}.${buildTag}; cc_entrypoint=sdk-cli;`;
+  return claudeCodeBillingUsesCch(version) ? `${base} cch=${cch};` : base;
+}
+
+function claudeCodeBillingUsesCch(version: string): boolean {
+  const comparison = compareSemver(version, CCH_REMOVED_VERSION);
+  return comparison === null || comparison < 0;
+}
+
+function compareSemver(left: string, right: string): number | null {
+  const leftParts = parseSemver(left);
+  const rightParts = parseSemver(right);
+  if (!leftParts || !rightParts) return null;
+  for (let index = 0; index < leftParts.length; index += 1) {
+    const diff = leftParts[index]! - rightParts[index]!;
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+function parseSemver(version: string): [number, number, number] | null {
+  const match = /^(\d+)\.(\d+)\.(\d+)/.exec(version);
+  if (!match) return null;
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
 }
 
 // Claude Code caches the two system blocks above, plus the tools prefix and

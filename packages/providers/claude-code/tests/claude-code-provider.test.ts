@@ -99,6 +99,11 @@ describe("OpenCode shared Claude Code helpers", () => {
     expect(composeClaudeCodeBillingSystemEntry("hello reviewer", "2.1.137")).toBe(
       `x-anthropic-billing-header: cc_version=2.1.137.${tag}; cc_entrypoint=sdk-cli; cch=00000;`,
     );
+
+    const tagWithoutCch = computeClaudeCodeBuildTag("hello reviewer", "2.1.183");
+    expect(composeClaudeCodeBillingSystemEntry("hello reviewer", "2.1.183")).toBe(
+      `x-anthropic-billing-header: cc_version=2.1.183.${tagWithoutCch}; cc_entrypoint=sdk-cli;`,
+    );
   });
 
   it("stamps deterministic cch only for verified Claude Code seeds", () => {
@@ -427,7 +432,7 @@ describe("createClaudeCodeProvider", () => {
     const billingText = (upstreamBody as { system: Array<{ text: string }> }).system[0]?.text ?? "";
     expect(billingText).toContain("x-anthropic-billing-header:");
     const escapedVersion = getClaudeCodeTemplateMetadata().ccVersion?.replace(/\./g, "\\.");
-    expect(billingText).toMatch(new RegExp(`cc_version=${escapedVersion}\\.[0-9a-f]{3}; cc_entrypoint=sdk-cli; cch=[0-9a-f]{5};`));
+    expect(billingText).toMatch(new RegExp(`cc_version=${escapedVersion}\\.[0-9a-f]{3}; cc_entrypoint=sdk-cli;(?: cch=[0-9a-f]{5};)?`));
     const userId = JSON.parse((upstreamBody as { metadata: { user_id: string } }).metadata.user_id) as {
       account_uuid?: string;
       device_id?: string;

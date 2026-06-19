@@ -2110,7 +2110,7 @@ function readMetadataUserId(body: Record<string, unknown>): Record<string, strin
 }
 
 function isBillingHeader(value: string | undefined): boolean {
-  return Boolean(value?.match(/^x-anthropic-billing-header: cc_version=\d+\.\d+\.\d+\.[0-9a-f]{3}; cc_entrypoint=sdk-cli; cch=[0-9a-f]{5};$/));
+  return Boolean(value?.match(/^x-anthropic-billing-header: cc_version=\d+\.\d+\.\d+\.[0-9a-f]{3}; cc_entrypoint=sdk-cli;(?: cch=[0-9a-f]{5};)?$/));
 }
 
 function stripCacheControlClone(value: unknown): unknown {

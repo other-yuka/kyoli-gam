@@ -103,7 +103,7 @@ function assertSystemInvariants(body: JsonRecord, context: string): void {
     assertNonEmptyString(block.text, `${context}: system[${index}].text`);
   });
   expect(String(system[0]?.text), `${context}: billing slot`).toMatch(
-    /^x-anthropic-billing-header: cc_version=.+; cc_entrypoint=sdk-cli; cch=00000;$/,
+    /^x-anthropic-billing-header: cc_version=.+; cc_entrypoint=sdk-cli;(?: cch=00000;)?$/,
   );
 }
 
