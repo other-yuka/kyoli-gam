@@ -2003,11 +2003,18 @@ function compareSystemBlocks(
 ): DoctorCheck {
   const captured = readSystemTexts(capturedBody);
   const kyoli = readSystemTexts(kyoliBody);
-  const ok = isBillingHeader(captured[0]) &&
-    isBillingHeader(kyoli[0]) &&
-    captured[1] === kyoli[1] &&
+  const capturedBilling = readBillingHeader(captured[0]);
+  const kyoliBilling = readBillingHeader(kyoli[0]);
+  const cchDetail = `cch=${capturedBilling?.hasCch ?? "invalid"}/${kyoliBilling?.hasCch ?? "invalid"}`;
+  if (!capturedBilling || !kyoliBilling) {
+    return check("system blocks", false, `captured=${captured.length} blocks kyoli=${kyoli.length} blocks ${cchDetail}`);
+  }
+  if (capturedBilling.hasCch !== kyoliBilling.hasCch) {
+    return check("system blocks", false, `captured=${captured.length} blocks kyoli=${kyoli.length} blocks ${cchDetail}`);
+  }
+  const ok = captured[1] === kyoli[1] &&
     scrubClaudeSystemPrompt(captured[2] ?? "") === scrubClaudeSystemPrompt(kyoli[2] ?? "");
-  return check(ok ? "system blocks" : "system blocks", ok, `captured=${captured.length} blocks kyoli=${kyoli.length} blocks`);
+  return check("system blocks", ok, `captured=${captured.length} blocks kyoli=${kyoli.length} blocks ${cchDetail}`);
 }
 
 function compareToolNames(
@@ -2109,8 +2116,10 @@ function readMetadataUserId(body: Record<string, unknown>): Record<string, strin
   }
 }
 
-function isBillingHeader(value: string | undefined): boolean {
-  return Boolean(value?.match(/^x-anthropic-billing-header: cc_version=\d+\.\d+\.\d+\.[0-9a-f]{3}; cc_entrypoint=sdk-cli; cch=[0-9a-f]{5};$/));
+function readBillingHeader(value: string | undefined): { hasCch: boolean } | null {
+  const match = value?.match(/^x-anthropic-billing-header: cc_version=\d+\.\d+\.\d+\.[0-9a-f]{3}; cc_entrypoint=sdk-cli;(?: cch=([0-9a-f]{5});)?$/);
+  if (!match) return null;
+  return { hasCch: Boolean(match[1]) };
 }
 
 function stripCacheControlClone(value: unknown): unknown {

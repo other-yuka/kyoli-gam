@@ -186,10 +186,13 @@ describe("upstream-request", () => {
     const messages = result.messages as Array<{ role: string; content: unknown }>;
     const toolResultMessage = messages[2] as { content: Array<{ content: string }> };
     const truncated = toolResultMessage.content[0]?.content ?? "";
+    const billingHeader = systemBlocks[0]?.text ?? "";
+    const billingHeaderPrefix = `x-anthropic-billing-header: cc_version=${DEFAULT_TEMPLATE_CC_VERSION}.`;
 
     expect(systemBlocks).toHaveLength(3);
-    expect(systemBlocks[0]?.text).toContain("x-anthropic-billing-header:");
-    expect(systemBlocks[0]?.text).toMatch(new RegExp(`^x-anthropic-billing-header: cc_version=${DEFAULT_TEMPLATE_CC_VERSION.replace(/\./g, "\\.")}\\.[a-f0-9]{3}; cc_entrypoint=sdk-cli; cch=00000;$`));
+    expect(billingHeader).toContain("x-anthropic-billing-header:");
+    expect(billingHeader.startsWith(billingHeaderPrefix)).toBe(true);
+    expect(billingHeader.slice(billingHeaderPrefix.length)).toMatch(/^[a-f0-9]{3}; cc_entrypoint=sdk-cli;(?: cch=00000;)?$/);
     expect(systemBlocks[1]).toMatchObject({
       text: template.agent_identity,
       cache_control: { type: "ephemeral" },
@@ -541,7 +544,7 @@ describe("upstream-request", () => {
   test("buildUpstreamRequest filters already-injected upstream system entries before rebuilding blocks", () => {
     const template = createTemplate();
     const firstUserMessage = "hello reviewer";
-    const billingHeader = `x-anthropic-billing-header: cc_version=${template.cc_version}.${computeBuildTag(firstUserMessage, template.cc_version!)}; cc_entrypoint=sdk-cli; cch=00000;`;
+    const billingHeader = `x-anthropic-billing-header: cc_version=${template.cc_version}.${computeBuildTag(firstUserMessage, template.cc_version!)}; cc_entrypoint=sdk-cli;`;
 
     const result = buildUpstreamRequest({
       model: "claude-sonnet-4-6",
