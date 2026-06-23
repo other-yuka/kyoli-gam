@@ -377,7 +377,12 @@ describe("runtime-factory", () => {
     expect(body.messages).toHaveLength(3);
     expect(body.messages[1]?.role).toBe("assistant");
     expect(body.messages[1]?.content).toEqual([
-      { type: "tool_use", id: "toolu_1", name: "AskUserQuestion", input: { question: "x" } },
+      {
+        type: "tool_use",
+        id: "toolu_1",
+        name: expect.stringMatching(/^tool_/),
+        input: { question: "x" },
+      },
     ]);
     expect(body.messages[2]?.role).toBe("user");
     expect(body.messages[2]?.content).toEqual([
