@@ -40,7 +40,7 @@ afterAll(() => {
 
 describe("detectCliVersion", () => {
   test("tracks the bundled fingerprint label", () => {
-    expect(DEFAULT_CLI_VERSION).toBe("2.1.185");
+    expect(DEFAULT_CLI_VERSION).toBe("2.1.186");
   });
 
   test("returns parsed semver when the Claude binary is available", () => {
