@@ -574,6 +574,22 @@ describe("fingerprint-capture", () => {
     }
   });
 
+  test("bundled template preserves interactive-only Claude Code tools omitted by headless capture", async () => {
+    const { cleanup } = await setupTestEnv();
+
+    try {
+      const template = loadTemplate();
+
+      expect(template.tool_names).toEqual(expect.arrayContaining([
+        "AskUserQuestion",
+        "EnterPlanMode",
+        "ExitPlanMode",
+      ]));
+    } finally {
+      await cleanup();
+    }
+  });
+
   test("loadTemplate rejects cached data with matching _schemaVersion but missing tool input_schema", async () => {
     const { dir, cleanup } = await setupTestEnv();
 
@@ -782,6 +798,23 @@ describe("fingerprint-capture", () => {
         tools: [{ name: "Agent", input_schema: { type: "object", properties: {} } }],
         tool_names: ["Agent"],
       })).toBe(false);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("matchesBundledClaudeCodeFingerprint allows headless captures without interactive-only tools", async () => {
+    const { cleanup } = await setupTestEnv();
+
+    try {
+      const bundled = loadTemplate();
+      const interactiveOnlyTools = new Set(["AskUserQuestion", "EnterPlanMode", "ExitPlanMode"]);
+      const headlessCapture = {
+        ...bundled,
+        tools: bundled.tools.filter((tool) => !interactiveOnlyTools.has(tool.name)),
+      };
+
+      expect(matchesBundledClaudeCodeFingerprint(headlessCapture, bundled)).toBe(true);
     } finally {
       await cleanup();
     }

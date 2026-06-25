@@ -23,6 +23,11 @@ const DEFAULT_CAPTURE_TIMEOUT_MS = 10_000;
 const CACHE_FILE_NAME = "fingerprint-cache.json";
 const CORRUPT_SUFFIX = ".corrupt";
 const LOOPBACK_HOST = "127.0.0.1";
+const INTERACTIVE_ONLY_TOOL_NAMES = new Set([
+  "AskUserQuestion",
+  "EnterPlanMode",
+  "ExitPlanMode",
+]);
 const STATIC_HEADER_NAMES = [
   "accept",
   "anthropic-beta",
@@ -167,12 +172,16 @@ export function matchesBundledClaudeCodeFingerprint(
   template: TemplateData,
   reference: TemplateData = bundledTemplate,
 ): boolean {
-  const expectedToolNames = reference.tool_names;
-  const actualToolNames = template.tools.map((tool) => tool.name);
+  const expectedToolNames = comparableHeadlessToolNames(reference.tool_names);
+  const actualToolNames = comparableHeadlessToolNames(template.tools.map((tool) => tool.name));
   const matchesExpectedTools = actualToolNames.length === expectedToolNames.length
     && expectedToolNames.every((name, index) => actualToolNames[index] === name);
 
   return template.agent_identity === reference.agent_identity && matchesExpectedTools;
+}
+
+function comparableHeadlessToolNames(toolNames: string[]): string[] {
+  return toolNames.filter((toolName) => !INTERACTIVE_ONLY_TOOL_NAMES.has(toolName));
 }
 
 function loadBundledTemplate(): TemplateData {

@@ -10,16 +10,28 @@ import {
 import { loadBundledFingerprint } from "./_bundled-fingerprint.mjs";
 
 const captureTimeoutMs = Number(process.env.FINGERPRINT_CAPTURE_TIMEOUT_MS ?? "10000");
+const INTERACTIVE_ONLY_TOOL_NAMES = new Set([
+  "AskUserQuestion",
+  "EnterPlanMode",
+  "ExitPlanMode",
+]);
+
+function comparableHeadlessToolNames(toolNames) {
+  return toolNames.filter((toolName) => !INTERACTIVE_ONLY_TOOL_NAMES.has(toolName));
+}
 
 function summarizeDiff(expected, actual) {
   const expectedTools = expected.tool_names ?? [];
   const actualTools = actual.tool_names ?? [];
+  const comparableExpectedTools = comparableHeadlessToolNames(expectedTools);
+  const comparableActualTools = comparableHeadlessToolNames(actualTools);
   return {
     agentIdentityMatches: expected.agent_identity === actual.agent_identity,
     systemPromptMatches: expected.system_prompt === actual.system_prompt,
-    toolNamesMatch: JSON.stringify(expectedTools) === JSON.stringify(actualTools),
+    toolNamesMatch: JSON.stringify(comparableExpectedTools) === JSON.stringify(comparableActualTools),
     expectedToolCount: expectedTools.length,
     actualToolCount: actualTools.length,
+    interactiveOnlyExpectedToolCount: expectedTools.length - comparableExpectedTools.length,
     expectedCcVersion: expected.cc_version ?? null,
     actualCcVersion: actual.cc_version ?? null,
     expectedHeaderOrderLength: expected.header_order?.length ?? 0,
