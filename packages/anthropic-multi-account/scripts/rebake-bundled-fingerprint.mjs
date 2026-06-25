@@ -14,6 +14,11 @@ import {
 } from "./_bundled-fingerprint.mjs";
 
 const captureTimeoutMs = Number(process.env.FINGERPRINT_CAPTURE_TIMEOUT_MS ?? "10000");
+const INTERACTIVE_ONLY_TOOL_NAMES = new Set([
+  "AskUserQuestion",
+  "EnterPlanMode",
+  "ExitPlanMode",
+]);
 
 function formatToolDiff(template, pinnedTemplate) {
   const actualToolNames = template.tools.map((tool) => tool.name);
@@ -49,6 +54,30 @@ function assertClaudeCodeFingerprint(template, pinnedTemplate) {
   );
 }
 
+function preserveInteractiveOnlyTools(template, pinnedTemplate) {
+  const existingToolNames = new Set(template.tools.map((tool) => tool.name));
+  const preservedTools = pinnedTemplate.tools.filter(
+    (tool) => INTERACTIVE_ONLY_TOOL_NAMES.has(tool.name) && !existingToolNames.has(tool.name),
+  );
+
+  if (preservedTools.length === 0) {
+    return template;
+  }
+
+  const tools = [...template.tools, ...preservedTools]
+    .sort((left, right) => left.name.localeCompare(right.name));
+
+  console.warn(
+    `Preserved ${preservedTools.length} interactive-only Claude Code tool(s) omitted by headless capture: ${preservedTools.map((tool) => tool.name).join(", ")}`,
+  );
+
+  return {
+    ...template,
+    tools,
+    tool_names: tools.map((tool) => tool.name),
+  };
+}
+
 async function main() {
   if (process.env.ALLOW_FINGERPRINT_OVERWRITE !== "1") {
     throw new Error(
@@ -63,7 +92,7 @@ async function main() {
 
   const pinnedBundled = await loadBundledFingerprint();
   const scrubbed = scrubTemplate(live, { dropMcpTools: true });
-  const bundled = prepareBundledTemplate(scrubbed);
+  const bundled = prepareBundledTemplate(preserveInteractiveOnlyTools(scrubbed, pinnedBundled));
   assertClaudeCodeFingerprint(bundled, pinnedBundled);
   const residualHits = findUserPathHits(JSON.stringify(bundled));
   if (residualHits.length > 0) {

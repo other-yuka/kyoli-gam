@@ -60,6 +60,12 @@ const STATIC_HEADER_NAMES = [
   "x-stainless-timeout",
 ] as const;
 
+const INTERACTIVE_ONLY_TOOL_NAMES = new Set([
+  "AskUserQuestion",
+  "EnterPlanMode",
+  "ExitPlanMode",
+]);
+
 export async function checkClaudeCodeTemplateDrift(options: {
   timeoutMs?: number;
 } = {}): Promise<ClaudeCodeTemplateDriftReport> {
@@ -99,7 +105,7 @@ export async function checkClaudeCodeTemplateDrift(options: {
     checks.push(
       compare("agent identity", bundled.agentIdentity, captured.agentIdentity),
       compare("system prompt", bundled.systemPrompt, captured.systemPrompt),
-      compare("tool names", bundled.toolNames.join("\n"), captured.toolNames.join("\n"), `${captured.toolNames.length} captured tools`),
+      compareToolNames(bundled.toolNames, captured.toolNames),
       compare("anthropic beta", bundled.anthropicBeta ?? "", captured.anthropicBeta ?? ""),
       compare("body field order", bundled.bodyFieldOrder.join(","), captured.bodyFieldOrder.join(",")),
       compareHeaderValues(bundled.headerValues, captured.headerValues),
@@ -407,6 +413,28 @@ function compare(
     name,
     ok: expected === actual,
     detail: detail ?? (expected === actual ? "matches bundled template" : describeMismatch(expected, actual)),
+  };
+}
+
+function comparableHeadlessToolNames(toolNames: string[]): string[] {
+  return toolNames.filter((toolName) => !INTERACTIVE_ONLY_TOOL_NAMES.has(toolName));
+}
+
+function compareToolNames(
+  expected: string[],
+  actual: string[],
+): ClaudeCodeTemplateDriftCheck {
+  const comparableExpected = comparableHeadlessToolNames(expected);
+  const comparableActual = comparableHeadlessToolNames(actual);
+  const preservedCount = expected.length - comparableExpected.length;
+  const ok = comparableExpected.join("\n") === comparableActual.join("\n");
+
+  return {
+    name: "tool names",
+    ok,
+    detail: ok
+      ? `${actual.length} captured tools; ${preservedCount} interactive-only bundled tool(s) allowed outside headless capture`
+      : describeMismatch(comparableExpected.join("\n"), comparableActual.join("\n")),
   };
 }
 

@@ -98,6 +98,12 @@ import {
   shouldEmitJsonConfirmationRequired,
 } from "./codex-reset-command";
 
+const CLAUDE_CODE_INTERACTIVE_ONLY_TOOL_NAMES = new Set([
+  "AskUserQuestion",
+  "EnterPlanMode",
+  "ExitPlanMode",
+]);
+
 const command = process.argv[2] ?? "help";
 const cliConfig = await loadCliConfig(process.argv, process.env);
 
@@ -2023,7 +2029,13 @@ function compareToolNames(
 ): DoctorCheck {
   const captured = readToolNames(capturedBody.tools);
   const kyoli = readToolNames(kyoliBody.tools);
-  return check("tool names", stableJson(captured) === stableJson(kyoli), `captured=${captured.length} kyoli=${kyoli.length}`);
+  const comparableCaptured = captured.filter((toolName) => !CLAUDE_CODE_INTERACTIVE_ONLY_TOOL_NAMES.has(toolName));
+  const comparableKyoli = kyoli.filter((toolName) => !CLAUDE_CODE_INTERACTIVE_ONLY_TOOL_NAMES.has(toolName));
+  return check(
+    "tool names",
+    stableJson(comparableCaptured) === stableJson(comparableKyoli),
+    `captured=${captured.length} kyoli=${kyoli.length} interactive_only_allowed=${kyoli.length - comparableKyoli.length}`,
+  );
 }
 
 function compareMetadataUserId(

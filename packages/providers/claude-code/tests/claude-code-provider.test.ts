@@ -1688,7 +1688,9 @@ describe("createClaudeCodeProvider", () => {
     const tempDir = await mkdtemp(join(tmpdir(), "kyoli-claude-template-"));
     const fakeClaudePath = join(tempDir, "claude.mjs");
     const metadata = getClaudeCodeTemplateMetadata();
-    const tools = getClaudeCodeTemplateTools();
+    const interactiveOnlyTools = new Set(["AskUserQuestion", "EnterPlanMode", "ExitPlanMode"]);
+    const tools = getClaudeCodeTemplateTools()
+      .filter((tool) => !interactiveOnlyTools.has(tool.name));
     const capturedSystemPrompt = (metadata.systemPrompt ?? "").replaceAll(
       "/.claude/projects/project/memory/",
       "/.claude/projects/-tmp-example-repo/memory/",
@@ -1759,6 +1761,8 @@ await new Promise((resolve) => socket.on("close", resolve));
       expect(report.captured).toBe(true);
       expect(report.drifted).toBe(false);
       expect(report.checks.every((check) => check.ok)).toBe(true);
+      expect(report.checks.find((check) => check.name === "tool names")?.detail)
+        .toContain("interactive-only bundled tool(s) allowed outside headless capture");
     } finally {
       if (previousPath === undefined) {
         delete process.env.KYOLI_CLAUDE_CODE_PATH;

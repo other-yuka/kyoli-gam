@@ -380,7 +380,7 @@ describe("runtime-factory", () => {
       {
         type: "tool_use",
         id: "toolu_1",
-        name: expect.stringMatching(/^tool_/),
+        name: "AskUserQuestion",
         input: { question: "x" },
       },
     ]);
