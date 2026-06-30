@@ -1,5 +1,14 @@
 # @kyoli-gam/gateway
 
+## 0.0.11
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @kyoli-gam/core@0.0.10
+  - @kyoli-gam/model-registry@0.0.11
+  - @kyoli-gam/provider-codex-chatgpt@0.0.10
+
 ## 0.0.10
 
 ### Patch Changes
