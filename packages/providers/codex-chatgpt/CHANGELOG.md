@@ -1,5 +1,12 @@
 # @kyoli-gam/provider-codex-chatgpt
 
+## 0.0.10
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @kyoli-gam/core@0.0.10
+
 ## 0.0.9
 
 ### Patch Changes
