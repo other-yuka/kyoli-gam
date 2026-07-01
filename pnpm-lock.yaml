@@ -121,8 +121,8 @@ importers:
         specifier: workspace:*
         version: link:../providers/codex-chatgpt
       developer-icons:
-        specifier: ^6.0.5
-        version: 6.0.5(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+        specifier: ^7.0.1
+        version: 7.0.1(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       lucide-react:
         specifier: ^1.22.0
         version: 1.22.0(react@19.2.7)
@@ -1424,8 +1424,8 @@ packages:
     resolution: {integrity: sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==}
     engines: {node: '>=8'}
 
-  developer-icons@6.0.5:
-    resolution: {integrity: sha512-piWJLHi65c/IQZYePqpW8L7RkKZPHi+r7HU2lmtFbvIMFHWef0dyu7RP8dHSqhSSOmImFqrP43cSsJBZbJ9z5g==}
+  developer-icons@7.0.1:
+    resolution: {integrity: sha512-QnC49krMtj41j4xeYTmYxRpjLPMgND+ew7UEIi45qTNJ6AT/d6eJtgO3RcMszQj4GSDlgJg90730QRGhhHXxTQ==}
     peerDependencies:
       react: ^18.2.0 || ^19.0.0
       react-dom: ^18.2.0 || ^19.0.0
@@ -3367,7 +3367,7 @@ snapshots:
 
   detect-libc@2.1.2: {}
 
-  developer-icons@6.0.5(react-dom@19.2.7(react@19.2.7))(react@19.2.7):
+  developer-icons@7.0.1(react-dom@19.2.7(react@19.2.7))(react@19.2.7):
     dependencies:
       react: 19.2.7
       react-dom: 19.2.7(react@19.2.7)
