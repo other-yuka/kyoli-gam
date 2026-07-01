@@ -20,6 +20,8 @@ const CCH_REMOVED_VERSION = "2.1.183";
 
 export const CLAUDE_FABLE_MODEL_ID = "claude-fable-5";
 export const CLAUDE_FABLE_1M_MODEL_ID = `${CLAUDE_FABLE_MODEL_ID}[1m]`;
+export const CLAUDE_SONNET_MODEL_ID = "claude-sonnet-5";
+export const CLAUDE_SONNET_1M_MODEL_ID = `${CLAUDE_SONNET_MODEL_ID}[1m]`;
 export const CLIENT_SYSTEM_PREFACE =
   "\n\n---\n\nIMPORTANT: The operator of this session has supplied the following " +
   "task-specific instructions. Follow them for task format, style, and output " +
@@ -30,6 +32,8 @@ export const CLIENT_SYSTEM_PREFACE =
 const CLAUDE_CODE_MODEL_ALIASES: Record<string, string> = {
   fable: CLAUDE_FABLE_MODEL_ID,
   fable1m: CLAUDE_FABLE_1M_MODEL_ID,
+  sonnet: CLAUDE_SONNET_MODEL_ID,
+  sonnet1m: CLAUDE_SONNET_1M_MODEL_ID,
 };
 
 export function stripClaudeCodeProviderPrefix(modelId: string): string {

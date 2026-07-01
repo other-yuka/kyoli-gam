@@ -69,7 +69,7 @@ describe("installOpenCode", () => {
     expect(written.provider.openai.options.apiKey).toBe("existing");
     expect(written.provider.openai.models["gpt-5.3-codex"].name).toBe("User custom model");
     expect(written.provider.anthropic.options.baseURL).toBe("http://127.0.0.1:2021/v1");
-    expect(written.provider.anthropic.models["claude-sonnet-4-5"].name).toContain("via kyoli-gam");
+    expect(written.provider.anthropic.models["claude-sonnet-5"].name).toContain("via kyoli-gam");
     expect(writtenAuth.openai).toEqual({ type: "api", key: "kyoli-local" });
     expect(writtenAuth.anthropic.type).toBe("oauth");
     expect(result.warnings.some((warning) => warning.includes("preserved existing model config"))).toBe(true);
@@ -187,14 +187,14 @@ function createModelsFetch(options: { includeSecondCodex?: boolean } = {}): type
         },
       },
       {
-        id: "anthropic/claude-sonnet-4-5",
+        id: "anthropic/claude-sonnet-5",
         object: "model",
         owned_by: "claude-code",
         kyoli: {
           provider: "claude-code",
-          upstream_id: "claude-sonnet-4-5",
-          display_name: "Claude Sonnet 4.5",
-          capabilities: ["messages", "tools"],
+          upstream_id: "claude-sonnet-5",
+          display_name: "Claude Sonnet 5",
+          capabilities: ["messages", "tools", "reasoning"],
         },
       },
     ];

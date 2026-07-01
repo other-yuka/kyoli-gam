@@ -199,6 +199,7 @@ export function getDanglingToolUseError(messages: Message[]): string | null {
 }
 
 const ADAPTIVE_THINKING_MODEL_MATCHERS = [
+  (modelId: string) => /claude-sonnet-(?:[5-9]|\d{2,})(?:[-._]\d+)?(?:\[1m\])?$/.test(modelId),
   (modelId: string) => modelId.includes("claude-sonnet-4-6") || modelId.includes("claude-sonnet-4.6"),
   (modelId: string) => modelId.includes("claude-opus-4-6") || modelId.includes("claude-opus-4.6"),
   (modelId: string) => /claude-opus-4[-._]([7-9]|\d{2,})/.test(modelId),

@@ -20,6 +20,8 @@ import {
   applyClaudeCodeUpstreamBodyFields,
   CLAUDE_FABLE_1M_MODEL_ID,
   CLAUDE_FABLE_MODEL_ID,
+  CLAUDE_SONNET_1M_MODEL_ID,
+  CLAUDE_SONNET_MODEL_ID,
   describeSuspendedClaudeCodeModel,
   isClaudeCode1mModelLabel,
   isClaudeFableModel,
@@ -124,6 +126,33 @@ const models: ModelInfo[] = [
     displayName: "Claude Sonnet 4.5 via Claude Code",
     aliases: ["claude-sonnet-4-5", "claude-code/claude-sonnet-4-5"],
     capabilities: ["messages", "tools", "streaming", "claude-code"],
+  },
+  {
+    id: `anthropic/${CLAUDE_SONNET_MODEL_ID}`,
+    provider: "claude-code",
+    upstreamId: CLAUDE_SONNET_MODEL_ID,
+    displayName: "Claude Sonnet 5 via Claude Code",
+    aliases: [
+      CLAUDE_SONNET_MODEL_ID,
+      "sonnet",
+      `claude-code/${CLAUDE_SONNET_MODEL_ID}`,
+      "claude-code/sonnet",
+    ],
+    capabilities: ["messages", "tools", "streaming", "reasoning", "claude-code"],
+  },
+  {
+    id: `anthropic/${CLAUDE_SONNET_1M_MODEL_ID}`,
+    provider: "claude-code",
+    upstreamId: CLAUDE_SONNET_1M_MODEL_ID,
+    displayName: "Claude Sonnet 5 [1m] via Claude Code",
+    aliases: [
+      CLAUDE_SONNET_1M_MODEL_ID,
+      "sonnet1m",
+      `claude-code/${CLAUDE_SONNET_1M_MODEL_ID}`,
+      "claude-code/sonnet1m",
+    ],
+    capabilities: ["messages", "tools", "streaming", "reasoning", "claude-code"],
+    metadata: { max_context_window: 1_000_000 },
   },
 ];
 

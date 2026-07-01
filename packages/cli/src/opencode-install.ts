@@ -513,6 +513,7 @@ function selectDefaultOpenCodeModels(models: OpenCodeModelInfo[]): OpenCodeModel
     findByUpstream(openai, "gpt-5.3-codex-spark") ??
     openai.find((model) => model.upstreamId.includes("codex"));
   const preferredAnthropic =
+    findByUpstream(anthropic, "claude-sonnet-5") ??
     findByUpstream(anthropic, "claude-sonnet-4-5") ??
     anthropic.find((model) => model.upstreamId.includes("sonnet")) ??
     anthropic[0];

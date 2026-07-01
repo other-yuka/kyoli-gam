@@ -607,7 +607,7 @@ describe("gateway routing", () => {
       error: {
         type: "provider_not_resolved",
         message:
-          "Provide a familiar provider model such as openai/gpt-5.3-codex or anthropic/claude-sonnet-4-5.",
+          "Provide a familiar provider model such as openai/gpt-5.3-codex or anthropic/claude-sonnet-5.",
       },
     });
   });
@@ -802,12 +802,12 @@ describe("gateway routing", () => {
       routes: ["/v1/messages"],
       models: [
         {
-          id: "anthropic/claude-sonnet-4-5",
+          id: "anthropic/claude-sonnet-5",
           provider: "claude-code",
-          upstreamId: "claude-sonnet-4-5",
-          displayName: "Claude Sonnet 4.5",
-          capabilities: ["messages", "tools", "streaming", "claude-code"],
-          aliases: ["claude-code/claude-sonnet-4-5"],
+          upstreamId: "claude-sonnet-5",
+          displayName: "Claude Sonnet 5",
+          capabilities: ["messages", "tools", "streaming", "reasoning", "claude-code"],
+          aliases: ["claude-code/claude-sonnet-5"],
         },
       ],
     });
@@ -825,9 +825,9 @@ describe("gateway routing", () => {
     };
 
     expect(response.status).toBe(200);
-    expect(payload.models.find((model) => model.slug === "kyoli-claude/claude-sonnet-4-5")).toMatchObject({
-      slug: "kyoli-claude/claude-sonnet-4-5",
-      display_name: "Claude Sonnet 4.5 (Claude bridge)",
+    expect(payload.models.find((model) => model.slug === "kyoli-claude/claude-sonnet-5")).toMatchObject({
+      slug: "kyoli-claude/claude-sonnet-5",
+      display_name: "Claude Sonnet 5 (Claude bridge)",
       supports_parallel_tool_calls: true,
       prefer_websockets: false,
       available_in_plans: ["claude-code"],
