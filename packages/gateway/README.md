@@ -25,7 +25,7 @@ Provider-prefixed model IDs are recommended:
 
 ```json
 { "model": "openai/gpt-5.3-codex" }
-{ "model": "anthropic/claude-sonnet-4-5" }
+{ "model": "anthropic/claude-sonnet-5" }
 ```
 
 ## 30 seconds

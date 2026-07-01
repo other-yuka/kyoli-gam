@@ -89,9 +89,9 @@ describe("ModelRegistry", () => {
               reasoning: true,
               tool_call: true,
             },
-            "claude-sonnet-4-5": {
-              id: "claude-sonnet-4-5",
-              name: "Claude Sonnet 4.5",
+            "claude-sonnet-5": {
+              id: "claude-sonnet-5",
+              name: "Claude Sonnet 5",
               reasoning: true,
               tool_call: true,
             },
@@ -99,7 +99,7 @@ describe("ModelRegistry", () => {
         },
       }));
       const registry = new ModelRegistry([
-        adapter("claude-code", "anthropic/claude-sonnet-4-5", "claude-sonnet-4-5", ["claude-code/claude-sonnet-4-5"]),
+        adapter("claude-code", "anthropic/claude-sonnet-5", "claude-sonnet-5", ["claude-code/claude-sonnet-5"]),
       ], {
         modelsDev: new ModelsDevRegistrySource({
           sourceUrl: "https://models.dev",
@@ -116,7 +116,7 @@ describe("ModelRegistry", () => {
         id: "anthropic/claude-fable-5",
       }));
       await expect(registry.listModels()).resolves.toContainEqual(expect.objectContaining({
-        id: "anthropic/claude-sonnet-4-5",
+        id: "anthropic/claude-sonnet-5",
         capabilities: expect.arrayContaining(["messages", "reasoning", "tools"]),
       }));
     });

@@ -460,6 +460,19 @@ describe("upstream-request", () => {
     ]);
   });
 
+  test("buildUpstreamRequest maps Sonnet aliases to adaptive CC wire shape", () => {
+    const result = buildUpstreamRequest({
+      model: "sonnet1m",
+      output_config: { effort: "max" },
+      messages: [{ role: "user", content: "hello" }],
+    }, createIdentity(), createTemplate());
+
+    expect(result.model).toBe("claude-sonnet-5");
+    expect(result.thinking).toEqual({ type: "adaptive" });
+    expect(result.context_management).toEqual({});
+    expect(result.output_config).toEqual({ effort: "max" });
+  });
+
   test("buildUpstreamRequest emits output_config for non-adaptive non-Haiku models", () => {
     const result = buildUpstreamRequest({
       model: "claude-sonnet-4-5",

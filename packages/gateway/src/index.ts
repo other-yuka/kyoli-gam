@@ -199,7 +199,7 @@ export function createGateway(options: GatewayOptions): Gateway {
             error: {
               type: "provider_not_resolved",
               message:
-                "Provide a familiar provider model such as openai/gpt-5.3-codex or anthropic/claude-sonnet-4-5.",
+                "Provide a familiar provider model such as openai/gpt-5.3-codex or anthropic/claude-sonnet-5.",
             },
           },
           { status: 400 },

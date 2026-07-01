@@ -1665,7 +1665,7 @@ async function runClaudeFingerprintDoctor(): Promise<DoctorReport> {
         "x-stainless-timeout": "999",
       },
       body: JSON.stringify({
-        model: "anthropic/claude-sonnet-4-5",
+        model: "anthropic/claude-sonnet-5",
         max_tokens: 1024,
         messages: [
           {
@@ -1681,7 +1681,7 @@ async function runClaudeFingerprintDoctor(): Promise<DoctorReport> {
     route: "/v1/messages",
     sessionKey: "doctor-claude-fingerprint",
     body: {
-      model: "anthropic/claude-sonnet-4-5",
+      model: "anthropic/claude-sonnet-5",
       max_tokens: 1024,
       messages: [
         {
@@ -1693,7 +1693,7 @@ async function runClaudeFingerprintDoctor(): Promise<DoctorReport> {
       top_p: 0.9,
       top_k: 10,
     },
-    model: "anthropic/claude-sonnet-4-5",
+    model: "anthropic/claude-sonnet-5",
   });
 
   const beta = upstreamHeaders.get("anthropic-beta") ?? "";
@@ -1707,7 +1707,7 @@ async function runClaudeFingerprintDoctor(): Promise<DoctorReport> {
     check("caller fingerprint filtered", !beta.includes("caller-beta") && upstreamHeaders.get("x-client-request-id") !== "caller-request-id", "caller fingerprint headers are not forwarded by default"),
     check("billable beta filtered", !beta.includes("extended-cache-ttl-"), beta),
     check("required betas", betaIncludes(beta, ["claude-code-20250219", "oauth-2025-04-20", "interleaved-thinking-2025-05-14"]), beta),
-    check("model prefix stripped", upstreamBody.model === "claude-sonnet-4-5", String(upstreamBody.model)),
+    check("model prefix stripped", upstreamBody.model === "claude-sonnet-5", String(upstreamBody.model)),
     check("sampling fields stripped", !("temperature" in upstreamBody) && !("top_p" in upstreamBody) && !("top_k" in upstreamBody), "temperature/top_p/top_k are removed"),
     check("incoming cache_control stripped", !hasNestedKey(upstreamBody.messages, "cache_control"), "no cache_control keys remain on incoming messages"),
     warnCheck("system template", Array.isArray(upstreamBody.system) && upstreamBody.system.length === 3, "Claude Code 3-block system template is reconstructed"),
@@ -1844,7 +1844,7 @@ async function runClaudeObedienceDoctor(): Promise<DoctorReport> {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        model: "anthropic/claude-sonnet-4-5",
+        model: "anthropic/claude-sonnet-5",
         max_tokens: 16,
         system: clientSystemText,
         messages: [{ role: "user", content: "obedience probe" }],
@@ -1853,12 +1853,12 @@ async function runClaudeObedienceDoctor(): Promise<DoctorReport> {
     route: "/v1/messages",
     sessionKey: "doctor-claude-obedience",
     body: {
-      model: "anthropic/claude-sonnet-4-5",
+      model: "anthropic/claude-sonnet-5",
       max_tokens: 16,
       system: clientSystemText,
       messages: [{ role: "user", content: "obedience probe" }],
     },
-    model: "anthropic/claude-sonnet-4-5",
+    model: "anthropic/claude-sonnet-5",
   });
 
   const systemBlocks = Array.isArray(upstreamBody.system) ? upstreamBody.system : [];
@@ -1959,7 +1959,7 @@ async function captureKyoliClaudeOutbound(
 
 function createKyoliWireCompareBody(capturedBody: Record<string, unknown>): Record<string, unknown> {
   const body: Record<string, unknown> = {};
-  const model = readString(capturedBody.model) ?? "claude-sonnet-4-5";
+  const model = readString(capturedBody.model) ?? "claude-sonnet-5";
   body.model = model.includes("/") ? model : `claude-code/${model}`;
 
   for (const key of ["messages", "max_tokens", "thinking", "context_management", "output_config", "stream"]) {
@@ -2206,7 +2206,7 @@ async function runClaudeSmokeDoctor(
     model?: string;
   } = {},
 ): Promise<DoctorReport> {
-  const model = options.model ?? "anthropic/claude-sonnet-4-5";
+  const model = options.model ?? "anthropic/claude-sonnet-5";
   const trace: AccountExecutionTraceEvent[] = [];
   const pool = new StickyAccountPool(store, {
     strategy: config.accountSelectionStrategy,
