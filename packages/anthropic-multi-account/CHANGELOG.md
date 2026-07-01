@@ -1,5 +1,14 @@
 # opencode-anthropic-multi-account
 
+## 0.2.75
+
+### Patch Changes
+
+- [#149](https://github.com/other-yuka/kyoli-gam/pull/149) [`7c2afdf`](https://github.com/other-yuka/kyoli-gam/commit/7c2afdfaf4f356e66d55e5cd9db254373b16a1ae) Thanks [@other-yuka](https://github.com/other-yuka)! - Refresh Claude Sonnet 5 metadata across the model registry, Claude Code provider, gateway bridge catalog, adaptive-thinking request handling, and CLI defaults.
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.75
+
 ## 0.2.74
 
 ### Patch Changes

@@ -1,5 +1,18 @@
 # @kyoli-gam/cli
 
+## 0.0.14
+
+### Patch Changes
+
+- [#149](https://github.com/other-yuka/kyoli-gam/pull/149) [`7c2afdf`](https://github.com/other-yuka/kyoli-gam/commit/7c2afdfaf4f356e66d55e5cd9db254373b16a1ae) Thanks [@other-yuka](https://github.com/other-yuka)! - Refresh Claude Sonnet 5 metadata across the model registry, Claude Code provider, gateway bridge catalog, adaptive-thinking request handling, and CLI defaults.
+
+- Updated dependencies [[`7c2afdf`](https://github.com/other-yuka/kyoli-gam/commit/7c2afdfaf4f356e66d55e5cd9db254373b16a1ae)]:
+  - @kyoli-gam/model-registry@0.0.13
+  - @kyoli-gam/provider-claude-code@0.0.14
+  - @kyoli-gam/gateway@0.0.13
+  - @kyoli-gam/core@0.0.12
+  - @kyoli-gam/provider-codex-chatgpt@0.0.12
+
 ## 0.0.13
 
 ### Patch Changes
