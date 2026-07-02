@@ -130,18 +130,18 @@ describe("OpenCode shared Claude Code helpers", () => {
         }),
       },
       max_tokens: 64000,
-      thinking: { type: "adaptive" },
+      thinking: { type: "adaptive", display: "omitted" },
       context_management: { edits: [{ type: "clear_thinking_20251015", keep: "all" }] },
       output_config: { effort: "max" },
       stream: true,
     });
 
     const stamped = stampClaudeCodeCch(body.replace("cch=a82da", "cch=00000"), "2.1.177");
-    expect(cchForBody(body, "2.1.177")).toBe("69681");
-    expect(stamped).toContain("cc_entrypoint=sdk-cli; cch=69681;");
+    expect(cchForBody(body, "2.1.177")).toBe("bd6bf");
+    expect(stamped).toContain("cc_entrypoint=sdk-cli; cch=bd6bf;");
     expect(stamped).toContain("earlier log line said cc_entrypoint=sdk-cli; cch=dead1;");
     expect(stampClaudeCodeCch(body.replace("cch=a82da", "cch=00000"), "2.1.178")).toContain(
-      "cc_entrypoint=sdk-cli; cch=69681;",
+      "cc_entrypoint=sdk-cli; cch=bd6bf;",
     );
 
     const unknownVersionBody = body.replace("cc_version=2.1.177.dd9", "cc_version=2.1.178.dd9");
@@ -281,6 +281,14 @@ describe("OpenCode shared Claude Code helpers", () => {
 });
 
 describe("createClaudeCodeProvider", () => {
+  it("advertises Fable models by default", async () => {
+    const provider = createTestClaudeCodeProvider();
+
+    await expect(provider.listModels()).resolves.toContainEqual(
+      expect.objectContaining({ upstreamId: "claude-fable-5" }),
+    );
+  });
+
   it("does not advertise suspended Fable models", async () => {
     await withSuspendedFable(async () => {
       const provider = createTestClaudeCodeProvider();
@@ -478,7 +486,7 @@ describe("createClaudeCodeProvider", () => {
       await expect(response.json()).resolves.toMatchObject({
         error: {
           type: "model_temporarily_unavailable",
-          message: expect.stringContaining("Claude Fable 5 is temporarily unavailable"),
+          message: expect.stringContaining("disabled for this Claude Code provider"),
         },
       });
     });
@@ -1544,7 +1552,7 @@ describe("createClaudeCodeProvider", () => {
     });
 
     const response = await provider.handleRequest(
-      createMessagesContext("session-context-haiku", "anthropic/claude-haiku-4-5"),
+      createMessagesContext("session-context-1m", "anthropic/sonnet1m"),
     );
 
     expect(response.status).toBe(200);

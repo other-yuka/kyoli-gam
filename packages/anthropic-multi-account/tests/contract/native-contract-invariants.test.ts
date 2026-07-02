@@ -203,7 +203,7 @@ describe("native-plugin request contract invariants", () => {
     }, createIdentity(), createTemplate());
 
     assertBaseRequestInvariants(body, "sonnet");
-    expect(body.thinking).toEqual({ type: "adaptive" });
+    expect(body.thinking).toEqual({ type: "adaptive", display: "omitted" });
     expect(body.context_management).toEqual({});
     expect(body.output_config).toEqual({ effort: "high" });
   });
@@ -331,6 +331,6 @@ describe("native-plugin request contract invariants", () => {
     const roundTripped = JSON.parse(JSON.stringify(body)) as JsonRecord;
 
     assertBaseRequestInvariants(roundTripped, "json-roundtrip");
-    expect(roundTripped.thinking).toEqual({ type: "adaptive" });
+    expect(roundTripped.thinking).toEqual({ type: "adaptive", display: "omitted" });
   });
 });

@@ -14,6 +14,7 @@ import {
   resolveMaxTokens,
   resetUpstreamRequestForTest,
   reverseMapResponse,
+  resolveOutputEffort,
   sanitizeMessages,
   scrubFrameworkIdentifiers,
   setUpstreamRequestTestOverridesForTest,
@@ -338,7 +339,7 @@ describe("upstream-request", () => {
     expect("temperature" in result).toBe(false);
     expect("top_p" in result).toBe(false);
     expect("top_k" in result).toBe(false);
-    expect(result.thinking).toEqual({ type: "adaptive" });
+    expect(result.thinking).toEqual({ type: "adaptive", display: "omitted" });
     expect(result.output_config).toEqual({ effort: "high" });
   });
 
@@ -349,7 +350,7 @@ describe("upstream-request", () => {
       messages: [{ role: "user", content: "hello" }],
     }, createIdentity(), createTemplate());
 
-    expect(result.thinking).toEqual({ type: "adaptive" });
+    expect(result.thinking).toEqual({ type: "adaptive", display: "omitted" });
     expect(result.output_config).toEqual({ effort: "low" });
   });
 
@@ -370,7 +371,7 @@ describe("upstream-request", () => {
       messages: [{ role: "user", content: "hello" }],
     }, createIdentity(), createTemplate());
 
-    expect(result.thinking).toEqual({ type: "adaptive" });
+    expect(result.thinking).toEqual({ type: "adaptive", display: "omitted" });
     expect(result.output_config).toEqual({ effort: "high" });
   });
 
@@ -438,6 +439,26 @@ describe("upstream-request", () => {
 
 
 
+
+  test("buildUpstreamRequest preserves high-tier Fable effort values", () => {
+    expect(resolveOutputEffort({ output_config: { effort: "max" } }, undefined, "claude-fable-5")).toBe("max");
+    expect(resolveOutputEffort({ output_config: { effort: "xhigh" } }, undefined, "claude-fable-5")).toBe("xhigh");
+    expect(resolveOutputEffort({ output_config: { effort: "ultracode" } }, undefined, "claude-fable-5")).toBe("xhigh");
+  });
+
+  test("buildUpstreamRequest selects the Fable system prompt variant when present", () => {
+    const result = buildUpstreamRequest({
+      model: "fable",
+      messages: [{ role: "user", content: "hello" }],
+    }, createIdentity(), createTemplate({
+      system_prompt: "base prompt",
+      system_prompt_fable: "fable prompt",
+    }));
+
+    expect(result.system).toContainEqual(expect.objectContaining({ text: "fable prompt" }));
+    expect(result.system).not.toContainEqual(expect.objectContaining({ text: "base prompt" }));
+  });
+
   test("buildUpstreamRequest maps Fable aliases to CC wire shape", () => {
     const result = buildUpstreamRequest({
       model: "fable1m",
@@ -450,9 +471,9 @@ describe("upstream-request", () => {
     }, createIdentity(), createTemplate());
 
     expect(result.model).toBe("claude-fable-5");
-    expect(result.thinking).toEqual({ type: "adaptive" });
+    expect(result.thinking).toEqual({ type: "adaptive", display: "omitted" });
     expect(result.context_management).toEqual({});
-    expect(result.output_config).toEqual({ effort: "high" });
+    expect(result.output_config).toEqual({ effort: "max" });
     expect(result.tool_choice).toEqual({ type: "none" });
     expect(result.tools).toEqual([
       { name: "Bash", description: "Run shell commands", input_schema: { type: "object" } },
@@ -468,7 +489,7 @@ describe("upstream-request", () => {
     }, createIdentity(), createTemplate());
 
     expect(result.model).toBe("claude-sonnet-5");
-    expect(result.thinking).toEqual({ type: "adaptive" });
+    expect(result.thinking).toEqual({ type: "adaptive", display: "omitted" });
     expect(result.context_management).toEqual({});
     expect(result.output_config).toEqual({ effort: "max" });
   });
@@ -510,7 +531,7 @@ describe("upstream-request", () => {
       messages: [{ role: "user", content: "hello" }],
     }, createIdentity(), createTemplate());
 
-    expect(result.thinking).toEqual({ type: "adaptive" });
+    expect(result.thinking).toEqual({ type: "adaptive", display: "omitted" });
     expect(result.context_management).toEqual({});
     expect(result.output_config).toEqual({ effort: "high" });
   });

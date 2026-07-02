@@ -87,8 +87,16 @@ const CLAUDE_CODE_AGENT_IDENTITY =
   templateMetadata.agentIdentity ?? "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
 const CLAUDE_CODE_SYSTEM_PROMPT =
   templateMetadata.systemPrompt ?? "You are an interactive agent that helps users with software engineering tasks. Follow the user's instructions carefully, use available tools when appropriate, and keep responses focused on the task.";
+const CLAUDE_CODE_FABLE_SYSTEM_PROMPT =
+  templateMetadata.systemPromptFable ?? CLAUDE_CODE_SYSTEM_PROMPT;
 const sessionIdsByKey = new Map<string, ClaudeSessionState>();
 const fallbackDeviceId = randomUUID();
+
+function getSystemPromptForModel(modelId: string | undefined): string {
+  return modelId && isClaudeFableModel(modelId)
+    ? CLAUDE_CODE_FABLE_SYSTEM_PROMPT
+    : CLAUDE_CODE_SYSTEM_PROMPT;
+}
 
 const models: ModelInfo[] = [
   {
@@ -1101,7 +1109,7 @@ function transformRequestBody(
         deviceId: options.identity.deviceId,
       },
       sessionId: options.sessionId,
-      systemPrompt: CLAUDE_CODE_SYSTEM_PROMPT,
+      systemPrompt: getSystemPromptForModel(requestModel),
     });
     if (requestModel && isClaudeFableModel(requestModel) && !hadIncomingTools && Array.isArray(record.tools) && record.tools.length > 0) {
       record.tool_choice = { type: "none" };

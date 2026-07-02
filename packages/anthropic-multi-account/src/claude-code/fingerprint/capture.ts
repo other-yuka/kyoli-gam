@@ -40,7 +40,7 @@ const STATIC_HEADER_NAMES = [
 ] as const;
 const SUPPORTED_CC_RANGE = {
   min: "1.0.0",
-  maxTested: "2.1.197",
+  maxTested: "2.1.198",
 } as const;
 
 type TemplateSource = "bundled" | "cached" | "live";
@@ -57,6 +57,7 @@ export interface TemplateData {
   _source: TemplateSource;
   agent_identity: string;
   system_prompt: string;
+  system_prompt_fable?: string;
   tools: TemplateTool[];
   tool_names: string[];
   anthropic_beta?: string;
@@ -156,6 +157,18 @@ function cloneTemplate(template: TemplateData, sourceOverride?: TemplateSource):
   };
 }
 
+function applyBundledTemplateFallbacks(template: TemplateData): TemplateData {
+  const bundledFablePrompt = bundledTemplate.system_prompt_fable;
+  if (template.system_prompt_fable || typeof bundledFablePrompt !== "string" || bundledFablePrompt.length === 0) {
+    return template;
+  }
+
+  return {
+    ...template,
+    system_prompt_fable: bundledFablePrompt,
+  };
+}
+
 export function prepareBundledTemplate(template: TemplateData): TemplateData {
   const rest = cloneTemplate(template, "bundled");
 
@@ -220,7 +233,7 @@ function readLiveCacheSync(sourceOverride: TemplateSource = "cached"): TemplateD
       return null;
     }
 
-    return cloneTemplate(parsed, sourceOverride);
+    return applyBundledTemplateFallbacks(cloneTemplate(parsed, sourceOverride));
   } catch (error) {
     if (existsSync(cachePath)) {
       const isMissingFileError = error instanceof Error && "code" in error && error.code === "ENOENT";
@@ -576,7 +589,7 @@ export async function refreshLiveFingerprintAsync(options?: {
   if (!options?.force) {
     const cached = readLiveCacheSync("cached");
     if (cached && isUsableTemplate(cached) && isFreshTemplate(cached)) {
-      return cached;
+      return applyBundledTemplateFallbacks(cached);
     }
   }
 
@@ -596,8 +609,9 @@ export async function refreshLiveFingerprintAsync(options?: {
       return null;
     }
 
-    await writeLiveCache(scrubbed);
-    return scrubbed;
+    const liveTemplate = applyBundledTemplateFallbacks(scrubbed);
+    await writeLiveCache(liveTemplate);
+    return liveTemplate;
   } catch {
     return null;
   }

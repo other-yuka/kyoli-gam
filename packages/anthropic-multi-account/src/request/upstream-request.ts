@@ -132,21 +132,21 @@ export function resolveOutputEffort(
   modelId?: string,
 ): string {
   if (configuredEffort && configuredEffort !== "client") {
-    return clampFableEffort(normalizeEffortForWire(configuredEffort), modelId);
+    return normalizeEffortForWire(configuredEffort);
   }
 
   const clientEffort = getClientOutputEffort(inputBody);
-  return clampFableEffort(normalizeEffortForWire(clientEffort ?? DEFAULT_OUTPUT_EFFORT), modelId);
+  return normalizeEffortForWire(clientEffort ?? DEFAULT_OUTPUT_EFFORT);
 }
 
 function isHaikuModel(modelId: string): boolean {
   return resolveClaudeCodeModelAlias(modelId).toLowerCase().includes("haiku");
 }
 
-function clampFableEffort(effort: string, modelId: string | undefined): string {
-  return modelId && isClaudeFableModel(modelId) && (effort === "max" || effort === "xhigh")
-    ? "high"
-    : effort;
+function getSystemPromptForModel(template: TemplateData, modelId: string): string {
+  return modelId.toLowerCase().includes("fable") && template.system_prompt_fable
+    ? template.system_prompt_fable
+    : template.system_prompt;
 }
 
 function collectToolUseIds(message: Message): string[] {
@@ -338,7 +338,7 @@ export function buildUpstreamRequest(
     body.tool_choice = { type: "none" };
   }
   if (supportsAdaptiveThinking(modelId)) {
-    body.thinking = { type: "adaptive" };
+    body.thinking = { type: "adaptive", display: "omitted" };
     body.context_management = DEFAULT_CONTEXT_MANAGEMENT;
   }
   if (modelId && !isHaikuModel(modelId)) {
@@ -356,7 +356,7 @@ export function buildUpstreamRequest(
       deviceId: identity.deviceId,
     },
     sessionId: activeSessionId,
-    systemPrompt: template.system_prompt,
+    systemPrompt: getSystemPromptForModel(template, modelId),
     systemTexts: filterInjectedSystemTexts(
       systemTexts,
       template,

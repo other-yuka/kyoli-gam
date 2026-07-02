@@ -76,6 +76,41 @@ describe("ModelRegistry", () => {
     });
   });
 
+  it("keeps Fable models enabled by default in models.dev", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "kyoli-fable-models-dev-"));
+    const localPath = join(dir, "api.json");
+    await writeFile(localPath, JSON.stringify({
+      anthropic: {
+        models: {
+          "claude-fable-5": {
+            id: "claude-fable-5",
+            name: "Claude Fable 5",
+            reasoning: true,
+            tool_call: true,
+          },
+        },
+      },
+    }));
+    const registry = new ModelRegistry([
+      adapter("claude-code", "anthropic/claude-sonnet-5", "claude-sonnet-5", ["claude-code/claude-sonnet-5"]),
+    ], {
+      modelsDev: new ModelsDevRegistrySource({
+        sourceUrl: "https://models.dev",
+        cachePath: join(dir, "cache.json"),
+        localPath,
+        disableFetch: true,
+        refreshIntervalMs: 60_000,
+        fetchTimeoutMs: 10_000,
+      }),
+    });
+
+    await expect(registry.resolve("fable")).resolves.toMatchObject({
+      provider: "claude-code",
+      upstreamId: "claude-fable-5",
+      model: expect.objectContaining({ id: "anthropic/claude-fable-5" }),
+    });
+  });
+
   it("filters suspended Fable models from models.dev", async () => {
     await withSuspendedFable(async () => {
       const dir = await mkdtemp(join(tmpdir(), "kyoli-fable-models-dev-"));

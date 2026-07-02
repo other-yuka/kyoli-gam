@@ -191,7 +191,7 @@ function isSuspendedModelsDevModel(
 function readSuspendedClaudeFamilies(): Set<string> {
   const raw = process.env.KYOLI_SUSPENDED_CLAUDE_CODE_FAMILIES
     ?? process.env.KYOLI_SUSPENDED_CLAUDE_MODELS
-    ?? "fable";
+    ?? "";
   return new Set(
     raw
       .split(",")
