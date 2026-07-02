@@ -1,5 +1,14 @@
 # opencode-anthropic-multi-account
 
+## 0.2.76
+
+### Patch Changes
+
+- [#154](https://github.com/other-yuka/kyoli-gam/pull/154) [`5316308`](https://github.com/other-yuka/kyoli-gam/commit/5316308e39370da3bdf473615c70c5acfa104b04) Thanks [@other-yuka](https://github.com/other-yuka)! - Refresh Claude Code 2.1.198 Fable availability and adaptive-thinking request shape.
+
+- Updated dependencies [[`5316308`](https://github.com/other-yuka/kyoli-gam/commit/5316308e39370da3bdf473615c70c5acfa104b04)]:
+  - opencode-multi-account-core@0.2.76
+
 ## 0.2.75
 
 ### Patch Changes

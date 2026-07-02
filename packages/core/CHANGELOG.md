@@ -1,5 +1,12 @@
 # @kyoli-gam/core
 
+## 0.0.13
+
+### Patch Changes
+
+- Updated dependencies [[`5316308`](https://github.com/other-yuka/kyoli-gam/commit/5316308e39370da3bdf473615c70c5acfa104b04)]:
+  - opencode-multi-account-core@0.2.76
+
 ## 0.0.12
 
 ### Patch Changes
