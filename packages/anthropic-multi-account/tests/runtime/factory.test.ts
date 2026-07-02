@@ -103,7 +103,7 @@ describe("runtime-factory", () => {
     expect(body.system[0]?.text).toContain("cc_entrypoint=sdk-cli");
     expect(body.system[1]?.cache_control).toEqual({ type: "ephemeral" });
     expect(body.system[1]?.cache_control).not.toHaveProperty("ttl");
-    expect(body.thinking).toEqual({ type: "adaptive" });
+    expect(body.thinking).toEqual({ type: "adaptive", display: "omitted" });
     expect(body.context_management).toEqual({});
     expect(body.output_config).toEqual({ effort: "high" });
     expect(body.max_tokens).toBe(32_000);
@@ -558,7 +558,7 @@ describe("runtime-factory", () => {
     }
   });
 
-  test("retries without template long-context betas for non-1m models", async () => {
+  test("retries without model long-context betas for 1m labels", async () => {
     const uuid = await seedAccount();
     const factory = new AccountRuntimeFactory(store, client);
     const runtime = await factory.getRuntime(uuid);
@@ -571,7 +571,7 @@ describe("runtime-factory", () => {
 
     await runtime.fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ model: "claude-haiku-4-5", messages: [] }),
+      body: JSON.stringify({ model: "sonnet1m", messages: [] }),
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(2);

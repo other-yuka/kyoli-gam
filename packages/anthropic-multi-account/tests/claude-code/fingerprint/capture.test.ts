@@ -108,6 +108,31 @@ describe("fingerprint-capture", () => {
     }
   });
 
+  test("loadTemplate applies bundled Fable prompt to fresh caches that lack it", async () => {
+    const { dir, cleanup } = await setupTestEnv();
+
+    try {
+      const bundled = loadTemplate();
+      const cached = createLiveTemplate({
+        cc_version: "2.1.198",
+      });
+      delete cached.system_prompt_fable;
+      await fs.writeFile(
+        join(dir, CACHE_FILE_NAME),
+        `${JSON.stringify(cached, null, 2)}\n`,
+        "utf8",
+      );
+
+      const template = loadTemplate();
+
+      expect(template._source).toBe("cached");
+      expect(template.system_prompt_fable).toBe(bundled.system_prompt_fable);
+      expect(template.system_prompt_fable).toBeTruthy();
+    } finally {
+      await cleanup();
+    }
+  });
+
   test("loadTemplate falls back to bundled data when cache is missing", async () => {
     const { cleanup } = await setupTestEnv();
 

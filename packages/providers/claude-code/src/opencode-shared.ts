@@ -78,7 +78,7 @@ export function isSuspendedClaudeCodeModel(
 export function describeSuspendedClaudeCodeModel(modelId: string): string {
   const normalized = resolveClaudeCodeModelAlias(modelId);
   if (isClaudeFableModel(normalized)) {
-    return "Claude Fable 5 is temporarily unavailable through Claude Code because upstream access is suspended.";
+    return "Claude Fable 5 is disabled for this Claude Code provider by configuration.";
   }
   return `${normalized} is temporarily unavailable through Claude Code.`;
 }
@@ -86,7 +86,7 @@ export function describeSuspendedClaudeCodeModel(modelId: string): string {
 function readSuspendedClaudeCodeFamilies(env: NodeJS.ProcessEnv): Set<string> {
   const raw = env.KYOLI_SUSPENDED_CLAUDE_CODE_FAMILIES
     ?? env.KYOLI_SUSPENDED_CLAUDE_MODELS
-    ?? "fable";
+    ?? "";
   return new Set(
     raw
       .split(",")

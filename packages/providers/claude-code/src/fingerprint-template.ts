@@ -13,6 +13,7 @@ interface FingerprintTemplate {
   header_order?: string[];
   header_values?: Record<string, string>;
   system_prompt?: string;
+  system_prompt_fable?: string;
   tool_names?: string[];
   tools: TemplateTool[];
 }
@@ -36,6 +37,7 @@ export function getClaudeCodeTemplateMetadata(): {
   headerValues: Record<string, string>;
   headerOrder?: string[];
   systemPrompt?: string;
+  systemPromptFable?: string;
   toolNames: string[];
 } {
   return {
@@ -46,6 +48,7 @@ export function getClaudeCodeTemplateMetadata(): {
     headerValues: { ...template.header_values },
     headerOrder: template.header_order ? [...template.header_order] : undefined,
     systemPrompt: template.system_prompt,
+    systemPromptFable: template.system_prompt_fable,
     toolNames: template.tool_names ? [...template.tool_names] : template.tools.map((tool) => tool.name),
   };
 }
