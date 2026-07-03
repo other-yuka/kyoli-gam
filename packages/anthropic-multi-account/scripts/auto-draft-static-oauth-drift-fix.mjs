@@ -42,6 +42,7 @@ function writeGithubOutputs(result) {
 
   const outputs = {
     should_create_pr: result.shouldCreatePr,
+    should_open_issue: result.shouldOpenIssue,
     changed_files: JSON.stringify(result.changedFiles ?? []),
     branch_name: result.branchName ?? "",
     commit_message: result.commitMessage ?? "",
@@ -72,6 +73,7 @@ function classifyDriftReport(report) {
   if (!report.drift || categories.length === 0) {
     return {
       shouldCreatePr: false,
+      shouldOpenIssue: false,
       changedFiles: [],
       reason: "drift report has no items to fix",
     };
@@ -81,6 +83,7 @@ function classifyDriftReport(report) {
     if (!report.ccVersion || report.ccVersion === "unknown") {
       return {
         shouldCreatePr: false,
+        shouldOpenIssue: true,
         changedFiles: [],
         reason: "compat.range drift is auto-fixable only when ccVersion is known",
       };
@@ -88,6 +91,7 @@ function classifyDriftReport(report) {
 
     return {
       shouldCreatePr: true,
+      shouldOpenIssue: false,
       changedFiles: [],
       reason: "compat.range-only drift can be auto-drafted behind PR checks",
       branchName: branchNameForVersion(report.ccVersion),
@@ -98,6 +102,7 @@ function classifyDriftReport(report) {
 
   return {
     shouldCreatePr: false,
+    shouldOpenIssue: true,
     changedFiles: [],
     reason: `manual drift review required for categories: ${categories.join(", ")}`,
   };
@@ -135,6 +140,7 @@ function applyCompatRangeFix(report, options = {}) {
 
   return {
     shouldCreatePr: true,
+    shouldOpenIssue: false,
     changedFiles: [sourceRelativePath, changesetRelativePath],
     reason: "compat.range-only drift auto-fix applied",
     branchName: branchNameForVersion(version),

@@ -12,6 +12,17 @@ function toHeaders(headers: HeadersInit | undefined): Headers {
   return new Headers(headers);
 }
 
+
+function createDeferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 function createChunkedStream(chunks: string[]): ReadableStream<Uint8Array> {
   return new ReadableStream<Uint8Array>({
     start(controller) {
@@ -751,6 +762,49 @@ describe("runtime-factory", () => {
     ]);
 
     expect(sleepCalls).toEqual([400]);
+  });
+
+  test("deduplicates concurrent refresh and persistence for one expired account", async () => {
+    const uuid = await seedAccount({
+      accessToken: "expired-access",
+      expiresAt: Date.now() - 1_000,
+    });
+
+    const deferred = createDeferred<{ accessToken: string; refreshToken: string; expiresAt: number }>();
+    const refreshSpy = vi
+      .spyOn(anthropicOAuth, "refreshWithOAuth")
+      .mockImplementation(() => deferred.promise);
+    const authSetSpy = vi.spyOn(client.auth, "set").mockResolvedValue();
+
+    const factory = new AccountRuntimeFactory(store, client);
+    const runtime = await factory.getRuntime(uuid);
+
+    const authorizations: string[] = [];
+    globalThis.fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      authorizations.push(toHeaders(init?.headers).get("authorization") ?? "");
+      return new Response("ok");
+    }) as unknown as typeof fetch;
+
+    const firstFetch = runtime.fetch("https://api.anthropic.com/v1/messages", { method: "POST", body: "{}" });
+    const secondFetch = runtime.fetch("https://api.anthropic.com/v1/messages", { method: "POST", body: "{}" });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    deferred.resolve({
+      accessToken: "new-access",
+      refreshToken: "new-refresh",
+      expiresAt: Date.now() + 3_600_000,
+    });
+
+    await Promise.all([firstFetch, secondFetch]);
+
+    expect(refreshSpy).toHaveBeenCalledTimes(1);
+    expect(authSetSpy).toHaveBeenCalledTimes(1);
+    expect(authorizations).toEqual(["Bearer new-access", "Bearer new-access"]);
+
+    const storage = await store.load();
+    const account = storage.accounts.find((candidate) => candidate.uuid === uuid);
+    expect(account?.accessToken).toBe("new-access");
+    expect(account?.refreshToken).toBe("new-refresh");
   });
 
   test("refreshes expired token through anthropic-oauth", async () => {

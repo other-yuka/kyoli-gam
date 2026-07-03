@@ -140,7 +140,6 @@ jobs:
           node packages/anthropic-multi-account/scripts/auto-draft-static-oauth-drift-fix.mjs \
             drift-report.json \
             auto-draft-result.json
-          echo "should_open_issue=true" >> "$GITHUB_OUTPUT"
           cat auto-draft-result.json
 
       - name: Upload drift artifacts
@@ -345,8 +344,8 @@ jobs:
             exit 0
           fi
           {
-            gh issue list --repo "${{ github.repository }}" --label claude-code-drift --state open --json number --jq '.[].number'
-            gh issue list --repo "${{ github.repository }}" --label fingerprint-drift --state open --json number --jq '.[].number' 2>/dev/null || true
+            gh issue list --repo "${{ github.repository }}" --label claude-code-drift --state open --search "in:title \"v${CC_VERSION}\"" --json number --jq '.[].number'
+            gh issue list --repo "${{ github.repository }}" --label fingerprint-drift --state open --search "in:title \"v${CC_VERSION}\"" --json number --jq '.[].number' 2>/dev/null || true
           } | sort -u > drift-issue-numbers.txt
           COMMENT="Resolved: static Claude Code drift scan is clean for v${CC_VERSION}."
           while IFS= read -r n; do
