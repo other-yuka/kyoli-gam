@@ -373,6 +373,7 @@ function startCallbackServer(expectedState: string): Promise<CallbackServer> {
       response.end(undefined, () => {
         if (!settled) {
           settled = true;
+          if (timeout) clearTimeout(timeout);
           resolveCode?.({ code, state });
           server.close();
         }
@@ -390,6 +391,7 @@ function startCallbackServer(expectedState: string): Promise<CallbackServer> {
     server.on("error", reject);
     server.listen(0, "localhost", () => {
       timeout = setTimeout(() => stop(new Error("Claude Code OAuth callback timed out")), CALLBACK_TIMEOUT_MS);
+      timeout.unref?.();
       resolve({
         port: (server.address() as AddressInfo).port,
         waitForCode,

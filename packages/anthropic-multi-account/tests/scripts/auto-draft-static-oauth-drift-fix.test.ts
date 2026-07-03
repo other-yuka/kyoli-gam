@@ -38,6 +38,7 @@ describe("auto-draft static OAuth drift fix", () => {
     });
 
     expect(result.shouldCreatePr).toBe(true);
+    expect(result.shouldOpenIssue).toBe(false);
     expect(result.branchName).toBe("bot/cc-drift-v2.1.162");
     expect(result.prTitle).toContain("2.1.162");
   });
@@ -50,6 +51,7 @@ describe("auto-draft static OAuth drift fix", () => {
     });
 
     expect(result.shouldCreatePr).toBe(false);
+    expect(result.shouldOpenIssue).toBe(true);
     expect(result.reason).toContain("manual drift review");
   });
 

@@ -311,6 +311,7 @@ export class AccountRuntimeFactory {
   private lastRequestTime = 0;
   private pacingGate = Promise.resolve();
   private pacingTestOverrides: PacingTestOverrides = {};
+  private tokenRefreshLocks = new Map<string, Promise<{ accessToken: string; expiresAt: number }>>();
 
   constructor(
     private readonly store: AccountStore,
@@ -359,7 +360,37 @@ export class AccountRuntimeFactory {
     storedAccount: StoredAccount,
     uuid: string,
   ): Promise<{ accessToken: string; expiresAt: number }> {
-    const refreshed = await refreshToken(storedAccount.refreshToken, uuid, this.client);
+    const existingRefresh = this.tokenRefreshLocks.get(uuid);
+    if (existingRefresh) return existingRefresh;
+
+    const refreshPromise = this.refreshAndPersistToken(storedAccount, uuid);
+    this.tokenRefreshLocks.set(uuid, refreshPromise);
+
+    try {
+      return await refreshPromise;
+    } finally {
+      this.tokenRefreshLocks.delete(uuid);
+    }
+  }
+
+  private async refreshAndPersistToken(
+    storedAccount: StoredAccount,
+    uuid: string,
+  ): Promise<{ accessToken: string; expiresAt: number }> {
+    const latestStorage = await this.store.load();
+    const latestAccount = latestStorage.accounts.find((account: StoredAccount) => account.uuid === uuid);
+    const accountToRefresh = latestAccount ?? storedAccount;
+    const latestAccessToken = accountToRefresh.accessToken;
+
+    if (
+      latestAccessToken
+      && accountToRefresh.expiresAt
+      && !isTokenExpired({ accessToken: latestAccessToken, expiresAt: accountToRefresh.expiresAt })
+    ) {
+      return { accessToken: latestAccessToken, expiresAt: accountToRefresh.expiresAt };
+    }
+
+    const refreshed = await refreshToken(accountToRefresh.refreshToken, uuid, this.client);
     if (!refreshed.ok) {
       throw new TokenRefreshError(
         refreshed.permanent,
@@ -386,7 +417,7 @@ export class AccountRuntimeFactory {
         path: { id: ANTHROPIC_OAUTH_ADAPTER.authProviderId },
         body: {
           type: "oauth",
-          refresh: refreshed.patch.refreshToken ?? storedAccount.refreshToken,
+          refresh: refreshed.patch.refreshToken ?? accountToRefresh.refreshToken,
           access: refreshed.patch.accessToken,
           expires: refreshed.patch.expiresAt,
         },
