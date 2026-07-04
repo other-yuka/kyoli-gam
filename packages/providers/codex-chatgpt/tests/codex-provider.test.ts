@@ -1986,8 +1986,8 @@ describe("createCodexChatGPTProvider", () => {
 
     const provider = createCodexChatGPTProvider({
       accounts: new StickyAccountPool(store),
-      compactRequestBudgetMs: 5,
-      compactRetryDelayMs: 20,
+      compactRequestBudgetMs: 250,
+      compactRetryDelayMs: 300,
       fetch: async () => {
         upstreamCalls += 1;
         return new Response(JSON.stringify({ error: { code: "temporary" } }), {
