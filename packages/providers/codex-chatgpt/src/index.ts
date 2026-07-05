@@ -1799,8 +1799,9 @@ function readCodexUsageError(payload: unknown): string | undefined {
 }
 
 function isPermanentCodexUsageAuthFailure(error: CodexUsageFetchError): boolean {
+  const message = error.message.toLowerCase();
   return error.status === 402 || error.status === 404 ||
-    (error.status === 401 && error.message.toLowerCase().includes("deactivated"));
+    (error.status === 401 && (message.includes("deactivated") || message.includes("invalidated")));
 }
 
 export async function refreshCodexOAuthToken(refreshToken: string): Promise<CodexTokenRefreshResult> {
