@@ -465,6 +465,31 @@ describe("createCodexChatGPTProvider", () => {
       .toBe(6);
   });
 
+  it("requires reauth when Codex usage reports an invalidated token", async () => {
+    const store = new MemoryAccountStore();
+    const account = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "invalidated-access",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+      },
+    });
+
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      fetch: async () => Response.json({
+        error: { message: "Your authentication token has been invalidated. Please try signing in again." },
+      }, { status: 401 }),
+    });
+
+    const refreshed = await provider.refreshUsage?.({ account });
+
+    expect(refreshed?.ok).toBe(false);
+    if (refreshed?.ok) throw new Error("usage refresh unexpectedly passed");
+    expect(refreshed?.reauthRequiredReason).toBe("Codex usage refresh failed");
+  });
+
   it("preserves native Codex originator and user-agent headers", async () => {
     let upstreamOriginator = "";
     let upstreamUserAgent = "";

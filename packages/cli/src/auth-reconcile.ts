@@ -131,6 +131,12 @@ function createCodexAccountInput(
   credentials: Record<string, unknown>;
   metadata: Record<string, unknown>;
 } {
+  const metadata = { ...existing?.metadata };
+  delete metadata.cachedUsage;
+  delete metadata.cachedUsageAt;
+  delete metadata.usageCachedAt;
+  delete metadata.usage_cached_at;
+
   return {
     provider: "codex",
     kind: "oauth",
@@ -143,7 +149,7 @@ function createCodexAccountInput(
       accountId: tokens.accountId ?? existing?.credentials.accountId,
     },
     metadata: {
-      ...existing?.metadata,
+      ...metadata,
       email: tokens.email ?? existing?.metadata.email,
       accountId: tokens.accountId ?? existing?.metadata.accountId,
       planTier: tokens.planTier ?? existing?.metadata.planTier,

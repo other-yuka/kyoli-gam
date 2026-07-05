@@ -111,7 +111,7 @@ export class UsageRefreshService {
 
   private shouldRefresh(account: AccountRecord, force: boolean): boolean {
     if (!this.providersById.has(account.provider)) return false;
-    if (!account.enabled || account.reauthRequiredReason) return false;
+    if (account.reauthRequiredReason) return false;
     const cooldownUntil = this.cooldownUntilByAccount.get(account.id);
     if (!force && cooldownUntil && cooldownUntil > Date.now()) return false;
     if (force) return true;

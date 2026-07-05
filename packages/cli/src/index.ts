@@ -184,12 +184,18 @@ if (command === "serve") {
       accountId: targetAccountId,
       force,
     });
+    const usageRefreshed = await new UsageRefreshService({
+      accounts: accountStore,
+      providers: [createCodexChatGPTProvider()],
+      intervalMs: 0,
+    }).refreshAccountById(result.account.id, { force: true });
 
     if (result.action === "updated") {
       console.log(`Codex account re-authenticated: ${result.account.name} (${result.account.id})`);
     } else {
       console.log(`Codex account saved: ${result.account.name} (${result.account.id})`);
     }
+    if (!usageRefreshed) console.warn("Codex usage snapshot was not refreshed; the gateway will retry it later.");
   } finally {
     login.stop();
   }

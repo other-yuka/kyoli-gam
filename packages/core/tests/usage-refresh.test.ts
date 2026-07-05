@@ -63,6 +63,35 @@ describe("UsageRefreshService", () => {
     expect(calls).toBe(1);
   });
 
+  it("refreshes disabled accounts without re-enabling them", async () => {
+    const store = new MemoryAccountStore();
+    const account = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      enabled: false,
+      metadata: { cachedUsageAt: Date.now() - 10_000 },
+    });
+    const provider = createUsageProvider(async () => ({
+      ok: true,
+      metadata: {
+        cachedUsageAt: Date.now(),
+        cachedUsage: { five_hour: { utilization: 10, resets_at: null } },
+      },
+    }));
+
+    const service = new UsageRefreshService({
+      accounts: store,
+      providers: [provider],
+      intervalMs: 1,
+    });
+
+    expect(await service.refreshOnce()).toMatchObject({ checked: 1, refreshed: 1 });
+    const updated = await store.get(account.id);
+    expect(updated?.enabled).toBe(false);
+    expect((updated?.metadata.cachedUsage as { five_hour?: { utilization: number } }).five_hour?.utilization)
+      .toBe(10);
+  });
+
   it("only recovers blocked accounts when every visible usage window has capacity", async () => {
     const store = new MemoryAccountStore();
     const exhausted = await store.create({
