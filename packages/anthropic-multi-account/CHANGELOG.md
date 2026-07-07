@@ -1,5 +1,16 @@
 # opencode-anthropic-multi-account
 
+## 0.2.80
+
+### Patch Changes
+
+- [#173](https://github.com/other-yuka/kyoli-gam/pull/173) [`f5856c6`](https://github.com/other-yuka/kyoli-gam/commit/f5856c6a4d7258ff703f6f50bccb9086e7ce75ee) Thanks [@other-yuka](https://github.com/other-yuka)! - Refresh bundled Claude Code version metadata for `@anthropic-ai/claude-code@2.1.202` so kyoli doctor drift checks close cleanly.
+
+- [#175](https://github.com/other-yuka/kyoli-gam/pull/175) [`5d3c7cf`](https://github.com/other-yuka/kyoli-gam/commit/5d3c7cf0cf10b54ed5e426f5c605cd95809941d3) Thanks [@other-yuka](https://github.com/other-yuka)! - Rebake the bundled Claude Code fingerprint from a live Claude Code 2.1.202 capture.
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.80
+
 ## 0.2.79
 
 ### Patch Changes

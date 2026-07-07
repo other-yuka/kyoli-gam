@@ -1,6 +1,6 @@
 {
   "name": "@kyoli-gam/model-registry",
-  "version": "0.0.17",
+  "version": "0.0.18",
   "private": true,
   "description": "Model registry and provider alias resolution for kyoli-gam v1",
   "type": "module",

@@ -1,5 +1,12 @@
 # @kyoli-gam/model-registry
 
+## 0.0.18
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @kyoli-gam/core@0.0.17
+
 ## 0.0.17
 
 ### Patch Changes
