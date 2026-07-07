@@ -1,5 +1,14 @@
 # @kyoli-gam/provider-claude-code
 
+## 0.0.19
+
+### Patch Changes
+
+- [#175](https://github.com/other-yuka/kyoli-gam/pull/175) [`5d3c7cf`](https://github.com/other-yuka/kyoli-gam/commit/5d3c7cf0cf10b54ed5e426f5c605cd95809941d3) Thanks [@other-yuka](https://github.com/other-yuka)! - Rebake the bundled Claude Code fingerprint from a live Claude Code 2.1.202 capture.
+
+- Updated dependencies []:
+  - @kyoli-gam/core@0.0.17
+
 ## 0.0.18
 
 ### Patch Changes
