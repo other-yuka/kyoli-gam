@@ -69,40 +69,77 @@ jobs:
           cat kyoli-doctor-drift.err
           exit "$code"
 
-      - name: Open or update kyoli doctor drift issue
+      - name: Open or update Claude Code drift issue
         if: steps.check.outputs.exit_code == '1'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh label create kyoli-doctor-drift \
-            --color D93F0B \
-            --description "kyoli doctor surfaced runtime Claude/OAuth/template drift" \
+          gh label create claude-code-drift \
+            --color FBCA04 \
+            --description "Claude Code package drift requires kyoli compatibility review" \
             2>/dev/null || true
+
+          cc_version=$(node - <<'NODE'
+          const report = JSON.parse(require("fs").readFileSync("kyoli-doctor-drift.json", "utf8"));
+          const checks = (report.reports ?? []).flatMap((item) => item.checks ?? []);
+          const selected = checks.find((check) => check.name === "selected version")?.detail;
+          const source = typeof selected === "string" ? selected : JSON.stringify(report);
+          console.log(/\b(\d+\.\d+\.\d+)\b/.exec(source)?.[1] ?? "unknown");
+          NODE
+          )
 
           body_file=$(mktemp)
           {
-            echo "## kyoli doctor drift"
+            echo "## Claude Code runtime drift"
             echo ""
-            echo "\`.github/workflows/kyoli-doctor-drift-watch.yml\` detected runtime drift on $(date -Iseconds)."
+            echo "\`.github/workflows/kyoli-doctor-drift-watch.yml\` detected runtime drift against \`@anthropic-ai/claude-code@${cc_version}\` on $(date -Iseconds)."
+            echo ""
+            echo "### Fix checklist"
+            echo ""
+            echo "- [ ] Install the new Claude Code locally: \`npm install -g @anthropic-ai/claude-code@${cc_version}\`."
+            echo "- [ ] Run \`pnpm --dir packages/cli doctor claude --binary\`."
+            echo "- [ ] Run \`pnpm --dir packages/cli doctor claude --template\`, \`pnpm --dir packages/cli doctor claude --wire\`, and \`pnpm --dir packages/cli doctor claude --obedience\`."
+            echo "- [ ] Re-bake only if fingerprint-sensitive fields changed: \`pnpm --dir packages/anthropic-multi-account bake:fingerprint\`."
+            echo "- [ ] Run \`pnpm --filter opencode-anthropic-multi-account test:contract:native\`."
+            echo "- [ ] Add a patch changeset for affected packages when a release is needed."
             echo ""
             echo '```json'
             cat kyoli-doctor-drift.json
             echo '```'
           } > "$body_file"
 
-          existing=$(gh issue list --label kyoli-doctor-drift --state open --json number --jq '.[0].number // ""')
+          title="Claude Code drift detected: v${cc_version}"
+          existing=$(gh issue list --label claude-code-drift --state open --search "in:title \"v${cc_version}\"" --json number --jq '.[0].number // ""')
+          if [ -z "$existing" ]; then
+            existing=$(gh issue list --label kyoli-doctor-drift --state open --json number --jq '.[0].number // ""' 2>/dev/null || true)
+          fi
           if [ -n "$existing" ]; then
-            gh issue edit "$existing" --body-file "$body_file"
+            gh issue edit "$existing" --title "$title" --add-label claude-code-drift --body-file "$body_file"
           else
-            gh issue create --title "kyoli doctor drift detected" --label kyoli-doctor-drift --body-file "$body_file"
+            gh issue create --title "$title" --label claude-code-drift --body-file "$body_file"
           fi
 
-      - name: Auto-close kyoli doctor drift issue on clean run
+      - name: Auto-close Claude Code drift issue on clean run
         if: steps.check.outputs.exit_code == '0'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh issue list --label kyoli-doctor-drift --state open --json number --jq '.[].number' | while read -r n; do
+          cc_version=$(node - <<'NODE'
+          const report = JSON.parse(require("fs").readFileSync("kyoli-doctor-drift.json", "utf8"));
+          const checks = (report.reports ?? []).flatMap((item) => item.checks ?? []);
+          const selected = checks.find((check) => check.name === "selected version")?.detail;
+          const source = typeof selected === "string" ? selected : JSON.stringify(report);
+          console.log(/\b(\d+\.\d+\.\d+)\b/.exec(source)?.[1] ?? "unknown");
+          NODE
+          )
+          if [ "$cc_version" = "unknown" ]; then
+            echo "::notice::Skipping drift issue closure because no concrete Claude Code version was checked."
+            exit 0
+          fi
+          {
+            gh issue list --label claude-code-drift --state open --search "in:title \"v${cc_version}\"" --json number --jq '.[].number'
+            gh issue list --label kyoli-doctor-drift --state open --json number --jq '.[].number' 2>/dev/null || true
+          } | sort -u | while read -r n; do
             [ -z "$n" ] && continue
-            gh issue close "$n" --comment "Auto-closed: kyoli doctor drift check is clean on run https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID."
+            gh issue close "$n" --comment "Auto-closed: Claude Code doctor drift check is clean for v${cc_version} on run https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID."
           done
