@@ -1,5 +1,12 @@
 # @kyoli-gam/provider-claude-code
 
+## 0.0.18
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @kyoli-gam/core@0.0.16
+
 ## 0.0.17
 
 ### Patch Changes
