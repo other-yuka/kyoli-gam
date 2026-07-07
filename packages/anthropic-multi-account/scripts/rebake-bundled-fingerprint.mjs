@@ -78,6 +78,18 @@ function preserveInteractiveOnlyTools(template, pinnedTemplate) {
   };
 }
 
+function preserveBundledFablePrompt(template, pinnedTemplate) {
+  const fablePrompt = pinnedTemplate.system_prompt_fable;
+  if (template.system_prompt_fable || typeof fablePrompt !== "string" || fablePrompt.length === 0) {
+    return template;
+  }
+
+  return {
+    ...template,
+    system_prompt_fable: fablePrompt,
+  };
+}
+
 async function main() {
   if (process.env.ALLOW_FINGERPRINT_OVERWRITE !== "1") {
     throw new Error(
@@ -92,7 +104,9 @@ async function main() {
 
   const pinnedBundled = await loadBundledFingerprint();
   const scrubbed = scrubTemplate(live, { dropMcpTools: true });
-  const bundled = prepareBundledTemplate(preserveInteractiveOnlyTools(scrubbed, pinnedBundled));
+  const bundled = prepareBundledTemplate(
+    preserveBundledFablePrompt(preserveInteractiveOnlyTools(scrubbed, pinnedBundled), pinnedBundled),
+  );
   assertClaudeCodeFingerprint(bundled, pinnedBundled);
   const residualHits = findUserPathHits(JSON.stringify(bundled));
   if (residualHits.length > 0) {
