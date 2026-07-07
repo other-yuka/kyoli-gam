@@ -32,7 +32,7 @@ function commitMessageForVersion(version) {
 
 function prBodyForVersion(version, report) {
   const checkedAt = report.checkedAt ?? new Date().toISOString();
-  return `## Summary\n\nAutomated compat-range refresh for \`@anthropic-ai/claude-code@${version}\`.\n\nThis PR is intentionally limited to the static \`compat.range\` drift class: OAuth URLs/client ID and scanner layout did not drift, so it only advances kyoli's max-tested Claude Code range and adds a patch changeset. Template or wire-shape drift must stay human-gated.\n\n## Validation gate\n\nRequired PR checks must pass before native auto-merge can complete. If local doctor/template/wire validation disagrees with this static report, close this PR and handle the drift manually.\n\n## Drift report\n\n- checkedAt: \`${checkedAt}\`\n- ccVersion: \`${version}\`\n- categories: \`${(report.items ?? []).map((item) => item.category).join(", ")}\`\n\n\`\`\`json\n${JSON.stringify(report, null, 2)}\n\`\`\`\n`;
+  return `## Summary\n\nAutomated compat-range refresh for \`@anthropic-ai/claude-code@${version}\`.\n\nThis PR is intentionally limited to the static \`compat.range\` drift class: OAuth URLs/client ID and scanner layout did not drift, so it advances kyoli's max-tested Claude Code range, updates bundled version metadata used by doctor checks, and adds a patch changeset. Template or wire-shape drift must stay human-gated.\n\n## Validation gate\n\nRequired PR checks must pass before native auto-merge can complete. If local doctor/template/wire validation disagrees with this static report, close this PR and handle the drift manually.\n\n## Drift report\n\n- checkedAt: \`${checkedAt}\`\n- ccVersion: \`${version}\`\n- categories: \`${(report.items ?? []).map((item) => item.category).join(", ")}\`\n\n\`\`\`json\n${JSON.stringify(report, null, 2)}\n\`\`\`\n`;
 }
 
 function writeGithubOutputs(result) {
@@ -116,12 +116,30 @@ function replaceMaxTested(source, nextVersion) {
   return source.replace(pattern, `$1${nextVersion}$2`);
 }
 
+function replaceBundledFingerprintVersion(source, nextVersion) {
+  const versionPattern = /("cc_version":\s*")[^"]+(")/;
+  const userAgentPattern = /("user-agent":\s*"claude-cli\/)[^ "]+( [^"]*")/;
+  if (!versionPattern.test(source)) {
+    throw new Error("Unable to find fingerprint cc_version");
+  }
+  if (!userAgentPattern.test(source)) {
+    throw new Error("Unable to find fingerprint user-agent");
+  }
+  return source
+    .replace(versionPattern, `$1${nextVersion}$2`)
+    .replace(userAgentPattern, `$1${nextVersion}$2`);
+}
+
 function applyCompatRangeFix(report, options = {}) {
   const root = options.packageRootPath ?? packageRoot();
   const repoRoot = join(root, "..", "..");
   const version = report.ccVersion;
   const sourcePath = join(root, "src/claude-code/fingerprint/capture.ts");
   const sourceRelativePath = "packages/anthropic-multi-account/src/claude-code/fingerprint/capture.ts";
+  const anthropicDataPath = join(root, "src/claude-code/fingerprint/data.json");
+  const anthropicDataRelativePath = "packages/anthropic-multi-account/src/claude-code/fingerprint/data.json";
+  const providerDataRelativePath = "packages/providers/claude-code/src/fingerprint/data.json";
+  const providerDataPath = join(repoRoot, providerDataRelativePath);
   const changesetRelativePath = changesetPathForVersion(version);
   const changesetFullPath = join(repoRoot, changesetRelativePath);
   const prBodyPath = "pr-body.md";
@@ -130,10 +148,15 @@ function applyCompatRangeFix(report, options = {}) {
   const updatedSource = replaceMaxTested(source, version);
   writeFileSync(sourcePath, updatedSource);
 
+  for (const dataPath of [anthropicDataPath, providerDataPath]) {
+    const dataSource = readFileSync(dataPath, "utf8");
+    writeFileSync(dataPath, replaceBundledFingerprintVersion(dataSource, version));
+  }
+
   mkdirSync(dirname(changesetFullPath), { recursive: true });
   writeFileSync(
     changesetFullPath,
-    `---\n"opencode-anthropic-multi-account": patch\n---\n\nRefresh Claude Code static drift compatibility metadata for \`@anthropic-ai/claude-code@${version}\`.\n`,
+    `---\n"opencode-anthropic-multi-account": patch\n---\n\nRefresh Claude Code static drift compatibility and bundled version metadata for \`@anthropic-ai/claude-code@${version}\`.\n`,
   );
 
   writeFileSync(join(repoRoot, prBodyPath), prBodyForVersion(version, report));
@@ -141,7 +164,7 @@ function applyCompatRangeFix(report, options = {}) {
   return {
     shouldCreatePr: true,
     shouldOpenIssue: false,
-    changedFiles: [sourceRelativePath, changesetRelativePath],
+    changedFiles: [sourceRelativePath, anthropicDataRelativePath, providerDataRelativePath, changesetRelativePath],
     reason: "compat.range-only drift auto-fix applied",
     branchName: branchNameForVersion(version),
     commitMessage: commitMessageForVersion(version),
@@ -155,6 +178,7 @@ export {
   branchNameForVersion,
   changesetPathForVersion,
   classifyDriftReport,
+  replaceBundledFingerprintVersion,
   replaceMaxTested,
 };
 
