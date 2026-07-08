@@ -64,7 +64,7 @@ export class ModelsDevRegistrySource {
     });
   }
 
-  async listModels(enabledProviders: ProviderId[]): Promise<ModelInfo[]> {
+  async listModels(enabledProviders: ProviderId[], supportedModels: ModelInfo[] = []): Promise<ModelInfo[]> {
     await this.ensureLoaded();
 
     const providerIds = enabledProviders
@@ -72,8 +72,9 @@ export class ModelsDevRegistrySource {
       .filter((providerId): providerId is ModelsDevProviderId => Boolean(providerId));
     if (providerIds.length === 0 || !this.payload) return [];
 
+    const supportedByProvider = supportedModelIdsByProvider(supportedModels);
     return providerIds.flatMap((providerId) =>
-      mapProviderModels(providerId, this.payload?.[providerId]?.models ?? {}),
+      mapProviderModels(providerId, this.payload?.[providerId]?.models ?? {}, supportedByProvider),
     );
   }
 
@@ -159,11 +160,16 @@ export class ModelsDevRegistrySource {
 function mapProviderModels(
   providerId: ModelsDevProviderId,
   models: Record<string, ModelsDevModel>,
+  supportedByProvider: Map<ProviderId, Set<string>>,
 ): ModelInfo[] {
   const kyoliProvider = toKyoliProviderId(providerId);
   const publicProvider = toPublicProviderId(providerId);
+  const supportedIds = supportedByProvider.get(kyoliProvider);
   return Object.entries(models).flatMap(([modelId, model]) => {
     const upstreamId = model.id ?? modelId;
+    if (supportedIds?.size && !supportedIds.has(upstreamId.toLowerCase())) {
+      return [];
+    }
     if (isSuspendedModelsDevModel(providerId, upstreamId)) {
       return [];
     }
@@ -256,13 +262,12 @@ function inferCapabilities(
   if (providerId === "openai") {
     capabilities.add("responses");
     capabilities.add("chat");
-    if (isCodexModel(model)) {
-      capabilities.add("codex");
-    }
+    capabilities.add("codex");
   }
 
   if (providerId === "anthropic") {
     capabilities.add("messages");
+    capabilities.add("claude-code");
   }
 
   if (hasCapability(model, "tool_call") || hasCapability(model, "tools")) {
@@ -276,13 +281,6 @@ function inferCapabilities(
   return [...capabilities];
 }
 
-function isCodexModel(model: ModelsDevModel): boolean {
-  const id = typeof model.id === "string" ? model.id.toLowerCase() : "";
-  const name = typeof model.name === "string" ? model.name.toLowerCase() : "";
-  const family = typeof model.family === "string" ? model.family.toLowerCase() : "";
-  return id.includes("codex") || name.includes("codex") || family.includes("codex");
-}
-
 function hasCapability(model: ModelsDevModel, capability: string): boolean {
   const direct = model[capability];
   if (direct === true) return true;
@@ -294,6 +292,20 @@ function hasCapability(model: ModelsDevModel, capability: string): boolean {
   }
 
   return false;
+}
+
+function supportedModelIdsByProvider(models: ModelInfo[]): Map<ProviderId, Set<string>> {
+  const byProvider = new Map<ProviderId, Set<string>>();
+  for (const model of models) {
+    const ids = byProvider.get(model.provider) ?? new Set<string>();
+    ids.add(stripContextTag(model.upstreamId).toLowerCase());
+    byProvider.set(model.provider, ids);
+  }
+  return byProvider;
+}
+
+function stripContextTag(modelId: string): string {
+  return modelId.replace(/\[1m\]$/i, "");
 }
 
 async function readJsonFile(path: string): Promise<ModelsDevPayload | undefined> {
