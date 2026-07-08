@@ -29,7 +29,7 @@ export class ModelRegistry {
     const models = adapterModels.flat();
 
     if (this.modelsDev) {
-      const remoteModels = await this.modelsDev.listModels([...this.adapters.keys()]);
+      const remoteModels = await this.modelsDev.listModels([...this.adapters.keys()], models);
       models.unshift(...remoteModels);
     }
 

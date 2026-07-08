@@ -89,15 +89,20 @@ const BRIDGE_FORWARD_HEADERS = new Set([
 ]);
 
 const models: ModelInfo[] = [
-  {
-    id: "openai/gpt-5.3-codex",
-    provider: "codex",
-    upstreamId: "gpt-5.3-codex",
-    displayName: "GPT-5.3 Codex",
-    aliases: ["gpt-5.3-codex", "codex/gpt-5.3-codex"],
-    capabilities: ["chat", "responses", "tools", "streaming", "reasoning", "codex"],
-  },
-];
+  ["gpt-5.5", "GPT-5.5"],
+  ["gpt-5.4", "GPT-5.4"],
+  ["gpt-5.4-mini", "GPT-5.4 Mini"],
+  ["gpt-5.3-codex", "GPT-5.3 Codex"],
+  ["gpt-5.3-codex-spark", "GPT-5.3 Codex Spark"],
+  ["gpt-5.2", "GPT-5.2"],
+].map(([upstreamId, displayName]) => ({
+  id: `openai/${upstreamId}`,
+  provider: "codex",
+  upstreamId,
+  displayName,
+  aliases: [upstreamId, `codex/${upstreamId}`],
+  capabilities: ["chat", "responses", "tools", "streaming", "reasoning", "codex"],
+}));
 
 export interface CodexChatGPTProviderOptions {
   accounts?: AccountPool;

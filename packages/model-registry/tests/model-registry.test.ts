@@ -92,7 +92,7 @@ describe("ModelRegistry", () => {
       },
     }));
     const registry = new ModelRegistry([
-      adapter("claude-code", "anthropic/claude-sonnet-5", "claude-sonnet-5", ["claude-code/claude-sonnet-5"]),
+      adapter("claude-code", "anthropic/claude-fable-5", "claude-fable-5", ["fable", "claude-code/claude-fable-5"]),
     ], {
       modelsDev: new ModelsDevRegistrySource({
         sourceUrl: "https://models.dev",
@@ -157,23 +157,30 @@ describe("ModelRegistry", () => {
     });
   });
 
-  it("marks OpenAI models.dev Codex-family models as Codex-capable", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "kyoli-models-dev-"));
+  it("keeps the models.dev Anthropic list to Claude Code models", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "kyoli-claude-code-models-dev-"));
     const localPath = join(dir, "api.json");
     await writeFile(localPath, JSON.stringify({
-      openai: {
+      anthropic: {
         models: {
-          "gpt-5.4-codex": {
-            id: "gpt-5.4-codex",
-            name: "GPT-5.4 Codex",
-            family: "gpt-codex",
+          "claude-sonnet-5": {
+            id: "claude-sonnet-5",
+            name: "Claude Sonnet 5",
+            reasoning: true,
+            tool_call: true,
+          },
+          "claude-opus-4-8": {
+            id: "claude-opus-4-8",
+            name: "Claude Opus 4.8",
             reasoning: true,
             tool_call: true,
           },
         },
       },
     }));
-    const registry = new ModelRegistry([adapter("codex", "codex/fallback", "fallback", [])], {
+    const registry = new ModelRegistry([
+      adapter("claude-code", "anthropic/claude-sonnet-5", "claude-sonnet-5", ["claude-code/claude-sonnet-5"]),
+    ], {
       modelsDev: new ModelsDevRegistrySource({
         sourceUrl: "https://models.dev",
         cachePath: join(dir, "cache.json"),
@@ -185,10 +192,58 @@ describe("ModelRegistry", () => {
     });
 
     await expect(registry.listModels()).resolves.toContainEqual(expect.objectContaining({
-      id: "openai/gpt-5.4-codex",
+      id: "anthropic/claude-sonnet-5",
+      provider: "claude-code",
+      upstreamId: "claude-sonnet-5",
+      capabilities: expect.arrayContaining(["messages", "claude-code", "reasoning", "tools"]),
+    }));
+    await expect(registry.listModels()).resolves.not.toContainEqual(expect.objectContaining({
+      id: "anthropic/claude-opus-4-8",
+    }));
+  });
+
+  it("keeps the models.dev OpenAI list to Codex-supported models", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "kyoli-models-dev-"));
+    const localPath = join(dir, "api.json");
+    await writeFile(localPath, JSON.stringify({
+      openai: {
+        models: {
+          "gpt-5.5": {
+            id: "gpt-5.5",
+            name: "GPT-5.5",
+            family: "gpt",
+            reasoning: true,
+            tool_call: true,
+          },
+          "gpt-5.2-pro": {
+            id: "gpt-5.2-pro",
+            name: "GPT-5.2 Pro",
+            family: "gpt-pro",
+            reasoning: true,
+            tool_call: true,
+          },
+        },
+      },
+    }));
+    const registry = new ModelRegistry([adapter("codex", "openai/gpt-5.5", "gpt-5.5", ["codex/gpt-5.5"])], {
+      modelsDev: new ModelsDevRegistrySource({
+        sourceUrl: "https://models.dev",
+        cachePath: join(dir, "cache.json"),
+        localPath,
+        disableFetch: true,
+        refreshIntervalMs: 60_000,
+        fetchTimeoutMs: 10_000,
+      }),
+    });
+
+    await expect(registry.listModels()).resolves.toContainEqual(expect.objectContaining({
+      id: "openai/gpt-5.5",
       provider: "codex",
-      upstreamId: "gpt-5.4-codex",
+      upstreamId: "gpt-5.5",
       capabilities: expect.arrayContaining(["chat", "responses", "codex", "reasoning", "tools"]),
+    }));
+    await expect(registry.listModels()).resolves.not.toContainEqual(expect.objectContaining({
+      id: "openai/gpt-5.2-pro",
     }));
   });
 });
