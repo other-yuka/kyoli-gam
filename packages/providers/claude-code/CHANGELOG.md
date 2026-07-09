@@ -1,5 +1,14 @@
 # @kyoli-gam/provider-claude-code
 
+## 0.0.20
+
+### Patch Changes
+
+- [#180](https://github.com/other-yuka/kyoli-gam/pull/180) [`670f55b`](https://github.com/other-yuka/kyoli-gam/commit/670f55b0d5b34d3fa54141758580ab76cd906326) Thanks [@other-yuka](https://github.com/other-yuka)! - Rebake the bundled Claude Code fingerprint from a live Claude Code 2.1.204 capture and advance the max-tested compatibility range.
+
+- Updated dependencies []:
+  - @kyoli-gam/core@0.0.18
+
 ## 0.0.19
 
 ### Patch Changes
