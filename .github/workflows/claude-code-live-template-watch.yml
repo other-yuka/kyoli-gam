@@ -1,6 +1,8 @@
 name: Claude Code live template watch
 
 on:
+  schedule:
+    - cron: "*/30 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -35,7 +37,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build Claude OpenCode package
-        run: pnpm --filter opencode-anthropic-multi-account build
+        run: pnpm --filter opencode-anthropic-multi-account... build
 
       - name: Run live template drift check
         id: check

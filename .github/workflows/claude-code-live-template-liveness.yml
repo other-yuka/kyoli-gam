@@ -1,6 +1,8 @@
 name: Claude Code live template liveness
 
 on:
+  schedule:
+    - cron: "15 */2 * * *"
   workflow_dispatch:
     inputs:
       threshold_hours:
@@ -31,14 +33,15 @@ jobs:
       - name: Check live template watcher liveness
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          THRESHOLD_HOURS: ${{ github.event.inputs.threshold_hours || '30' }}
+          THRESHOLD_HOURS: ${{ github.event.inputs.threshold_hours || '8' }}
+          THRESHOLD_OVERRIDE: ${{ github.event.inputs.threshold_hours }}
         run: |
           set -eo pipefail
 
           case "$THRESHOLD_HOURS" in
             ''|*[!0-9]*)
-              echo "::warning::invalid threshold_hours=${THRESHOLD_HOURS}; using 30"
-              THRESHOLD_HOURS=30
+              echo "::warning::invalid threshold_hours=${THRESHOLD_HOURS}; using 8"
+              THRESHOLD_HOURS=8
               ;;
           esac
 
@@ -80,8 +83,32 @@ jobs:
 
           echo "::warning::live template watcher is stale; attempting one workflow_dispatch before alerting"
           dispatch_status="not-attempted"
-          if gh workflow run claude-code-live-template-watch.yml --ref main 2>/dev/null; then
+          if [ -n "$THRESHOLD_OVERRIDE" ]; then
+            dispatch_status="skipped-for-threshold-override"
+          elif gh workflow run claude-code-live-template-watch.yml --ref main 2>/dev/null; then
             dispatch_status="triggered"
+            recovered=false
+            for _ in $(seq 1 12); do
+              sleep 10
+              latest=$(gh api \
+                "repos/${GITHUB_REPOSITORY}/actions/workflows/claude-code-live-template-watch.yml/runs?status=success&per_page=1" \
+                --jq '.workflow_runs[0].created_at // ""' \
+                2>/dev/null || true)
+              if [ -n "$latest" ] && [ "$latest" != "$last_success" ]; then
+                recovered=true
+                break
+              fi
+            done
+
+            if [ "$recovered" = "true" ]; then
+              if [ -n "$existing" ]; then
+                gh issue close "$existing" \
+                  --comment "Auto-closed: live template watcher self-recovered at ${latest}."
+              fi
+              exit 0
+            fi
+
+            dispatch_status="triggered-without-success"
           else
             dispatch_status="failed"
           fi
