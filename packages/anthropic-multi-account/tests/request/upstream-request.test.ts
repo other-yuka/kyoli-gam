@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "vitest";
 import { createHash } from "node:crypto";
-import bundledFingerprintData from "../../src/claude-code/fingerprint/data.json";
+import bundledFingerprintData from "@kyoli-gam/provider-claude-code/fingerprint-data";
 import type { ClaudeIdentity } from "../../src/claude-code/identity";
 import type { TemplateData } from "../../src/claude-code/fingerprint/capture";
 import {

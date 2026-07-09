@@ -134,10 +134,8 @@ function applyCompatRangeFix(report, options = {}) {
   const root = options.packageRootPath ?? packageRoot();
   const repoRoot = join(root, "..", "..");
   const version = report.ccVersion;
-  const sourcePath = join(root, "src/claude-code/fingerprint/capture.ts");
-  const sourceRelativePath = "packages/anthropic-multi-account/src/claude-code/fingerprint/capture.ts";
-  const anthropicDataPath = join(root, "src/claude-code/fingerprint/data.json");
-  const anthropicDataRelativePath = "packages/anthropic-multi-account/src/claude-code/fingerprint/data.json";
+  const sourceRelativePath = "packages/providers/claude-code/src/fingerprint-capture.ts";
+  const sourcePath = join(repoRoot, sourceRelativePath);
   const providerDataRelativePath = "packages/providers/claude-code/src/fingerprint/data.json";
   const providerDataPath = join(repoRoot, providerDataRelativePath);
   const changesetRelativePath = changesetPathForVersion(version);
@@ -148,10 +146,8 @@ function applyCompatRangeFix(report, options = {}) {
   const updatedSource = replaceMaxTested(source, version);
   writeFileSync(sourcePath, updatedSource);
 
-  for (const dataPath of [anthropicDataPath, providerDataPath]) {
-    const dataSource = readFileSync(dataPath, "utf8");
-    writeFileSync(dataPath, replaceBundledFingerprintVersion(dataSource, version));
-  }
+  const providerDataSource = readFileSync(providerDataPath, "utf8");
+  writeFileSync(providerDataPath, replaceBundledFingerprintVersion(providerDataSource, version));
 
   mkdirSync(dirname(changesetFullPath), { recursive: true });
   writeFileSync(
@@ -164,7 +160,7 @@ function applyCompatRangeFix(report, options = {}) {
   return {
     shouldCreatePr: true,
     shouldOpenIssue: false,
-    changedFiles: [sourceRelativePath, anthropicDataRelativePath, providerDataRelativePath, changesetRelativePath],
+    changedFiles: [sourceRelativePath, providerDataRelativePath, changesetRelativePath],
     reason: "compat.range-only drift auto-fix applied",
     branchName: branchNameForVersion(version),
     commitMessage: commitMessageForVersion(version),

@@ -5,7 +5,11 @@
     "moduleResolution": "bundler",
     "paths": {
       "opencode-multi-account-core": ["../multi-account-core/src/index.ts"],
-      "@kyoli-gam/provider-claude-code/opencode": ["../providers/claude-code/src/opencode-shared.ts"]
+      "@kyoli-gam/provider-claude-code/opencode": ["../providers/claude-code/src/opencode-shared.ts"],
+      "@kyoli-gam/provider-claude-code/fingerprint-data": ["../providers/claude-code/src/fingerprint-data.ts"],
+      "@kyoli-gam/provider-claude-code/fingerprint": ["../providers/claude-code/src/fingerprint-capture.ts"],
+      "@kyoli-gam/provider-claude-code/scrub-template": ["../providers/claude-code/src/scrub-template.ts"],
+      "@kyoli-gam/provider-claude-code/cli-version": ["../providers/claude-code/src/cli-version.ts"]
     },
     "esModuleInterop": true,
     "strict": true,

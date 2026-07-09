@@ -191,6 +191,9 @@ importers:
       '@kyoli-gam/core':
         specifier: workspace:*
         version: link:../../core
+      opencode-multi-account-core:
+        specifier: workspace:*
+        version: link:../../multi-account-core
     devDependencies:
       '@types/node':
         specifier: ^25.9.3

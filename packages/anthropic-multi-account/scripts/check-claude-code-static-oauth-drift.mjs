@@ -175,9 +175,13 @@ function projectRoot() {
   return join(dirname(fileURLToPath(import.meta.url)), "..");
 }
 
+function repoRoot() {
+  return join(projectRoot(), "..", "..");
+}
+
 function readSupportedCCRange() {
   const candidates = [
-    join(projectRoot(), "src/claude-code/fingerprint/capture.ts"),
+    join(repoRoot(), "packages/providers/claude-code/src/fingerprint-capture.ts"),
     join(projectRoot(), "dist/fingerprint-capture.js"),
   ];
 

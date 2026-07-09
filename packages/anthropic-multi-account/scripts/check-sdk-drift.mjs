@@ -7,7 +7,8 @@ import { fileURLToPath } from "node:url";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const packageRoot = join(scriptDir, "..");
-const fingerprintPath = join(packageRoot, "src/claude-code/fingerprint/data.json");
+const repoRoot = join(packageRoot, "..", "..");
+const fingerprintPath = join(repoRoot, "packages/providers/claude-code/src/fingerprint/data.json");
 const NPM_VIEW_ATTEMPTS = 3;
 
 class InfraError extends Error {

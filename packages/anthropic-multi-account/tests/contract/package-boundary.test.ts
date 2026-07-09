@@ -14,7 +14,7 @@ async function listTsFiles(dir: string): Promise<string[]> {
 }
 
 describe("package boundaries", () => {
-  test("plugin source imports Claude Code helpers through the public OpenCode seam", async () => {
+  test("plugin source imports Claude Code helpers through public provider seams", async () => {
     const files = await listTsFiles(join(dirname(fileURLToPath(import.meta.url)), "../../src"));
     const offenders: string[] = [];
 

@@ -19,15 +19,13 @@ function makeTempPackageRoot() {
   mkdirSync(join(packageRoot, "src/claude-code/fingerprint"), { recursive: true });
   mkdirSync(join(repoRoot, "packages/providers/claude-code/src/fingerprint"), { recursive: true });
   writeFileSync(
-    join(packageRoot, "src/claude-code/fingerprint/capture.ts"),
+    join(repoRoot, "packages/providers/claude-code/src/fingerprint-capture.ts"),
     `export const SUPPORTED_CC_RANGE = {\n  min: "1.0.0",\n  maxTested: "2.1.161",\n} as const;\n`,
   );
-  for (const path of [
-    join(packageRoot, "src/claude-code/fingerprint/data.json"),
+  writeFileSync(
     join(repoRoot, "packages/providers/claude-code/src/fingerprint/data.json"),
-  ]) {
-    writeFileSync(path, `{\n  "cc_version": "2.1.161",\n  "header_values": {\n    "user-agent": "claude-cli/2.1.161 (external, sdk-cli)"\n  }\n}\n`);
-  }
+    `{\n  "cc_version": "2.1.161",\n  "header_values": {\n    "user-agent": "claude-cli/2.1.161 (external, sdk-cli)"\n  }\n}\n`,
+  );
   return { repoRoot, packageRoot };
 }
 
@@ -93,15 +91,12 @@ describe("auto-draft static OAuth drift fix", () => {
     }, { packageRootPath: packageRoot });
 
     expect(result.changedFiles).toEqual([
-      "packages/anthropic-multi-account/src/claude-code/fingerprint/capture.ts",
-      "packages/anthropic-multi-account/src/claude-code/fingerprint/data.json",
+      "packages/providers/claude-code/src/fingerprint-capture.ts",
       "packages/providers/claude-code/src/fingerprint/data.json",
       ".changeset/claude-code-2-1-162-drift.md",
     ]);
-    expect(readFileSync(join(packageRoot, "src/claude-code/fingerprint/capture.ts"), "utf8"))
+    expect(readFileSync(join(repoRoot, "packages/providers/claude-code/src/fingerprint-capture.ts"), "utf8"))
       .toContain(`maxTested: "2.1.162"`);
-    expect(readFileSync(join(packageRoot, "src/claude-code/fingerprint/data.json"), "utf8"))
-      .toContain(`claude-cli/2.1.162`);
     expect(readFileSync(join(repoRoot, "packages/providers/claude-code/src/fingerprint/data.json"), "utf8"))
       .toContain(`"cc_version": "2.1.162"`);
     expect(readFileSync(join(repoRoot, ".changeset/claude-code-2-1-162-drift.md"), "utf8"))

@@ -1,4 +1,4 @@
-import fingerprintData from "./fingerprint/data.json";
+import fingerprintData from "./fingerprint-data";
 
 type TemplateTool = {
   name: string;
