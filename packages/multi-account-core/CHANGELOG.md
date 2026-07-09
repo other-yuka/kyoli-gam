@@ -1,5 +1,11 @@
 # opencode-multi-account-core
 
+## 0.2.84
+
+### Patch Changes
+
+- [#193](https://github.com/other-yuka/kyoli-gam/pull/193) [`67b3b4e`](https://github.com/other-yuka/kyoli-gam/commit/67b3b4efef3426c56b8212b6256e4d5151375393) Thanks [@other-yuka](https://github.com/other-yuka)! - Hide pre-output Codex quota failures and replay the same request with the next available account. Treat model-capacity failures as bounded same-account retries without putting the account into cooldown.
+
 ## 0.2.83
 
 ## 0.2.82
