@@ -22,11 +22,22 @@ describe("runClaudeBillingClaimDoctor", () => {
     expect(report.summary.fail).toBe(0);
     const billingClaim = report.checks.find((check) => check.name === "billing claim");
     expect(billingClaim).toMatchObject({ status: "pass" });
-    expect(billingClaim?.detail).toContain("claim=five_hour");
+    expect(billingClaim?.detail).toContain("classification=subscription");
+    expect(billingClaim?.detail).not.toContain("claim=five_hour");
     expect(billingClaim?.detail).toContain("status=allowed");
   });
 
+  it("redacts account and utilization metadata", async () => {
+    const store = await createClaudeStore(2);
+    const fetchImpl = createSequencedClaudeFetch(["overage", "five_hour"]);
 
+    const report = await runClaudeBillingClaimDoctor(store, config, { fetch: fetchImpl });
+    const serialized = JSON.stringify(report);
+
+    expect(report.checks.find((check) => check.name === "account inventory")?.detail).toBe("available");
+    expect(report.checks.find((check) => check.name === "account selected")?.detail).toBe("selected");
+    expect(serialized).not.toMatch(/account-uuid|device-id|access-token|fallback_pct|util_5h|0\.08/);
+  });
 
   it("does not send kyoli routing headers in the canary upstream request", async () => {
     const store = await createClaudeStore();
@@ -87,8 +98,9 @@ describe("runClaudeBillingClaimDoctor", () => {
 
     const billingClaim = report.checks.find((check) => check.name === "billing claim");
     expect(billingClaim).toMatchObject({ status: "fail" });
-    expect(billingClaim?.detail).toContain("claim=five_hour");
-    expect(billingClaim?.detail).toContain("blocked_accounts=");
+    expect(billingClaim?.detail).toContain("classification=non_subscription");
+    expect(billingClaim?.detail).toContain("blocked_non_subscription_claim=true");
+    expect(billingClaim?.detail).not.toContain("claim=five_hour");
   });
 
   it("fails when the served model is downgraded", async () => {
@@ -156,6 +168,8 @@ function createSequencedClaudeFetch(
         "content-type": "application/json",
         "anthropic-ratelimit-unified-representative-claim": claim,
         "anthropic-ratelimit-unified-status": claim === "overage" ? "blocked" : "allowed",
+        "anthropic-ratelimit-unified-fallback-percentage": "0.5",
+        "anthropic-ratelimit-unified-5h-utilization": "0.08",
       },
     });
   }) as typeof fetch;
