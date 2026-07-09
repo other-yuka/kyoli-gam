@@ -25,7 +25,7 @@ export {
   stripClaudeCodeContext1mTag,
   stripClaudeCodeProviderPrefix,
   toClaudeCodeWireModelId,
-} from "./model-catalog";
+} from "./model-aliases";
 
 const CLAUDE_CODE_API_BASE_URL = "https://api.anthropic.com";
 const STAINLESS_PACKAGE_VERSION = "0.81.0";

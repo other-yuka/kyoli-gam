@@ -28,7 +28,7 @@ concurrency:
 
 jobs:
   billing_claim:
-    if: github.event_name == 'workflow_dispatch' || vars.KYOLI_CLAUDE_BILLING_CLAIM_CANARY_ENABLED == 'true'
+    if: github.ref == 'refs/heads/main' && vars.KYOLI_CLAUDE_BILLING_CLAIM_CANARY_ENABLED == 'true'
     runs-on: [self-hosted, claude-auth]
     timeout-minutes: 10
     steps:

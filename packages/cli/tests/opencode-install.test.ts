@@ -154,6 +154,21 @@ describe("installOpenCode", () => {
     expect(allResult.providers.find((provider) => provider.id === "openai")?.modelCount).toBe(2);
   });
 
+  it("preserves gateway metadata context limits for long-context models", async () => {
+    const root = join(tmpdir(), `kyoli-opencode-install-${Date.now()}-context`);
+    const configDir = join(root, "opencode");
+    const env = createOpenCodeTestEnv(root);
+
+    const result = await installOpenCode(
+      { host: "127.0.0.1", port: 2021 },
+      { configDir, dryRun: true, allModels: true, fetch: createModelsFetch({ includeLongContextClaude: true }), env },
+    );
+    const provider = (result.config.provider as Record<string, any>).anthropic;
+
+    expect(provider.models["claude-sonnet-5[1m]"].limit.context).toBe(1_000_000);
+    expect(provider.models["claude-sonnet-5"].limit.context).toBe(200_000);
+  });
+
   it("can preserve an existing OpenAI provider while installing Anthropic", async () => {
     const root = join(tmpdir(), `kyoli-opencode-install-${Date.now()}-preserve`);
     const configDir = join(root, "opencode");
@@ -212,9 +227,39 @@ describe("installOpenCode", () => {
     expect(restored).toEqual({ newer: true });
     expect(restoredAuth).toEqual({ restoredAuth: true });
   });
+
+  it("does not pair an explicit config backup with the latest auth backup", async () => {
+    const root = join(tmpdir(), `kyoli-opencode-install-${Date.now()}-restore-explicit`);
+    const configDir = join(root, "opencode");
+    const configPath = join(configDir, "opencode.json");
+    const authPath = join(root, "data", "opencode", "auth.json");
+    const olderBackup = `${configPath}.bak-20260101T000000Z`;
+    const newerAuthBackup = `${authPath}.bak-20260102T000000Z`;
+    await mkdir(configDir, { recursive: true });
+    await mkdir(join(root, "data", "opencode"), { recursive: true });
+    await writeFile(configPath, JSON.stringify({ current: true }));
+    await writeFile(authPath, JSON.stringify({ currentAuth: true }));
+    await writeFile(olderBackup, JSON.stringify({ older: true }));
+    await writeFile(newerAuthBackup, JSON.stringify({ unrelatedAuth: true }));
+
+    const result = await restoreOpenCode({
+      configDir,
+      backupPath: olderBackup,
+      env: createOpenCodeTestEnv(root),
+    });
+    const restored = JSON.parse(await readFile(configPath, "utf8")) as Record<string, any>;
+    const currentAuth = JSON.parse(await readFile(authPath, "utf8")) as Record<string, any>;
+
+    expect(result.backupPath).toBe(olderBackup);
+    expect(result.authBackupPath).toBeUndefined();
+    expect(result.authRestored).toBe(false);
+    expect(restored).toEqual({ older: true });
+    expect(currentAuth).toEqual({ currentAuth: true });
+    expect(result.warnings.join("\n")).toContain("auth.json was not restored");
+  });
 });
 
-function createModelsFetch(options: { includeSecondCodex?: boolean } = {}): typeof fetch {
+function createModelsFetch(options: { includeSecondCodex?: boolean; includeLongContextClaude?: boolean } = {}): typeof fetch {
   return (async (input: RequestInfo | URL) => {
     expect(String(input)).toBe("http://127.0.0.1:2021/v1/models");
     const data = [
@@ -252,6 +297,20 @@ function createModelsFetch(options: { includeSecondCodex?: boolean } = {}): type
         },
       },
     ];
+    if (options.includeLongContextClaude) {
+      data.push({
+        id: "anthropic/claude-sonnet-5[1m]",
+        object: "model",
+        owned_by: "claude-code",
+        kyoli: {
+          provider: "claude-code",
+          upstream_id: "claude-sonnet-5[1m]",
+          display_name: "Claude Sonnet 5 [1m]",
+          capabilities: ["messages", "tools", "reasoning"],
+          metadata: { max_context_window: 1_000_000 },
+        },
+      });
+    }
     if (options.includeSecondCodex) {
       data.splice(1, 0, {
         id: "openai/gpt-5.3-codex-spark",

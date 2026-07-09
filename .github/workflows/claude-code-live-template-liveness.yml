@@ -20,6 +20,7 @@ concurrency:
 
 jobs:
   liveness:
+    if: vars.KYOLI_CLAUDE_LIVE_TEMPLATE_WATCH_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -79,7 +80,7 @@ jobs:
 
           echo "::warning::live template watcher is stale; attempting one workflow_dispatch before alerting"
           dispatch_status="not-attempted"
-          if gh workflow run claude-code-live-template-watch.yml --ref "$GITHUB_REF_NAME" 2>/dev/null; then
+          if gh workflow run claude-code-live-template-watch.yml --ref main 2>/dev/null; then
             dispatch_status="triggered"
           else
             dispatch_status="failed"

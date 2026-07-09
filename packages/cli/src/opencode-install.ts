@@ -90,6 +90,7 @@ interface OpenCodeModelInfo {
   upstreamId: string;
   displayName?: string;
   capabilities: string[];
+  metadata?: Record<string, unknown>;
 }
 
 const KYOLI_LOCAL_API_KEY = "kyoli-local";
@@ -212,7 +213,7 @@ export async function restoreOpenCode(
     ? expandPath(options.backupPath)
     : await findLatestBackupPath(configPath);
   const authPath = resolveOpenCodeAuthPath(options);
-  const authBackupPath = await findLatestBackupPath(authPath);
+  const authBackupPath = options.backupPath ? undefined : await findLatestBackupPath(authPath);
 
   if (!backupPath) {
     return {
@@ -226,7 +227,9 @@ export async function restoreOpenCode(
     };
   }
 
-  if (!authBackupPath) {
+  if (options.backupPath) {
+    warnings.push("Explicit opencode.json backup was provided; auth.json was not restored to avoid mixing backups from different install runs.");
+  } else if (!authBackupPath) {
     warnings.push(`No auth backup found for ${authPath}; only opencode.json will be restored.`);
   }
 
@@ -559,6 +562,7 @@ function readGatewayModels(value: unknown): OpenCodeModelInfo[] {
         upstreamId,
         displayName: typeof kyoli.display_name === "string" ? kyoli.display_name : undefined,
         capabilities,
+        metadata: isRecord(kyoli.metadata) ? kyoli.metadata : undefined,
       };
     })
     .filter((model): model is OpenCodeModelInfo => Boolean(model));
@@ -571,6 +575,7 @@ function toOpenCodeModelInfo(model: ModelInfo): OpenCodeModelInfo {
     upstreamId: model.upstreamId,
     displayName: model.displayName,
     capabilities: model.capabilities,
+    metadata: model.metadata,
   };
 }
 
@@ -688,9 +693,16 @@ function toOpenCodeModelConfig(
 }
 
 function defaultLimit(model: OpenCodeModelInfo): { context: number; output: number } {
-  if (model.provider === "anthropic") return { context: 200000, output: 64000 };
+  const metadataContext = readPositiveInteger(model.metadata?.max_context_window);
+  if (model.provider === "anthropic") {
+    return { context: metadataContext ?? 200000, output: 64000 };
+  }
   if (model.upstreamId.includes("gpt-5.4")) return { context: 1050000, output: 128000 };
   return { context: 272000, output: 65536 };
+}
+
+function readPositiveInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : undefined;
 }
 
 function isKyoliManagedModel(value: unknown): boolean {

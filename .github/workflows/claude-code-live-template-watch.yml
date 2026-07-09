@@ -14,13 +14,13 @@ concurrency:
 
 jobs:
   live_template:
-    if: github.event_name == 'workflow_dispatch' || vars.KYOLI_CLAUDE_LIVE_TEMPLATE_WATCH_ENABLED == 'true'
+    if: github.ref == 'refs/heads/main' && vars.KYOLI_CLAUDE_LIVE_TEMPLATE_WATCH_ENABLED == 'true'
     runs-on: [self-hosted, claude-auth]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
         with:
-          token: ${{ secrets.KYOLI_DRIFT_BOT_PAT || github.token }}
+          persist-credentials: false
 
       - uses: pnpm/action-setup@v6
         with:
@@ -113,10 +113,16 @@ jobs:
         if: steps.check.outputs.drift_detected == 'true'
         id: rebake
         env:
-          GH_TOKEN: ${{ secrets.KYOLI_DRIFT_BOT_PAT || github.token }}
+          GH_TOKEN: ${{ secrets.KYOLI_DRIFT_BOT_PAT }}
+          KYOLI_DRIFT_BOT_PAT: ${{ secrets.KYOLI_DRIFT_BOT_PAT }}
           ALLOW_FINGERPRINT_SHAPE_CHANGE: "1"
         run: |
           set -euo pipefail
+
+          if [ -z "$KYOLI_DRIFT_BOT_PAT" ]; then
+            echo "::error::KYOLI_DRIFT_BOT_PAT is required to push auto-rebake branches and open PRs that trigger normal pull_request checks."
+            exit 1
+          fi
 
           existing_pr=$(gh pr list \
             --repo "${{ github.repository }}" \
@@ -167,7 +173,7 @@ jobs:
           git checkout -B "$branch"
           git add packages/providers/claude-code/src/fingerprint/data.json "$changeset"
           git commit -m "auto-rebake: Claude Code fingerprint drift v${cc_version}"
-          git push origin "$branch"
+          git push "https://x-access-token:${KYOLI_DRIFT_BOT_PAT}@github.com/${GITHUB_REPOSITORY}.git" "$branch"
 
           body_file=$(mktemp)
           {
