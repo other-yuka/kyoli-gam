@@ -43,7 +43,7 @@ jobs:
         id: check
         run: |
           set +e
-          pnpm --dir packages/anthropic-multi-account run check:fingerprint-drift > live-template-drift.json 2> live-template-drift.err
+          node packages/anthropic-multi-account/scripts/check-live-fingerprint-drift.mjs > live-template-drift.json 2> live-template-drift.err
           code=$?
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"
           if [ "$code" -eq 0 ]; then
@@ -141,7 +141,7 @@ jobs:
 
           pnpm --dir packages/anthropic-multi-account run bake:fingerprint
 
-          pnpm --dir packages/anthropic-multi-account run check:fingerprint-drift > post-rebake-drift.json 2> post-rebake-drift.err
+          node packages/anthropic-multi-account/scripts/check-live-fingerprint-drift.mjs > post-rebake-drift.json 2> post-rebake-drift.err
           cat post-rebake-drift.json
 
           if git diff --quiet -- packages/providers/claude-code/src/fingerprint/data.json; then
