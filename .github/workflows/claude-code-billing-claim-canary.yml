@@ -89,7 +89,7 @@ jobs:
           fi
 
           set +e
-          pnpm --dir packages/cli run doctor claude --billing-claim --model "$KYOLI_CLAUDE_BILLING_CLAIM_MODEL" --json > billing-claim.json 2> billing-claim.err
+          node packages/cli/dist/index.js doctor claude --billing-claim --model "$KYOLI_CLAUDE_BILLING_CLAIM_MODEL" --json > billing-claim.json 2> billing-claim.err
           code=$?
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"
           if [ "$code" -eq 0 ] || [ "$code" -eq 1 ] || [ "$code" -eq 2 ]; then
