@@ -2,6 +2,7 @@ import {
   createOpenCodeNativeAuthMethods,
   createOpenCodeNativeAuthLoader,
   createOpenCodeNativePluginLifecycle,
+  zeroCostProviderModels,
   migrateFromAuthJson,
 } from "opencode-multi-account-core";
 import { AccountManager } from "./account-manager";
@@ -41,6 +42,11 @@ export const CodexMultiAuthPlugin = async (ctx: unknown) => {
   });
 
   return {
+    provider: {
+      id: OPENAI_OAUTH_ADAPTER.authProviderId,
+      models: zeroCostProviderModels,
+    },
+
     auth: {
       provider: OPENAI_OAUTH_ADAPTER.authProviderId,
       methods: createOpenCodeNativeAuthMethods({

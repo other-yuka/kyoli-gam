@@ -5,7 +5,7 @@ import {
   resetDetectedVersionForTest,
   setCliVersionDetectionOverridesForTest,
 } from "../../src/claude-code/cli-version";
-import bundledFingerprintData from "../../src/claude-code/fingerprint/data.json";
+import bundledFingerprintData from "@kyoli-gam/provider-claude-code/fingerprint-data";
 
 const execFileSyncMock = vi.fn();
 

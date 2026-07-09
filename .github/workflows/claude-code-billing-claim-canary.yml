@@ -1,0 +1,168 @@
+name: Claude Code billing claim canary
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: Optional Claude Code model id for the canary request
+        required: false
+        default: "anthropic/claude-opus-4-8"
+      force_status:
+        description: Override verdict for workflow path validation only
+        required: false
+        type: choice
+        default: none
+        options:
+          - none
+          - pass
+          - warn
+          - fail
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: claude-code-billing-claim-canary
+  cancel-in-progress: false
+
+jobs:
+  billing_claim:
+    if: github.ref == 'refs/heads/main' && vars.KYOLI_CLAUDE_BILLING_CLAIM_CANARY_ENABLED == 'true'
+    runs-on: [self-hosted, claude-auth]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build CLI
+        run: pnpm --filter @kyoli-gam/cli build
+
+      - name: Run billing claim doctor
+        id: check
+        env:
+          KYOLI_CLAUDE_BILLING_CLAIM_MODEL: ${{ github.event.inputs.model || 'anthropic/claude-opus-4-8' }}
+          FORCE_STATUS: ${{ github.event.inputs.force_status || 'none' }}
+        run: |
+          if [ "$FORCE_STATUS" != "none" ]; then
+            node - "$FORCE_STATUS" > billing-claim.json <<'NODE'
+          const status = process.argv[2];
+          const summary = status === "fail"
+            ? { pass: 3, warn: 0, fail: 1 }
+            : status === "warn"
+              ? { pass: 3, warn: 1, fail: 0 }
+              : { pass: 4, warn: 0, fail: 0 };
+          const checkStatus = status === "fail" ? "fail" : status === "warn" ? "warn" : "pass";
+          console.log(JSON.stringify({
+            name: "claude/billing-claim",
+            summary,
+            checks: [
+              { name: "forced verdict", status: checkStatus, detail: `force_status=${status}` },
+              { name: "billing claim", status: checkStatus, detail: `claim=forced-${status} status=forced` },
+            ],
+          }, null, 2));
+          NODE
+            case "$FORCE_STATUS" in
+              pass) code=0 ;;
+              warn) code=2 ;;
+              fail) code=1 ;;
+              *) echo "Unsupported force_status=$FORCE_STATUS" >&2; exit 64 ;;
+            esac
+            echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+            cat billing-claim.json
+            exit 0
+          fi
+
+          set +e
+          pnpm --dir packages/cli run doctor claude --billing-claim --model "$KYOLI_CLAUDE_BILLING_CLAIM_MODEL" --json > billing-claim.json 2> billing-claim.err
+          code=$?
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          if [ "$code" -eq 0 ] || [ "$code" -eq 1 ] || [ "$code" -eq 2 ]; then
+            cat billing-claim.json
+            exit 0
+          fi
+          cat billing-claim.err
+          exit "$code"
+
+      - name: Upload billing claim artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: claude-code-billing-claim-canary
+          path: |
+            billing-claim.json
+            billing-claim.err
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Open or update billing claim issue
+        if: steps.check.outputs.exit_code == '1' || steps.check.outputs.exit_code == '2'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create claude-code-drift \
+            --color FBCA04 \
+            --description "Claude Code package drift requires kyoli compatibility review" \
+            2>/dev/null || true
+
+          if [ "${{ steps.check.outputs.exit_code }}" = "2" ]; then
+            verdict="warning"
+            title="Claude Code billing claim canary warning"
+          else
+            verdict="failed"
+            title="Claude Code billing claim canary failed"
+          fi
+
+          body_file=$(mktemp)
+          {
+            echo "## Claude Code billing claim canary ${verdict}"
+            echo ""
+            echo "The self-hosted billing claim canary ${verdict} on $(date -Iseconds)."
+            echo ""
+            echo "### Fix checklist"
+            echo ""
+            echo "- [ ] Confirm the runner has a stored kyoli Claude Code OAuth account: \`pnpm --dir packages/cli run accounts list claude-code\`."
+            echo "- [ ] Check whether \`anthropic-ratelimit-unified-representative-claim\` is subscription-backed, not API/overage/credit-backed."
+            echo "- [ ] Do not hide non-subscription billing claims behind fallback; fix routing or re-auth the account."
+            echo ""
+            echo '```json'
+            cat billing-claim.json
+            echo '```'
+            if [ -s billing-claim.err ]; then
+              echo ""
+              echo "### stderr"
+              echo '```text'
+              cat billing-claim.err
+              echo '```'
+            fi
+          } > "$body_file"
+
+          existing=$(gh issue list --label claude-code-drift --state open --search '"Claude Code billing claim canary" in:title' --json number --jq '.[0].number // ""')
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --title "$title" --body-file "$body_file"
+          else
+            gh issue create --title "$title" --label claude-code-drift --body-file "$body_file"
+          fi
+
+      - name: Auto-close billing claim issue on clean run
+        if: steps.check.outputs.exit_code == '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue list --label claude-code-drift --state open --search '"Claude Code billing claim canary" in:title' --json number --jq '.[].number' | while read -r n; do
+            [ -z "$n" ] && continue
+            gh issue close "$n" --comment "Auto-closed: billing claim canary is clean on run https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID."
+          done

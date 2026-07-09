@@ -1,9 +1,8 @@
-import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
-const bundledTemplateJson = JSON.parse(
-  readFileSync(new URL("../../src/claude-code/fingerprint/data.json", import.meta.url), "utf8"),
-) as MinimalTemplate;
+import bundledTemplateJson from "@kyoli-gam/provider-claude-code/fingerprint-data";
+
+const bundledTemplate = bundledTemplateJson as MinimalTemplate;
 
 const detectCliVersionMock = vi.fn(() => "2.3.5");
 const loadTemplateMock = vi.fn();
@@ -54,7 +53,6 @@ function createMinimalTemplate(overrides?: Partial<MinimalTemplate>): MinimalTem
 }
 
 function getBundledBetaFallback(): string {
-  const bundledTemplate = bundledTemplateJson as MinimalTemplate;
   return bundledTemplate.anthropic_beta ?? bundledTemplate.header_values?.["anthropic-beta"] ?? "";
 }
 

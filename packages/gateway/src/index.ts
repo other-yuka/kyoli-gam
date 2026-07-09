@@ -27,6 +27,7 @@ import {
   isCurrentlyAuthCoolingDown,
   isCurrentlyRateLimited,
   jsonResponse,
+  ModelRegistry,
   listBlockedAccounts,
   listExpiredRateLimitAccounts,
   listFailedAccounts,
@@ -38,11 +39,6 @@ import {
   summarizeAccountStatus,
   toPublicAccount,
 } from "@kyoli-gam/core";
-import {
-  ModelRegistry,
-  ModelsDevRegistrySource,
-  toOpenAIModelList,
-} from "@kyoli-gam/model-registry";
 import {
   CodexRateLimitResetError,
   consumeCodexRateLimitResetCredit,
@@ -118,13 +114,9 @@ const OLD_ROUTE_PIN_TTL_SECONDS = 24 * 60 * 60;
 
 export function createGateway(options: GatewayOptions): Gateway {
   const config = resolveGatewayConfig(options.config);
-  const registry = new ModelRegistry(options.providers, {
-    modelsDev: ModelsDevRegistrySource.fromEnv(),
-  });
+  const registry = new ModelRegistry(options.providers);
   const accounts = options.accounts ?? new SQLiteAccountStore();
   const localAdmission = createLocalAdmission(options.maxConcurrentRequests ?? 0);
-  registry.startAutoRefresh();
-
   return {
     config,
     async fetch(request) {
@@ -167,12 +159,14 @@ export function createGateway(options: GatewayOptions): Gateway {
       }
 
       if (route === "/v1/models") {
-        const models = await registry.listModels();
+        const models = await listModelsOrError(registry);
+        if (models instanceof Response) return models;
         return jsonResponse(toOpenAIModelList(models));
       }
 
       if (route === "/backend-api/codex/models") {
-        const models = await registry.listModels();
+        const models = await listModelsOrError(registry);
+        if (models instanceof Response) return models;
         return jsonResponse({
           models: toCodexCliModelList(models),
         });
@@ -1652,27 +1646,6 @@ const CODEX_FAST_SERVICE_TIER = {
   description: "1.5x speed, increased usage",
 };
 
-const CODEX_MODEL_ENTRY_BASE_KEYS = new Set([
-  "slug",
-  "display_name",
-  "description",
-  "base_instructions",
-  "default_reasoning_level",
-  "supported_reasoning_levels",
-  "supported_in_api",
-  "priority",
-  "minimal_client_version",
-  "supports_reasoning_summaries",
-  "support_verbosity",
-  "default_verbosity",
-  "supports_parallel_tool_calls",
-  "context_window",
-  "input_modalities",
-  "available_in_plans",
-  "prefer_websockets",
-  "visibility",
-]);
-
 function toCodexCliModelEntry(model: ModelInfo): Record<string, unknown> {
   const contextWindow = model.upstreamId.includes("gpt-5.4") ? 1_050_000 : 272_000;
   const entry: Record<string, unknown> = {
@@ -1730,6 +1703,24 @@ function toCodexCliModelEntry(model: ModelInfo): Record<string, unknown> {
   return entry;
 }
 
+function toOpenAIModelList(models: ModelInfo[]): { object: "list"; data: unknown[] } {
+  return {
+    object: "list",
+    data: models.map((model) => ({
+      id: model.id,
+      object: "model",
+      owned_by: model.provider,
+      kyoli: {
+        provider: model.provider,
+        upstream_id: model.upstreamId,
+        display_name: model.displayName,
+        capabilities: model.capabilities,
+        aliases: model.aliases ?? [],
+      },
+    })),
+  };
+}
+
 function toCodexCliModelList(models: ModelInfo[]): Array<Record<string, unknown>> {
   return [
     ...models
@@ -1742,13 +1733,30 @@ function toCodexCliModelList(models: ModelInfo[]): Array<Record<string, unknown>
   ];
 }
 
+async function listModelsOrError(registry: ModelRegistry): Promise<ModelInfo[] | Response> {
+  try {
+    return await registry.listModels();
+  } catch (error) {
+    const status = readErrorStatus(error) ?? 500;
+    return jsonResponse(
+      {
+        error: {
+          type: "model_catalog_error",
+          message: error instanceof Error ? error.message : "Model catalog failed.",
+        },
+      },
+      { status },
+    );
+  }
+}
+
 function codexCliModelMetadata(model: ModelInfo): Record<string, unknown> {
   const metadata = model.metadata;
   if (!metadata) return {};
 
   const extra: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(metadata)) {
-    if (CODEX_MODEL_ENTRY_BASE_KEYS.has(key)) continue;
+    if (key === "slug") continue;
     if (isJsonObjectValue(value)) {
       extra[key] = value;
     }
@@ -1771,6 +1779,12 @@ function shouldExposeFallbackFastServiceTier(
     ? entry.additional_speed_tiers
     : [];
   return additionalSpeedTiers.length === 0;
+}
+
+function readErrorStatus(error: unknown): number | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  const status = (error as { status?: unknown }).status;
+  return typeof status === "number" && status >= 400 && status <= 599 ? status : undefined;
 }
 
 function isJsonObjectValue(value: unknown): boolean {

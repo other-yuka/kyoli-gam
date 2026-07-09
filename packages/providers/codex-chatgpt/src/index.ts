@@ -28,6 +28,7 @@ import {
 import { canReplayCodexWebSocketFailure } from "./websocket/replay-policy";
 import { CodexWebSocketTurnRouter, type CodexWebSocketRoutePlan } from "./websocket/turn-router";
 import { readCodexWebSocketTurn } from "./websocket/turn-state";
+import { createCodexModelCatalog } from "./model-catalog";
 
 const CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses";
 const CODEX_WEBSOCKET_ENDPOINT = "wss://chatgpt.com/backend-api/codex/responses";
@@ -87,22 +88,13 @@ const BRIDGE_FORWARD_HEADERS = new Set([
   "x-codex-conversation-id",
   "x-codex-session-id",
 ]);
-
-const models: ModelInfo[] = [
-  ["gpt-5.5", "GPT-5.5"],
-  ["gpt-5.4", "GPT-5.4"],
-  ["gpt-5.4-mini", "GPT-5.4 Mini"],
-  ["gpt-5.3-codex", "GPT-5.3 Codex"],
-  ["gpt-5.3-codex-spark", "GPT-5.3 Codex Spark"],
-  ["gpt-5.2", "GPT-5.2"],
-].map(([upstreamId, displayName]) => ({
-  id: `openai/${upstreamId}`,
-  provider: "codex",
-  upstreamId,
-  displayName,
-  aliases: [upstreamId, `codex/${upstreamId}`],
-  capabilities: ["chat", "responses", "tools", "streaming", "reasoning", "codex"],
-}));
+const INTERNAL_ROUTING_HEADERS = new Set([
+  "x-kyoli-session-id",
+  "x-client-session-id",
+  "x-session-id",
+  "session_id",
+  "session-id",
+]);
 
 export interface CodexChatGPTProviderOptions {
   accounts?: AccountPool;
@@ -201,7 +193,15 @@ export function createCodexChatGPTProvider(
   const usageRefresh = options.usageRefresh ?? ((accessToken: string, chatgptAccountId?: string) =>
     fetchCodexUsage(accessToken, chatgptAccountId, fetchImpl));
   const compactAdmission = createLocalAdmission(options.compactMaxConcurrentRequests ?? 0);
-
+  const modelCatalog = createCodexModelCatalog({
+    fetchImpl,
+    selectCredential: (excludeAccountIds) => readOAuthCredential({
+      accounts: options.accounts,
+      sessionKey: "codex-model-catalog",
+      excludeAccountIds,
+      tokenRefresh: options.tokenRefresh ?? refreshCodexToken,
+    }),
+  });
   return {
     id: "codex",
     displayName: "Codex ChatGPT OAuth",
@@ -220,7 +220,7 @@ export function createCodexChatGPTProvider(
       "/backend-api/files/uploaded",
     ],
     async listModels() {
-      return models;
+      return modelCatalog.listModels();
     },
     refreshUsage: ({ account }) =>
       refreshCodexUsageForAccount({
@@ -3199,6 +3199,12 @@ function normalizeResponsesMessages(record: Record<string, unknown>): void {
 }
 
 function normalizeReasoningAliases(record: Record<string, unknown>): void {
+  const reasoning = readRecord(record.reasoning);
+  const existingEffort = readString(reasoning?.effort);
+  if (reasoning && existingEffort) {
+    record.reasoning = { ...reasoning, effort: normalizeReasoningEffort(existingEffort) };
+    return;
+  }
   if (record.reasoning) return;
 
   const reasoningEffort = readString(record.reasoningEffort) ?? readString(record.reasoning_effort);
@@ -3318,10 +3324,18 @@ function normalizeCodexStreamOptions(record: Record<string, unknown>): void {
 }
 
 function normalizeReasoningEffort(value: string): string {
-  const normalized = value.toLowerCase();
-  if (normalized === "minimal" || normalized === "low" || normalized === "medium" || normalized === "high") {
+  const normalized = value.trim().toLowerCase();
+  if (
+    normalized === "minimal" ||
+    normalized === "low" ||
+    normalized === "medium" ||
+    normalized === "high" ||
+    normalized === "xhigh" ||
+    normalized === "max"
+  ) {
     return normalized;
   }
+  if (normalized === "ultra") return "max";
   return "medium";
 }
 
@@ -3342,6 +3356,7 @@ function buildUpstreamHeaders(
     ? buildBridgeHeaders(headers)
     : new Headers(headers);
   deleteBlockedUpstreamHeaders(upstream);
+  deleteInternalRoutingHeaders(upstream);
   upstream.set("authorization", `Bearer ${accessToken}`);
   upstream.set("originator", nativeCodex
     ? headers.get("originator") ?? CODEX_ORIGINATOR
@@ -3377,6 +3392,7 @@ function buildUpstreamMultipartHeaders(
       upstream.set(key, value);
     }
   }
+  deleteInternalRoutingHeaders(upstream);
   if (accountId) upstream.set("ChatGPT-Account-ID", accountId);
   return upstream;
 }
@@ -3405,6 +3421,10 @@ function deleteBlockedUpstreamHeaders(headers: Headers): void {
   headers.delete("true-client-ip");
 }
 
+function deleteInternalRoutingHeaders(headers: Headers): void {
+  for (const header of INTERNAL_ROUTING_HEADERS) headers.delete(header);
+}
+
 function isNativeCodexRequest(headers: Headers): boolean {
   for (const header of NATIVE_CODEX_STREAM_HEADERS) {
     if (headers.has(header)) return true;
@@ -3427,6 +3447,7 @@ function buildUpstreamWebSocketHeaders(
   upstream.set("originator", headers.get("originator") ?? CODEX_ORIGINATOR);
   upstream.set("user-agent", headers.get("user-agent") ?? CODEX_USER_AGENT);
   upstream.set("openai-beta", appendOpenAIBetaHeader(upstream.get("openai-beta")));
+  deleteInternalRoutingHeaders(upstream);
 
   if (accountId) {
     upstream.set("ChatGPT-Account-ID", accountId);
@@ -3799,6 +3820,10 @@ function readString(value: unknown): string | undefined {
 
 function readNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function readArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
 }
 
 function readOptionalNumber(value: unknown): number | undefined {

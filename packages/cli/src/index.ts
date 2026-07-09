@@ -70,6 +70,10 @@ import {
   runCodexWebSocketDoctor,
 } from "./codex-smoke";
 import {
+  getClaudeBillingClaimDoctorExitCode,
+  runClaudeBillingClaimDoctor,
+} from "./claude-billing-claim-doctor";
+import {
   importOpenCodeAccounts,
   type OpenCodeImportProvider,
   type OpenCodeImportResult,
@@ -511,11 +515,23 @@ async function handleDoctorCommand(argv: string[]): Promise<void> {
           model: readStringFlag(argv, "--model"),
         },
       ), "claude/smoke");
+    } else if (argv.includes("--billing-claim")) {
+      report = withDoctorName(await runClaudeBillingClaimDoctor(
+        new SQLiteAccountStore(cliConfig.databasePath),
+        cliConfig,
+        {
+          model: readStringFlag(argv, "--model"),
+        },
+      ), "claude/billing-claim");
     } else {
       report = withDoctorName(await runClaudeFingerprintDoctor(), "claude");
     }
     printMaybeJsonDoctorReport(report, argv);
-    setDoctorExitCode(report);
+    if (argv.includes("--billing-claim")) {
+      process.exitCode = getClaudeBillingClaimDoctorExitCode(report);
+    } else {
+      setDoctorExitCode(report);
+    }
     return;
   }
 
@@ -1011,7 +1027,8 @@ function printOpenCodeInstallResult(result: OpenCodeInstallResult): void {
   console.log(`Config: ${result.configPath}`);
   if (result.authPath) console.log(`Auth: ${result.authPath}`);
   console.log(`Server: ${result.baseUrl}`);
-  console.log(`Models: ${result.modelSource}`);
+  console.log(`Mode: ${result.diagnostics.mode}`);
+  console.log(`Models: ${result.modelSource}${result.diagnostics.selectedModels.length > 0 ? ` (${result.diagnostics.selectedModels.join(", ")})` : ""}`);
   if (result.backupPath) console.log(`Backup: ${result.backupPath}`);
   if (result.authBackupPath) console.log(`Auth backup: ${result.authBackupPath}`);
 
@@ -1019,7 +1036,7 @@ function printOpenCodeInstallResult(result: OpenCodeInstallResult): void {
     result.providers.map((provider) => ({
       provider: provider.id,
       baseURL: provider.baseURL,
-      models: String(provider.modelCount),
+      models: provider.modelIds.length > 0 ? provider.modelIds.join(", ") : String(provider.modelCount),
     })),
     ["provider", "baseURL", "models"],
   );
@@ -1055,6 +1072,9 @@ function printOpenCodeRestoreResult(result: OpenCodeRestoreResult): void {
   console.log(`OpenCode restore ${result.dryRun ? "dry-run" : "done"}: ${result.restored ? "backup selected" : "no backup restored"}`);
   console.log(`Config: ${result.configPath}`);
   if (result.backupPath) console.log(`Backup: ${result.backupPath}`);
+  if (result.authPath) console.log(`Auth: ${result.authPath}`);
+  if (result.authBackupPath) console.log(`Auth backup: ${result.authBackupPath}`);
+  if (result.authPath) console.log(`Auth restore: ${result.authRestored ? "backup selected" : "no backup restored"}`);
 
   if (result.warnings.length > 0) {
     console.log("\nWarnings:");
@@ -2380,9 +2400,16 @@ async function runOpenCodeInstallDoctor(
   });
   const checks: DoctorCheck[] = [
     check("config path", result.configPath.endsWith("opencode.json"), result.configPath),
+    warnCheck(
+      "mode",
+      result.diagnostics.mode !== "mixed",
+      `${result.diagnostics.mode}; plugins=${result.diagnostics.pluginPackages.join(",") || "none"}; server=${result.diagnostics.serverProviders.join(",") || "none"}`,
+    ),
     check("openai provider", result.providers.some((provider) => provider.id === "openai"), "openai provider configured"),
     check("anthropic provider", result.providers.some((provider) => provider.id === "anthropic"), "anthropic provider configured"),
+    warnCheck("openai auth", result.diagnostics.openAIAuth === "kyoli-local" || result.authChanged, `current=${result.diagnostics.openAIAuth}`),
     warnCheck("models source", result.modelSource !== "none", result.modelSource),
+    warnCheck("selected models", result.diagnostics.selectedModels.length > 0 || argv.includes("--no-models"), result.diagnostics.selectedModels.join(", ") || "none"),
     warnCheck("warnings", result.warnings.length === 0, result.warnings.join("; ") || "none"),
   ];
 
@@ -2785,7 +2812,7 @@ Usage:
   kyoli doctor [--json]
   kyoli doctor pool [--json]
   kyoli doctor codex [--file|--e2e|--load|--websocket|--sdk] [--json]
-  kyoli doctor claude [--binary|--template|--wire|--obedience|--smoke] [--json]
+  kyoli doctor claude [--binary|--template|--wire|--obedience|--smoke|--billing-claim] [--json]
   kyoli doctor opencode [--run] [--config-dir ~/.config/opencode] [--json]
 
   # Config

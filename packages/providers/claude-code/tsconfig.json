@@ -5,8 +5,12 @@
     "moduleResolution": "bundler",
     "resolveJsonModule": true,
     "paths": {
-      "@kyoli-gam/core": ["../../core/src/index.ts"],
-      "opencode-multi-account-core": ["../../multi-account-core/src/index.ts"]
+      "@kyoli-gam/core": [
+        "../../core/src/index.ts"
+      ],
+      "opencode-multi-account-core": [
+        "../../multi-account-core/src/index.ts"
+      ]
     },
     "esModuleInterop": true,
     "strict": true,
@@ -14,8 +18,15 @@
     "noEmit": true,
     "isolatedModules": true,
     "forceConsistentCasingInFileNames": true,
-    "types": ["node"]
+    "types": [
+      "node"
+    ]
   },
-  "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist"]
+  "include": [
+    "src/**/*"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist"
+  ]
 }

@@ -124,7 +124,7 @@ describe("createOpenCodeNativePluginLifecycle", () => {
     expect(refreshStartMock).toHaveBeenCalledTimes(1);
   });
 
-  test("initializes from oauth auth and zeroes provider model costs", async () => {
+  test("initializes from oauth auth without mutating provider models", async () => {
     const store = new FakeStore();
     const client = createClient();
     const { lifecycle } = createLifecycle(store, client);
@@ -143,11 +143,7 @@ describe("createOpenCodeNativePluginLifecycle", () => {
 
     expect(result.apiKey).toBe("OAUTH");
     expect(lifecycle.getManager()?.getAccountCount()).toBe(1);
-    expect(provider.models["openai/gpt-5.3-codex"].cost).toEqual({
-      input: 0,
-      output: 0,
-      cache: { read: 0, write: 0 },
-    });
+    expect(provider.models["openai/gpt-5.3-codex"].cost).toEqual({ input: 1, output: 1 });
     expect(client.toasts.some((message) => message.includes("1 account(s) loaded"))).toBe(true);
   });
 

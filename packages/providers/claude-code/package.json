@@ -18,6 +18,30 @@
       "types": "./dist/opencode-shared.d.ts",
       "import": "./dist/opencode-shared.js",
       "default": "./dist/opencode-shared.js"
+    },
+    "./fingerprint-data": {
+      "source": "./src/fingerprint-data.ts",
+      "types": "./dist/fingerprint-data.d.ts",
+      "import": "./dist/fingerprint-data.js",
+      "default": "./dist/fingerprint-data.js"
+    },
+    "./fingerprint": {
+      "source": "./src/fingerprint-capture.ts",
+      "types": "./dist/fingerprint-capture.d.ts",
+      "import": "./dist/fingerprint-capture.js",
+      "default": "./dist/fingerprint-capture.js"
+    },
+    "./scrub-template": {
+      "source": "./src/scrub-template.ts",
+      "types": "./dist/scrub-template.d.ts",
+      "import": "./dist/scrub-template.js",
+      "default": "./dist/scrub-template.js"
+    },
+    "./cli-version": {
+      "source": "./src/cli-version.ts",
+      "types": "./dist/cli-version.d.ts",
+      "import": "./dist/cli-version.js",
+      "default": "./dist/cli-version.js"
     }
   },
   "scripts": {
@@ -34,7 +58,8 @@
   "author": "yuka",
   "license": "MIT",
   "dependencies": {
-    "@kyoli-gam/core": "workspace:*"
+    "@kyoli-gam/core": "workspace:*",
+    "opencode-multi-account-core": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^25.9.3",

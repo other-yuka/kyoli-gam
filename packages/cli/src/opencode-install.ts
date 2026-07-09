@@ -1,6 +1,6 @@
 import type { ModelInfo } from "@kyoli-gam/core";
 import { stripProviderPrefix } from "@kyoli-gam/core";
-import { ModelRegistry, ModelsDevRegistrySource } from "@kyoli-gam/model-registry";
+import { ModelRegistry } from "@kyoli-gam/core";
 import { createClaudeCodeProvider } from "@kyoli-gam/provider-claude-code";
 import { createCodexChatGPTProvider } from "@kyoli-gam/provider-codex-chatgpt";
 import { spawn } from "node:child_process";
@@ -46,8 +46,11 @@ export interface OpenCodeRestoreOptions {
 export interface OpenCodeRestoreResult {
   configPath: string;
   backupPath?: string;
+  authPath?: string;
+  authBackupPath?: string;
   dryRun: boolean;
   restored: boolean;
+  authRestored: boolean;
   warnings: string[];
 }
 
@@ -66,9 +69,19 @@ export interface OpenCodeInstallResult {
     id: "openai" | "anthropic";
     modelCount: number;
     baseURL: string;
+    modelIds: string[];
   }>;
+  diagnostics: OpenCodeDiagnostics;
   warnings: string[];
   config: Record<string, unknown>;
+}
+
+export interface OpenCodeDiagnostics {
+  mode: "server" | "plugin" | "mixed" | "unconfigured";
+  pluginPackages: string[];
+  serverProviders: string[];
+  openAIAuth: "kyoli-local" | "oauth" | "api" | "missing" | "other";
+  selectedModels: string[];
 }
 
 interface OpenCodeModelInfo {
@@ -77,6 +90,7 @@ interface OpenCodeModelInfo {
   upstreamId: string;
   displayName?: string;
   capabilities: string[];
+  metadata?: Record<string, unknown>;
 }
 
 const KYOLI_LOCAL_API_KEY = "kyoli-local";
@@ -92,6 +106,7 @@ export async function installOpenCode(
   const existing = await readOpenCodeConfig(configPath);
   const warnings: string[] = [];
   const nextConfig = cloneRecord(existing.config);
+  const diagnostics = await inspectOpenCodeDiagnostics(existing.config, baseUrl, options);
   const providers: OpenCodeInstallResult["providers"] = [];
   let authPath: string | undefined;
   let authBackupPath: string | undefined;
@@ -115,6 +130,7 @@ export async function installOpenCode(
       id: "openai",
       modelCount: 0,
       baseURL: readProviderBaseURL(nextConfig, "openai") ?? "(not installed)",
+      modelIds: [],
     });
   } else {
     const openaiProvider = patchProvider(nextConfig, "openai", {
@@ -128,6 +144,7 @@ export async function installOpenCode(
       id: "openai",
       modelCount: openaiProvider.modelCount,
       baseURL: providerBaseUrl,
+      modelIds: grouped.openai.map((model) => model.upstreamId),
     });
   }
 
@@ -151,6 +168,7 @@ export async function installOpenCode(
     id: "anthropic",
     modelCount: anthropicProvider.modelCount,
     baseURL: providerBaseUrl,
+    modelIds: grouped.anthropic.map((model) => model.upstreamId),
   });
 
   const changed = JSON.stringify(existing.config) !== JSON.stringify(nextConfig);
@@ -177,6 +195,10 @@ export async function installOpenCode(
     baseUrl,
     modelSource,
     providers,
+    diagnostics: {
+      ...diagnostics,
+      selectedModels: providers.flatMap((provider) => provider.modelIds.map((model) => `${provider.id}/${model}`)),
+    },
     warnings,
     config: nextConfig,
   };
@@ -190,26 +212,44 @@ export async function restoreOpenCode(
   const backupPath = options.backupPath
     ? expandPath(options.backupPath)
     : await findLatestBackupPath(configPath);
+  const authPath = resolveOpenCodeAuthPath(options);
+  const authBackupPath = options.backupPath ? undefined : await findLatestBackupPath(authPath);
 
   if (!backupPath) {
     return {
       configPath,
+      authPath,
+      authBackupPath,
       dryRun: Boolean(options.dryRun),
       restored: false,
+      authRestored: false,
       warnings: [`No backup found for ${configPath}. Pass --backup <path> to restore a specific file.`],
     };
+  }
+
+  if (options.backupPath) {
+    warnings.push("Explicit opencode.json backup was provided; auth.json was not restored to avoid mixing backups from different install runs.");
+  } else if (!authBackupPath) {
+    warnings.push(`No auth backup found for ${authPath}; only opencode.json will be restored.`);
   }
 
   if (!options.dryRun) {
     await mkdir(dirname(configPath), { recursive: true });
     await copyFile(backupPath, configPath);
+    if (authBackupPath) {
+      await mkdir(dirname(authPath), { recursive: true });
+      await copyFile(authBackupPath, authPath);
+    }
   }
 
   return {
     configPath,
     backupPath,
+    authPath,
+    authBackupPath,
     dryRun: Boolean(options.dryRun),
     restored: true,
+    authRestored: Boolean(authBackupPath),
     warnings,
   };
 }
@@ -407,6 +447,49 @@ async function readJsonRecordFile(path: string): Promise<{
   }
 }
 
+
+async function inspectOpenCodeDiagnostics(
+  config: Record<string, unknown>,
+  baseUrl: string,
+  options: OpenCodeInstallOptions,
+): Promise<OpenCodeDiagnostics> {
+  const providerBaseUrl = `${baseUrl}/v1`;
+  const pluginPackages = readOpenCodePluginPackages(config);
+  const serverProviders = (["openai", "anthropic"] as const)
+    .filter((provider) => readProviderBaseURL(config, provider) === providerBaseUrl);
+  const auth = await readJsonRecordFile(resolveOpenCodeAuthPath(options));
+  const openAIAuth = readOpenAIAuthStatus(auth.record.openai);
+  const hasPlugin = pluginPackages.length > 0;
+  const hasServer = serverProviders.length > 0 || openAIAuth === "kyoli-local";
+
+  return {
+    mode: hasPlugin && hasServer ? "mixed" : hasServer ? "server" : hasPlugin ? "plugin" : "unconfigured",
+    pluginPackages,
+    serverProviders,
+    openAIAuth,
+    selectedModels: [],
+  };
+}
+
+function readOpenAIAuthStatus(value: unknown): OpenCodeDiagnostics["openAIAuth"] {
+  if (!isRecord(value)) return "missing";
+  if (value.type === "api" && value.key === KYOLI_LOCAL_API_KEY) return "kyoli-local";
+  if (value.type === "oauth") return "oauth";
+  if (value.type === "api") return "api";
+  return "other";
+}
+
+function readOpenCodePluginPackages(config: Record<string, unknown>): string[] {
+  const plugins = Array.isArray(config.plugin) ? config.plugin : [];
+  return plugins
+    .map((plugin) => {
+      if (typeof plugin === "string") return plugin;
+      if (Array.isArray(plugin) && typeof plugin[0] === "string") return plugin[0];
+      return undefined;
+    })
+    .filter((plugin): plugin is string => Boolean(plugin?.startsWith("opencode-") && plugin.includes("multi-account")));
+}
+
 async function loadOpenCodeModels(
   baseUrl: string,
   options: OpenCodeInstallOptions,
@@ -418,10 +501,7 @@ async function loadOpenCodeModels(
   const fromGateway = await loadModelsFromGateway(baseUrl, options.fetch ?? fetch);
   if (fromGateway.models.length > 0) return { source: "gateway", ...fromGateway };
 
-  const registry = new ModelRegistry(
-    [createCodexChatGPTProvider(), createClaudeCodeProvider()],
-    { modelsDev: ModelsDevRegistrySource.fromEnv(options.env ?? process.env) },
-  );
+  const registry = new ModelRegistry([createCodexChatGPTProvider(), createClaudeCodeProvider()]);
   const registryModels = await registry.listModels();
   return {
     source: "registry",
@@ -482,6 +562,7 @@ function readGatewayModels(value: unknown): OpenCodeModelInfo[] {
         upstreamId,
         displayName: typeof kyoli.display_name === "string" ? kyoli.display_name : undefined,
         capabilities,
+        metadata: isRecord(kyoli.metadata) ? kyoli.metadata : undefined,
       };
     })
     .filter((model): model is OpenCodeModelInfo => Boolean(model));
@@ -494,6 +575,7 @@ function toOpenCodeModelInfo(model: ModelInfo): OpenCodeModelInfo {
     upstreamId: model.upstreamId,
     displayName: model.displayName,
     capabilities: model.capabilities,
+    metadata: model.metadata,
   };
 }
 
@@ -611,9 +693,16 @@ function toOpenCodeModelConfig(
 }
 
 function defaultLimit(model: OpenCodeModelInfo): { context: number; output: number } {
-  if (model.provider === "anthropic") return { context: 200000, output: 64000 };
+  const metadataContext = readPositiveInteger(model.metadata?.max_context_window);
+  if (model.provider === "anthropic") {
+    return { context: metadataContext ?? 200000, output: 64000 };
+  }
   if (model.upstreamId.includes("gpt-5.4")) return { context: 1050000, output: 128000 };
   return { context: 272000, output: 65536 };
+}
+
+function readPositiveInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : undefined;
 }
 
 function isKyoliManagedModel(value: unknown): boolean {

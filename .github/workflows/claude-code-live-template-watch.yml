@@ -1,0 +1,222 @@
+name: Claude Code live template watch
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: claude-code-live-template-watch
+  cancel-in-progress: false
+
+jobs:
+  live_template:
+    if: github.ref == 'refs/heads/main' && vars.KYOLI_CLAUDE_LIVE_TEMPLATE_WATCH_ENABLED == 'true'
+    runs-on: [self-hosted, claude-auth]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Claude OpenCode package
+        run: pnpm --filter opencode-anthropic-multi-account build
+
+      - name: Run live template drift check
+        id: check
+        run: |
+          set +e
+          pnpm --dir packages/anthropic-multi-account run check:fingerprint-drift > live-template-drift.json 2> live-template-drift.err
+          code=$?
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          if [ "$code" -eq 0 ]; then
+            echo "drift_detected=false" >> "$GITHUB_OUTPUT"
+            cat live-template-drift.json
+            exit 0
+          fi
+          if [ "$code" -eq 2 ] && [ -s live-template-drift.json ]; then
+            echo "drift_detected=true" >> "$GITHUB_OUTPUT"
+            cat live-template-drift.json
+            exit 0
+          fi
+          cat live-template-drift.err
+          exit "$code"
+
+      - name: Upload live template artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: claude-code-live-template-watch
+          path: |
+            live-template-drift.json
+            live-template-drift.err
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Open or update live template drift issue
+        if: steps.check.outputs.drift_detected == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create claude-code-drift \
+            --color FBCA04 \
+            --description "Claude Code package drift requires kyoli compatibility review" \
+            2>/dev/null || true
+
+          body_file=$(mktemp)
+          {
+            echo "## Claude Code live template drift"
+            echo ""
+            echo "The self-hosted live template watch detected drift on $(date -Iseconds)."
+            echo ""
+            echo "### Fix checklist"
+            echo ""
+            echo "- [ ] Inspect \`live-template-drift.json\` for prompt, tool, or header drift."
+            echo "- [ ] Review the auto-rebake PR opened by this workflow."
+            echo "- [ ] Run \`pnpm --filter opencode-anthropic-multi-account test:contract:native\`."
+            echo ""
+            echo '```json'
+            cat live-template-drift.json
+            echo '```'
+            if [ -s live-template-drift.err ]; then
+              echo ""
+              echo "### stderr"
+              echo '```text'
+              cat live-template-drift.err
+              echo '```'
+            fi
+          } > "$body_file"
+
+          existing=$(gh issue list --label claude-code-drift --state open --search '"Claude Code live template drift" in:title' --json number --jq '.[0].number // ""')
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --body-file "$body_file"
+          else
+            gh issue create --title "Claude Code live template drift detected" --label claude-code-drift --body-file "$body_file"
+          fi
+
+      - name: Auto-rebake and open PR
+        if: steps.check.outputs.drift_detected == 'true'
+        id: rebake
+        env:
+          GH_TOKEN: ${{ secrets.KYOLI_DRIFT_BOT_PAT }}
+          KYOLI_DRIFT_BOT_PAT: ${{ secrets.KYOLI_DRIFT_BOT_PAT }}
+          ALLOW_FINGERPRINT_SHAPE_CHANGE: "1"
+        run: |
+          set -euo pipefail
+
+          if [ -z "$KYOLI_DRIFT_BOT_PAT" ]; then
+            echo "::error::KYOLI_DRIFT_BOT_PAT is required to push auto-rebake branches and open PRs that trigger normal pull_request checks."
+            exit 1
+          fi
+
+          existing_pr=$(gh pr list \
+            --repo "${{ github.repository }}" \
+            --state open \
+            --limit 100 \
+            --json headRefName,url \
+            --jq 'map(select(.headRefName | startswith("bot/claude-fingerprint-rebake-"))) | .[0].url // ""')
+          if [ -n "$existing_pr" ]; then
+            echo "Existing auto-rebake PR is still open: $existing_pr"
+            echo "pr_url=$existing_pr" >> "$GITHUB_OUTPUT"
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          pnpm --dir packages/anthropic-multi-account run bake:fingerprint
+
+          pnpm --dir packages/anthropic-multi-account run check:fingerprint-drift > post-rebake-drift.json 2> post-rebake-drift.err
+          cat post-rebake-drift.json
+
+          if git diff --quiet -- packages/providers/claude-code/src/fingerprint/data.json; then
+            echo "::warning::Drift check reported drift but rebake produced no fingerprint diff; skipping PR."
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          pnpm --filter @kyoli-gam/provider-claude-code test
+          pnpm --filter opencode-anthropic-multi-account test:contract:native
+
+          cc_version=$(node - <<'NODE'
+          const report = JSON.parse(require("fs").readFileSync("live-template-drift.json", "utf8"));
+          console.log(report.summary?.actualCcVersion || report.summary?.expectedCcVersion || "unknown");
+          NODE
+          )
+          safe_version=$(printf '%s' "$cc_version" | tr -c '0-9A-Za-z.-' '-')
+          changeset=".changeset/claude-code-live-template-${safe_version}.md"
+          mkdir -p .changeset
+          cat > "$changeset" <<EOF
+          ---
+          "opencode-anthropic-multi-account": patch
+          ---
+
+          Refresh Claude Code live fingerprint metadata for \`@anthropic-ai/claude-code@${cc_version}\`.
+          EOF
+
+          branch="bot/claude-fingerprint-rebake-${safe_version}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}"
+          git config user.email "actions@github.com"
+          git config user.name "kyoli-drift-watch[bot]"
+          git checkout -B "$branch"
+          git add packages/providers/claude-code/src/fingerprint/data.json "$changeset"
+          git commit -m "auto-rebake: Claude Code fingerprint drift v${cc_version}"
+          git push "https://x-access-token:${KYOLI_DRIFT_BOT_PAT}@github.com/${GITHUB_REPOSITORY}.git" "$branch"
+
+          body_file=$(mktemp)
+          {
+            echo "## Auto-rebake from Claude Code live template drift"
+            echo ""
+            echo "Generated by [\`claude-code-live-template-watch.yml\`](.github/workflows/claude-code-live-template-watch.yml) on $(date -Iseconds)."
+            echo ""
+            echo "The self-hosted watcher captured live Claude Code \`${cc_version}\`, rebaked \`packages/providers/claude-code/src/fingerprint/data.json\`, and added a patch changeset."
+            echo ""
+            echo "## Drift report"
+            echo ""
+            echo '```json'
+            cat live-template-drift.json
+            echo '```'
+          } > "$body_file"
+
+          pr_url=$(gh pr create \
+            --repo "${{ github.repository }}" \
+            --head "$branch" \
+            --base main \
+            --title "auto-rebake: Claude Code fingerprint drift v${cc_version}" \
+            --body-file "$body_file" \
+            --label claude-code-drift)
+          echo "pr_url=$pr_url" >> "$GITHUB_OUTPUT"
+          echo "skipped=false" >> "$GITHUB_OUTPUT"
+
+      - name: Upload post-rebake artifacts
+        if: always() && steps.check.outputs.drift_detected == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: claude-code-live-template-post-rebake
+          path: |
+            post-rebake-drift.json
+            post-rebake-drift.err
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Auto-close live template drift issue on clean run
+        if: steps.check.outputs.drift_detected == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue list --label claude-code-drift --state open --search '"Claude Code live template drift" in:title' --json number --jq '.[].number' | while read -r n; do
+            [ -z "$n" ] && continue
+            gh issue close "$n" --comment "Auto-closed: live template drift check is clean on run https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID."
+          done

@@ -1,7 +1,8 @@
 import { promises as fs } from "node:fs";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import * as v from "valibot";
 import { ACCOUNTS_FILENAME, CLAIMS_FILENAME } from "../src/shared/constants";
@@ -11,8 +12,9 @@ import { AccountStorageSchema } from "../src/shared/types";
 import type { AccountStorage, StoredAccount } from "../src/shared/types";
 import { setupTestEnv } from "../tests/helpers";
 
-const STORAGE_WORKER_PATH = join(process.cwd(), "tests/workers/storage-worker.ts");
-const CLAIM_WORKER_PATH = join(process.cwd(), "tests/workers/claim-worker.ts");
+const TEST_DIR = dirname(fileURLToPath(import.meta.url));
+const STORAGE_WORKER_PATH = join(TEST_DIR, "workers/storage-worker.ts");
+const CLAIM_WORKER_PATH = join(TEST_DIR, "workers/claim-worker.ts");
 const tsxEsmLoaderPath = createRequire(import.meta.url).resolve("tsx/esm");
 
 type TestEnv = Awaited<ReturnType<typeof setupTestEnv>>;

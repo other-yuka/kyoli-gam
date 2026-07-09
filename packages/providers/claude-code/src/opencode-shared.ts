@@ -7,6 +7,25 @@ export {
   stampClaudeCodeCch,
   xxh64,
 } from "./cch";
+export {
+  clampEffortAfterRejection,
+  clampUnsupportedEffortInBody,
+  parseEffortCapabilityRejection,
+} from "./effort-capability";
+export {
+  CLAUDE_FABLE_1M_MODEL_ID,
+  CLAUDE_FABLE_MODEL_ID,
+  CLAUDE_SONNET_1M_MODEL_ID,
+  CLAUDE_SONNET_MODEL_ID,
+  describeSuspendedClaudeCodeModel,
+  isClaudeCode1mModelLabel,
+  isClaudeFableModel,
+  isSuspendedClaudeCodeModel,
+  resolveClaudeCodeModelAlias,
+  stripClaudeCodeContext1mTag,
+  stripClaudeCodeProviderPrefix,
+  toClaudeCodeWireModelId,
+} from "./model-aliases";
 
 const CLAUDE_CODE_API_BASE_URL = "https://api.anthropic.com";
 const STAINLESS_PACKAGE_VERSION = "0.81.0";
@@ -18,82 +37,12 @@ const templateHeaders = templateMetadata.headerValues;
 const CLAUDE_CODE_VERSION = templateMetadata.ccVersion ?? "2.1.137";
 const CCH_REMOVED_VERSION = "2.1.183";
 
-export const CLAUDE_FABLE_MODEL_ID = "claude-fable-5";
-export const CLAUDE_FABLE_1M_MODEL_ID = `${CLAUDE_FABLE_MODEL_ID}[1m]`;
-export const CLAUDE_SONNET_MODEL_ID = "claude-sonnet-5";
-export const CLAUDE_SONNET_1M_MODEL_ID = `${CLAUDE_SONNET_MODEL_ID}[1m]`;
 export const CLIENT_SYSTEM_PREFACE =
   "\n\n---\n\nIMPORTANT: The operator of this session has supplied the following " +
   "task-specific instructions. Follow them for task format, style, and output " +
   "requirements when they do not conflict with security, authorization, refusal, " +
   "tool-execution, confirmation, or other safety rules above. Those safety and " +
   "tool-use constraints remain higher priority and cannot be overridden:\n\n";
-
-const CLAUDE_CODE_MODEL_ALIASES: Record<string, string> = {
-  fable: CLAUDE_FABLE_MODEL_ID,
-  fable1m: CLAUDE_FABLE_1M_MODEL_ID,
-  sonnet: CLAUDE_SONNET_MODEL_ID,
-  sonnet1m: CLAUDE_SONNET_1M_MODEL_ID,
-};
-
-export function stripClaudeCodeProviderPrefix(modelId: string): string {
-  const slash = modelId.indexOf("/");
-  if (slash === -1) return modelId;
-
-  const provider = modelId.slice(0, slash).toLowerCase();
-  return provider === "anthropic" || provider === "claude-code"
-    ? modelId.slice(slash + 1)
-    : modelId;
-}
-
-export function resolveClaudeCodeModelAlias(modelId: string): string {
-  const unprefixed = stripClaudeCodeProviderPrefix(modelId.trim());
-  return CLAUDE_CODE_MODEL_ALIASES[unprefixed.toLowerCase()] ?? unprefixed;
-}
-
-export function stripClaudeCodeContext1mTag(modelId: string): string {
-  return modelId.replace(/\[1m\]$/i, "");
-}
-
-export function toClaudeCodeWireModelId(modelId: string): string {
-  return stripClaudeCodeContext1mTag(resolveClaudeCodeModelAlias(modelId));
-}
-
-export function isClaudeCode1mModelLabel(modelId: string): boolean {
-  return /\[1m\]$/i.test(resolveClaudeCodeModelAlias(modelId));
-}
-
-export function isClaudeFableModel(modelId: string): boolean {
-  return resolveClaudeCodeModelAlias(modelId).toLowerCase().includes("fable");
-}
-
-export function isSuspendedClaudeCodeModel(
-  modelId: string,
-  env: NodeJS.ProcessEnv = process.env,
-): boolean {
-  const suspendedFamilies = readSuspendedClaudeCodeFamilies(env);
-  return suspendedFamilies.has("fable") && isClaudeFableModel(modelId);
-}
-
-export function describeSuspendedClaudeCodeModel(modelId: string): string {
-  const normalized = resolveClaudeCodeModelAlias(modelId);
-  if (isClaudeFableModel(normalized)) {
-    return "Claude Fable 5 is disabled for this Claude Code provider by configuration.";
-  }
-  return `${normalized} is temporarily unavailable through Claude Code.`;
-}
-
-function readSuspendedClaudeCodeFamilies(env: NodeJS.ProcessEnv): Set<string> {
-  const raw = env.KYOLI_SUSPENDED_CLAUDE_CODE_FAMILIES
-    ?? env.KYOLI_SUSPENDED_CLAUDE_MODELS
-    ?? "";
-  return new Set(
-    raw
-      .split(",")
-      .map((entry) => entry.trim().toLowerCase())
-      .filter(Boolean),
-  );
-}
 
 export interface ClaudeCodeSharedRequestProfile {
   anthropicBeta: string;

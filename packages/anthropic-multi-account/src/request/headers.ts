@@ -2,7 +2,7 @@ import {
   createClaudeCodePerRequestHeaders,
   createClaudeCodeStaticHeaders,
   orderClaudeCodeHeadersForOutbound,
-} from "../../../providers/claude-code/src/opencode-shared";
+} from "@kyoli-gam/provider-claude-code/opencode";
 import { claudeCodeIntegration } from "../claude-code";
 
 const STAINLESS_PACKAGE_VERSION = "0.81.0";

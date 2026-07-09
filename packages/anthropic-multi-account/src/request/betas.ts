@@ -1,4 +1,4 @@
-import { resolveClaudeCodeModelAlias, isClaudeCode1mModelLabel } from "../../../providers/claude-code/src/opencode-shared";
+import { resolveClaudeCodeModelAlias, isClaudeCode1mModelLabel } from "@kyoli-gam/provider-claude-code/opencode";
 import { config, getModelOverride, getRequiredBetas } from "../model/config";
 
 export const LONG_CONTEXT_BETAS = config.longContextBetas;

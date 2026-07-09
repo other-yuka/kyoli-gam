@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "vitest";
 import { createHash } from "node:crypto";
-import bundledFingerprintData from "../../src/claude-code/fingerprint/data.json";
+import bundledFingerprintData from "@kyoli-gam/provider-claude-code/fingerprint-data";
 import type { ClaudeIdentity } from "../../src/claude-code/identity";
 import type { TemplateData } from "../../src/claude-code/fingerprint/capture";
 import {
@@ -23,7 +23,7 @@ import {
   ingestProviderModelsCapabilities,
   resetRuntimeModelCapabilitiesForTest,
 } from "../../src/model/capabilities";
-import { CLIENT_SYSTEM_PREFACE } from "../../../providers/claude-code/src/opencode-shared";
+import { CLIENT_SYSTEM_PREFACE } from "@kyoli-gam/provider-claude-code/opencode";
 
 afterEach(() => {
   resetUpstreamRequestForTest();

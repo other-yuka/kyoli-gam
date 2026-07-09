@@ -8,7 +8,7 @@ import {
   resolveClaudeCodeModelAlias,
   stampClaudeCodeCch,
   toClaudeCodeWireModelId,
-} from "../../../providers/claude-code/src/opencode-shared";
+} from "@kyoli-gam/provider-claude-code/opencode";
 import { claudeCodeIntegration, type ClaudeIdentity, type TemplateData } from "../claude-code";
 import { getRuntimeModelCapability } from "../model/capabilities";
 import {

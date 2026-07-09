@@ -8,38 +8,12 @@ import {
   scrubTemplate,
 } from "../dist/scrub-template.js";
 import { loadBundledFingerprint } from "./_bundled-fingerprint.mjs";
+import {
+  hasLiveFingerprintDrift,
+  summarizeLiveFingerprintDiff,
+} from "./live-fingerprint-drift-utils.mjs";
 
 const captureTimeoutMs = Number(process.env.FINGERPRINT_CAPTURE_TIMEOUT_MS ?? "10000");
-const INTERACTIVE_ONLY_TOOL_NAMES = new Set([
-  "AskUserQuestion",
-  "EnterPlanMode",
-  "ExitPlanMode",
-]);
-
-function comparableHeadlessToolNames(toolNames) {
-  return toolNames.filter((toolName) => !INTERACTIVE_ONLY_TOOL_NAMES.has(toolName));
-}
-
-function summarizeDiff(expected, actual) {
-  const expectedTools = expected.tool_names ?? [];
-  const actualTools = actual.tool_names ?? [];
-  const comparableExpectedTools = comparableHeadlessToolNames(expectedTools);
-  const comparableActualTools = comparableHeadlessToolNames(actualTools);
-  return {
-    agentIdentityMatches: expected.agent_identity === actual.agent_identity,
-    systemPromptMatches: expected.system_prompt === actual.system_prompt,
-    toolNamesMatch: JSON.stringify(comparableExpectedTools) === JSON.stringify(comparableActualTools),
-    expectedToolCount: expectedTools.length,
-    actualToolCount: actualTools.length,
-    interactiveOnlyExpectedToolCount: expectedTools.length - comparableExpectedTools.length,
-    expectedCcVersion: expected.cc_version ?? null,
-    actualCcVersion: actual.cc_version ?? null,
-    expectedHeaderOrderLength: expected.header_order?.length ?? 0,
-    actualHeaderOrderLength: actual.header_order?.length ?? 0,
-    expectedBodyOrder: expected.body_field_order ?? null,
-    actualBodyOrder: actual.body_field_order ?? null,
-  };
-}
 
 async function main() {
   const bundled = await loadBundledFingerprint();
@@ -51,12 +25,9 @@ async function main() {
   const scrubbed = scrubTemplate(live, { dropMcpTools: true });
   const normalized = prepareBundledTemplate(scrubbed);
   const residualHits = findUserPathHits(JSON.stringify(normalized));
-  const summary = summarizeDiff(bundled, normalized);
+  const summary = summarizeLiveFingerprintDiff(bundled, normalized);
   const captureMatchesBundledIdentity = matchesBundledClaudeCodeFingerprint(normalized, bundled);
-  const drift = residualHits.length > 0
-    || !summary.agentIdentityMatches
-    || !summary.systemPromptMatches
-    || !summary.toolNamesMatch;
+  const drift = hasLiveFingerprintDrift(summary, residualHits);
 
   console.log(JSON.stringify({
     drift,
@@ -66,7 +37,7 @@ async function main() {
     summary,
   }, null, 2));
 
-  process.exitCode = drift ? 1 : 0;
+  process.exitCode = drift ? 2 : 0;
 }
 
 main().catch((error) => {

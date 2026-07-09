@@ -1,7 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { TemplateData } from "../../src/claude-code/fingerprint/capture";
-import bundledData from "../../src/claude-code/fingerprint/data.json";
-import providerBundledData from "../../../providers/claude-code/src/fingerprint/data.json";
+import bundledData from "@kyoli-gam/provider-claude-code/fingerprint-data";
 import {
   findUserPathHits,
   removeHostContextSections,
@@ -233,9 +232,5 @@ describe("bundled fingerprint-data.json", () => {
   test("contains zero residual user path hits", () => {
     const hits = findUserPathHits(JSON.stringify(bundledData));
     expect(hits).toHaveLength(0);
-  });
-
-  test("matches the Claude provider bundled fingerprint copy", () => {
-    expect(providerBundledData).toEqual(bundledData);
   });
 });
