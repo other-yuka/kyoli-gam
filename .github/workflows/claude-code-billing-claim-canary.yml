@@ -83,32 +83,37 @@ jobs:
               fail) code=1 ;;
               *) echo "Unsupported force_status=$FORCE_STATUS" >&2; exit 64 ;;
             esac
-            echo "exit_code=$code" >> "$GITHUB_OUTPUT"
-            cat billing-claim.json
-            exit 0
+          else
+            set +e
+            node packages/cli/dist/index.js doctor claude --billing-claim --model "$KYOLI_CLAUDE_BILLING_CLAIM_MODEL" --json > billing-claim.json 2> billing-claim.err
+            code=$?
+            set -e
           fi
 
-          set +e
-          pnpm --dir packages/cli run doctor claude --billing-claim --model "$KYOLI_CLAUDE_BILLING_CLAIM_MODEL" --json > billing-claim.json 2> billing-claim.err
-          code=$?
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"
           if [ "$code" -eq 0 ] || [ "$code" -eq 1 ] || [ "$code" -eq 2 ]; then
-            cat billing-claim.json
+            jq '{
+              name,
+              verdict: (if .summary.fail > 0 then "fail" elif .summary.warn > 0 then "warn" else "pass" end),
+              checks: [.checks[] | select(
+                .name == "forced verdict"
+                or .name == "http status"
+                or .name == "billing claim"
+                or .name == "served model"
+              )]
+            }' billing-claim.json > billing-claim-public.json
+            rm -f billing-claim.json billing-claim.err
+            if [ "$code" -eq 0 ]; then
+              jq -r '[.checks[] | select(.name == "billing claim" or .name == "served model") | .detail]
+                | "Canary healthy: " + join(" | ")' billing-claim-public.json
+            else
+              cat billing-claim-public.json
+            fi
             exit 0
           fi
-          cat billing-claim.err
+          echo "::error::billing claim doctor failed before producing a report (exit code ${code})"
+          rm -f billing-claim.json billing-claim.err
           exit "$code"
-
-      - name: Upload billing claim artifacts
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: claude-code-billing-claim-canary
-          path: |
-            billing-claim.json
-            billing-claim.err
-          if-no-files-found: ignore
-          retention-days: 30
 
       - name: Open or update billing claim issue
         if: steps.check.outputs.exit_code == '1' || steps.check.outputs.exit_code == '2'
@@ -133,6 +138,7 @@ jobs:
             echo "## Claude Code billing claim canary ${verdict}"
             echo ""
             echo "The self-hosted billing claim canary ${verdict} on $(date -Iseconds)."
+            echo "Run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
             echo ""
             echo "### Fix checklist"
             echo ""
@@ -141,15 +147,8 @@ jobs:
             echo "- [ ] Do not hide non-subscription billing claims behind fallback; fix routing or re-auth the account."
             echo ""
             echo '```json'
-            cat billing-claim.json
+            cat billing-claim-public.json
             echo '```'
-            if [ -s billing-claim.err ]; then
-              echo ""
-              echo "### stderr"
-              echo '```text'
-              cat billing-claim.err
-              echo '```'
-            fi
           } > "$body_file"
 
           existing=$(gh issue list --label claude-code-drift --state open --search '"Claude Code billing claim canary" in:title' --json number --jq '.[0].number // ""')

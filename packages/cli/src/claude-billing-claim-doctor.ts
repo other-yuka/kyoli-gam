@@ -70,8 +70,6 @@ export async function runClaudeBillingClaimDoctor(
 
   const claim = response.headers.get("anthropic-ratelimit-unified-representative-claim") ?? "unknown";
   const status = response.headers.get("anthropic-ratelimit-unified-status") ?? "unknown";
-  const fallbackPercentage = response.headers.get("anthropic-ratelimit-unified-fallback-percentage");
-  const fiveHourUtilization = response.headers.get("anthropic-ratelimit-unified-5h-utilization");
   const selected = trace.filter((event) => event.type === "selected");
   const responseEvents = trace.filter((event) => event.type === "response");
   const billingClaimFailures = responseEvents.filter(
@@ -81,18 +79,20 @@ export async function runClaudeBillingClaimDoctor(
   const requestedModel = stripProviderPrefix(model);
   const servedModel = typeof payload?.model === "string" ? payload.model : "";
   const modelCheck = checkServedModel(requestedModel, servedModel);
+  const billingClaimClassification = billingClaimFailures.length > 0 || billingClaimStatus === "fail"
+    ? "non_subscription"
+    : billingClaimStatus === "pass"
+      ? "subscription"
+      : "unknown";
   const billingClaimDetail = [
-    `claim=${claim}`,
+    `classification=${billingClaimClassification}`,
+    billingClaimStatus === "pass" ? undefined : `claim=${claim}`,
     `status=${status}`,
-    fallbackPercentage ? `fallback_pct=${fallbackPercentage}` : undefined,
-    fiveHourUtilization ? `util_5h=${fiveHourUtilization}` : undefined,
-    billingClaimFailures.length > 0
-      ? `blocked_accounts=${billingClaimFailures.map((event) => event.accountId ?? "unknown").join(",")}`
-      : undefined,
+    billingClaimFailures.length > 0 ? "blocked_non_subscription_claim=true" : undefined,
   ].filter(Boolean).join(" ");
   const checks: DoctorCheck[] = [
-    check("account inventory", accounts.length > 0, `${accounts.length} claude-code account(s) found`),
-    check("account selected", selected.length > 0, selected.map((event) => event.accountId ?? "unknown").join(",") || "no account selected"),
+    check("account inventory", accounts.length > 0, accounts.length > 0 ? "available" : "none"),
+    check("account selected", selected.length > 0, selected.length > 0 ? "selected" : "none"),
     check("http status", response.status < 500, `status=${response.status}`),
     checkBillingClaim(billingClaimStatus, billingClaimFailures.length, billingClaimDetail),
     modelCheck,
