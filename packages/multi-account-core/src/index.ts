@@ -25,3 +25,4 @@ export * from "./native-plugin-auth";
 export * from "./native-plugin-loader";
 export * from "./native-plugin-bootstrap-auth";
 export * from "./native-plugin-models";
+export * from "./turn-supervisor";

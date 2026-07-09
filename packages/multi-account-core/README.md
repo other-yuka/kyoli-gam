@@ -16,6 +16,7 @@ The npm package name remains `opencode-multi-account-core` for compatibility.
 | `AccountStore` | File-locked account JSON storage |
 | `AccountManager` | Account cache, selection, state mutation |
 | `Executor` | Retry loop and account rotation |
+| `TurnSupervisor` | Pre-output commit gate shared by Plugin and Server Mode |
 | `Claims` | Cross-process account claims |
 | `ProactiveRefreshQueue` | Background token refresh |
 | `NativePluginLifecycle` | OpenCode loader/runtime/refresh wiring |
@@ -23,8 +24,8 @@ The npm package name remains `opencode-multi-account-core` for compatibility.
 | `NativePluginLoader` | Shared `getAuth -> lifecycle.load -> hooks` flow |
 | `NativePluginBootstrapAuth` | Stored-account to OpenCode `auth.json` sync helper |
 
-Provider wire behavior stays in the provider packages. Server Mode behavior stays in
-`@kyoli-gam/core`, `@kyoli-gam/gateway`, and `@kyoli-gam/cli`.
+Provider endpoints stay in the provider packages. The Codex Responses startup classifier
+lives here so Plugin and Server Mode make the same pre-output retry decision.
 
 ## Safety
 

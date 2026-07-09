@@ -1,6 +1,12 @@
 import type { AccountPool } from "./account-pool";
 import type { AccountRecord } from "./accounts";
 import type { ProviderId } from "./index";
+import type {
+  SupervisedTurnResponse,
+  TurnFailureClass,
+  TurnFailurePhase,
+  TurnFailureSignal,
+} from "opencode-multi-account-core";
 import {
   listBlockedAccounts,
   listRateLimitedAccounts,
@@ -19,38 +25,10 @@ export interface SelectedCredential {
   selectionDiagnostics?: Record<string, unknown>;
 }
 
-export type AccountFailureClass =
-  | "rate_limit"
-  | "quota"
-  | "auth"
-  | "permanent"
-  | "transient"
-  | "neutral";
-
-export type AccountFailurePhase =
-  | "connect"
-  | "headers"
-  | "startup"
-  | "mid_stream"
-  | "terminal";
-
-export interface AccountFailureSignal {
-  class: AccountFailureClass;
-  phase: AccountFailurePhase;
-  code?: string;
-  message?: string;
-  httpStatus?: number;
-  metadata?: Record<string, unknown>;
-  retryAfterSeconds?: number;
-  resetAt?: string;
-  retryScope?: "same_account" | "next_account" | "none";
-}
-
-export interface AccountExecutionResult {
-  response: Response;
-  failure?: AccountFailureSignal;
-  downstreamVisible?: boolean;
-}
+export type AccountFailureClass = TurnFailureClass;
+export type AccountFailurePhase = TurnFailurePhase;
+export type AccountFailureSignal = TurnFailureSignal;
+export type AccountExecutionResult = SupervisedTurnResponse;
 
 export type AccountExecutionTraceEvent =
   | (AccountExecutionTraceBase & {

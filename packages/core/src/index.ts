@@ -172,6 +172,17 @@ export * from "./provider-executor";
 export * from "./usage-refresh";
 export * from "./model-registry";
 export * from "./model-catalog";
+export {
+  classifyCodexFailure,
+  classifyCodexJsonEventFailure,
+  classifyCodexSseStartupFailure,
+  CODEX_UNKNOWN_RATE_LIMIT_BACKOFF_MS,
+  drainSseFrames,
+  isCodexStartupOutputEvent,
+  isCodexStartupOutputFrame,
+  parseCodexRetryAfterSeconds,
+  superviseCodexResponseStartup,
+} from "opencode-multi-account-core";
 
 export function notImplementedResponse(provider: ProviderId, route: GatewayRoute): Response {
   return jsonResponse(
