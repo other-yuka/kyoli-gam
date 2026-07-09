@@ -66,7 +66,7 @@ async function main() {
     summary,
   }, null, 2));
 
-  process.exitCode = drift ? 1 : 0;
+  process.exitCode = drift ? 2 : 0;
 }
 
 main().catch((error) => {

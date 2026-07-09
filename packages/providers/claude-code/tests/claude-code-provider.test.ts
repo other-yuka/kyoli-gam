@@ -364,6 +364,34 @@ describe("createClaudeCodeProvider", () => {
     expect(models).not.toContainEqual(expect.objectContaining({ upstreamId: "gpt-5.6-sol" }));
   });
 
+  it("uses the configured Claude Code base URL for the live model catalog", async () => {
+    let catalogUrl = "";
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+      },
+    });
+    const provider = createTestClaudeCodeProvider({
+      accounts: new StickyAccountPool(store),
+      baseUrl: "https://example.test/anthropic/",
+      fetch: async (input) => {
+        catalogUrl = String(input);
+        return new Response(JSON.stringify({
+          data: [{ id: "claude-opus-4-9", display_name: "Claude Opus 4.9" }],
+        }), { headers: { "content-type": "application/json" } });
+      },
+    });
+
+    await provider.listModels();
+
+    expect(catalogUrl).toBe("https://example.test/anthropic/v1/models?limit=100");
+  });
+
   it("tries the next Claude Code account when catalog token refresh fails", async () => {
     const catalogAuths: string[] = [];
     const store = new MemoryAccountStore();
@@ -742,6 +770,82 @@ describe("createClaudeCodeProvider", () => {
     expect(upstreamHeaders.get("x-client-request-id")).not.toBe("caller-request-id");
     expect(upstreamHeaders.get("x-stainless-runtime")).toBe("node");
     expect(upstreamHeaders.get("x-stainless-timeout")).toBe("600");
+  });
+
+  it("builds Claude Code upstream headers from an allowlist", async () => {
+    let upstreamHeaders = new Headers();
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+      },
+    });
+
+    const provider = createTestClaudeCodeProvider({
+      accounts: new StickyAccountPool(store),
+      baseUrl: "https://example.test",
+      usageRefresh: async () => ({ cachedUsageAt: Date.now() }),
+      fetch: async (_input, init) => {
+        upstreamHeaders = new Headers(init?.headers);
+        return new Response(JSON.stringify({ id: "msg_test", type: "message" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    const response = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/v1/messages", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-kyoli-session-id": "kyoli-thread",
+          "x-codex-turn-state": "turn-state",
+          "x-codex-session-id": "codex-thread",
+          "x-codex-conversation-id": "codex-conversation",
+          "x-session-id": "generic-session",
+          "x-client-session-id": "client-thread",
+          session_id: "session-underscore",
+          "session-id": "session-dash",
+          "x-random-client-header": "random",
+          "accept-language": "client-locale",
+        },
+        body: JSON.stringify({
+          model: "claude-code/claude-sonnet-4-5",
+          max_tokens: 1024,
+          messages: [{ role: "user", content: "hello" }],
+        }),
+      }),
+      route: "/v1/messages",
+      sessionKey: "header:kyoli-thread",
+      body: {
+        model: "claude-code/claude-sonnet-4-5",
+        max_tokens: 1024,
+        messages: [{ role: "user", content: "hello" }],
+      },
+      model: "claude-code/claude-sonnet-4-5",
+    });
+
+    expect(response.status).toBe(200);
+    for (const header of [
+      "x-kyoli-session-id",
+      "x-codex-turn-state",
+      "x-codex-session-id",
+      "x-codex-conversation-id",
+      "x-session-id",
+      "x-client-session-id",
+      "session_id",
+      "session-id",
+      "x-random-client-header",
+      "accept-language",
+    ]) {
+      expect(upstreamHeaders.get(header)).toBeNull();
+    }
+    expect(upstreamHeaders.get("x-claude-code-session-id")).toBeTruthy();
   });
 
   it("can trust caller fingerprint headers when explicitly enabled", async () => {

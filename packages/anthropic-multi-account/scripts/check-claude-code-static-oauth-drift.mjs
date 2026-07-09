@@ -184,6 +184,8 @@ function readSupportedCCRange() {
     join(repoRoot(), "packages/providers/claude-code/src/fingerprint-capture.ts"),
     join(projectRoot(), "dist/fingerprint-capture.js"),
   ];
+  const providerDataPath = join(repoRoot(), "packages/providers/claude-code/src/fingerprint/data.json");
+  const maxTested = JSON.parse(readFileSync(providerDataPath, "utf8")).cc_version;
 
   for (const candidate of candidates) {
     if (!existsSync(candidate)) {
@@ -192,9 +194,8 @@ function readSupportedCCRange() {
 
     const captureSource = readFileSync(candidate, "utf8");
     const min = captureSource.match(/min:\s*"([^"]+)"/)?.[1];
-    const maxTested = captureSource.match(/maxTested:\s*"([^"]+)"/)?.[1];
 
-    if (min && maxTested) {
+    if (min && typeof maxTested === "string" && maxTested.length > 0) {
       return { min, maxTested };
     }
   }

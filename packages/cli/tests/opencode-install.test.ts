@@ -21,9 +21,24 @@ describe("installOpenCode", () => {
     expect(result.modelSource).toBe("gateway");
     expect(result.authChanged).toBe(true);
     expect(result.providers).toEqual([
-      { id: "openai", baseURL: "http://127.0.0.1:2021/v1", modelCount: 1 },
-      { id: "anthropic", baseURL: "http://127.0.0.1:2021/v1", modelCount: 1 },
+      {
+        id: "openai",
+        baseURL: "http://127.0.0.1:2021/v1",
+        modelCount: 1,
+        modelIds: ["gpt-5.3-codex"],
+      },
+      {
+        id: "anthropic",
+        baseURL: "http://127.0.0.1:2021/v1",
+        modelCount: 1,
+        modelIds: ["claude-sonnet-5"],
+      },
     ]);
+    expect(result.diagnostics).toMatchObject({
+      mode: "unconfigured",
+      openAIAuth: "missing",
+      selectedModels: ["openai/gpt-5.3-codex", "anthropic/claude-sonnet-5"],
+    });
     await expect(stat(join(configDir, "opencode.json"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
@@ -74,6 +89,36 @@ describe("installOpenCode", () => {
     expect(writtenAuth.anthropic.type).toBe("oauth");
     expect(result.warnings.some((warning) => warning.includes("preserved existing model config"))).toBe(true);
     expect(result.warnings.some((warning) => warning.includes("OpenCode auth.openai OAuth"))).toBe(true);
+  });
+
+
+  it("reports existing plugin/server mode diagnostics", async () => {
+    const root = join(tmpdir(), `kyoli-opencode-install-${Date.now()}-diagnostics`);
+    const configDir = join(root, "opencode");
+    const env = createOpenCodeTestEnv(root);
+    await mkdir(configDir, { recursive: true });
+    await mkdir(join(root, "data", "opencode"), { recursive: true });
+    await writeFile(join(configDir, "opencode.json"), JSON.stringify({
+      plugin: ["opencode-codex-multi-account"],
+      provider: {
+        openai: { options: { baseURL: "http://127.0.0.1:2021/v1" } },
+      },
+    }));
+    await writeFile(join(root, "data", "opencode", "auth.json"), JSON.stringify({
+      openai: { type: "api", key: "kyoli-local" },
+    }));
+
+    const result = await installOpenCode(
+      { host: "127.0.0.1", port: 2021 },
+      { configDir, dryRun: true, fetch: createModelsFetch(), env },
+    );
+
+    expect(result.diagnostics).toMatchObject({
+      mode: "mixed",
+      pluginPackages: ["opencode-codex-multi-account"],
+      serverProviders: ["openai"],
+      openAIAuth: "kyoli-local",
+    });
   });
 
   it("can skip model generation", async () => {
@@ -144,19 +189,28 @@ describe("installOpenCode", () => {
     const root = join(tmpdir(), `kyoli-opencode-install-${Date.now()}-restore`);
     const configDir = join(root, "opencode");
     const configPath = join(configDir, "opencode.json");
+    const authPath = join(root, "data", "opencode", "auth.json");
     const olderBackup = `${configPath}.bak-20260101T000000Z`;
     const newerBackup = `${configPath}.bak-20260102T000000Z`;
+    const authBackup = `${authPath}.bak-20260102T000000Z`;
     await mkdir(configDir, { recursive: true });
+    await mkdir(join(root, "data", "opencode"), { recursive: true });
     await writeFile(configPath, JSON.stringify({ current: true }));
+    await writeFile(authPath, JSON.stringify({ currentAuth: true }));
     await writeFile(olderBackup, JSON.stringify({ older: true }));
     await writeFile(newerBackup, JSON.stringify({ newer: true }));
+    await writeFile(authBackup, JSON.stringify({ restoredAuth: true }));
 
-    const result = await restoreOpenCode({ configDir });
+    const result = await restoreOpenCode({ configDir, env: createOpenCodeTestEnv(root) });
     const restored = JSON.parse(await readFile(configPath, "utf8")) as Record<string, any>;
+    const restoredAuth = JSON.parse(await readFile(authPath, "utf8")) as Record<string, any>;
 
     expect(result.restored).toBe(true);
+    expect(result.authRestored).toBe(true);
     expect(result.backupPath).toBe(newerBackup);
+    expect(result.authBackupPath).toBe(authBackup);
     expect(restored).toEqual({ newer: true });
+    expect(restoredAuth).toEqual({ restoredAuth: true });
   });
 });
 

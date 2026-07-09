@@ -1,6 +1,5 @@
 import { CredentialUnavailableError, type ModelInfo } from "@kyoli-gam/core";
 
-const CLAUDE_CODE_MODELS_ENDPOINT = "https://api.anthropic.com/v1/models";
 const ANTHROPIC_VERSION = "2023-06-01";
 const CLAUDE_CODE_BETA = "oauth-2025-04-20";
 const CLAUDE_CODE_MODEL_CATALOG_TTL_MS = 5 * 60 * 1000;
@@ -35,6 +34,7 @@ export interface ClaudeCodeModelCatalogCredential {
 }
 
 export interface ClaudeCodeModelCatalogOptions {
+  baseUrl: string;
   fetchImpl: typeof fetch;
   selectCredential: (excludeAccountIds: string[]) => Promise<ClaudeCodeModelCatalogCredential | undefined>;
   userAgent?: string;
@@ -119,7 +119,7 @@ async function fetchClaudeCodeCatalogEntriesWithCredential(
   options: ClaudeCodeModelCatalogOptions,
   credential: ClaudeCodeModelCatalogCredential,
 ): Promise<ClaudeCodeCatalogEntry[] | undefined> {
-  const url = new URL(CLAUDE_CODE_MODELS_ENDPOINT);
+  const url = new URL(`${options.baseUrl}/v1/models`);
   url.searchParams.set("limit", "100");
   const response = await options.fetchImpl(url, {
     headers: {

@@ -38,9 +38,10 @@ const STATIC_HEADER_NAMES = [
   "x-app",
   "x-stainless-timeout",
 ] as const;
+const bundledCcVersion = (bundledTemplateJson as { cc_version?: unknown }).cc_version;
 const SUPPORTED_CC_RANGE = {
   min: "1.0.0",
-  maxTested: "2.1.204",
+  maxTested: typeof bundledCcVersion === "string" && bundledCcVersion ? bundledCcVersion : "0.0.0",
 } as const;
 
 type TemplateSource = "bundled" | "cached" | "live";

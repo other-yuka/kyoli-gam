@@ -236,6 +236,7 @@ export function createClaudeCodeProvider(
   const retryRejectedBetas = options.retryRejectedBetas ?? true;
   const sessionRotation = resolveSessionRotationOptions(options.sessionRotation);
   const modelCatalog = createClaudeCodeModelCatalog({
+    baseUrl,
     fetchImpl,
     selectCredential: (excludeAccountIds) => readOAuthCredential({
       accounts: options.accounts,
@@ -1089,14 +1090,7 @@ function buildUpstreamHeaders(input: {
   model: string | undefined;
 }): HeadersInit {
   const { headers, accessToken, fingerprint } = input;
-  const upstream = new Headers(headers);
-  upstream.delete("authorization");
-  upstream.delete("x-api-key");
-  upstream.delete("host");
-  upstream.delete("content-length");
-  upstream.delete("connection");
-  upstream.delete("accept-encoding");
-  deleteClaudeCodeFingerprintHeaders(upstream);
+  const upstream = new Headers();
 
   upstream.set("accept", "application/json");
   upstream.set("authorization", `Bearer ${accessToken}`);
@@ -1189,28 +1183,6 @@ function readTrustedHeader(
 ): string {
   if (!input.trustClientFingerprint) return fallback;
   return input.headers.get(name) ?? fallback;
-}
-
-function deleteClaudeCodeFingerprintHeaders(headers: Headers): void {
-  for (const header of [
-    "anthropic-beta",
-    "anthropic-dangerous-direct-browser-access",
-    "anthropic-version",
-    "user-agent",
-    "x-app",
-    "x-claude-code-session-id",
-    "x-client-request-id",
-    "x-stainless-arch",
-    "x-stainless-lang",
-    "x-stainless-os",
-    "x-stainless-package-version",
-    "x-stainless-retry-count",
-    "x-stainless-runtime",
-    "x-stainless-runtime-version",
-    "x-stainless-timeout",
-  ]) {
-    headers.delete(header);
-  }
 }
 
 async function transformResponse(

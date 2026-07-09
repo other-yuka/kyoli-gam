@@ -1,0 +1,114 @@
+name: Claude Code live template liveness
+
+on:
+  workflow_dispatch:
+    inputs:
+      threshold_hours:
+        description: Override stale threshold for validation only
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  actions: write
+  contents: read
+  issues: write
+
+concurrency:
+  group: claude-code-live-template-liveness
+  cancel-in-progress: false
+
+jobs:
+  liveness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Check live template watcher liveness
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          THRESHOLD_HOURS: ${{ github.event.inputs.threshold_hours || '30' }}
+        run: |
+          set -eo pipefail
+
+          case "$THRESHOLD_HOURS" in
+            ''|*[!0-9]*)
+              echo "::warning::invalid threshold_hours=${THRESHOLD_HOURS}; using 30"
+              THRESHOLD_HOURS=30
+              ;;
+          esac
+
+          gh label create claude-code-drift \
+            --color FBCA04 \
+            --description "Claude Code package drift requires kyoli compatibility review" \
+            2>/dev/null || true
+
+          last_success=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/claude-code-live-template-watch.yml/runs?status=success&per_page=1" \
+            --jq '.workflow_runs[0].created_at // ""')
+
+          now_epoch=$(date -u +%s)
+          if [ -n "$last_success" ]; then
+            last_epoch=$(date -u -d "$last_success" +%s)
+            hours_since=$(( (now_epoch - last_epoch) / 3600 ))
+          else
+            last_epoch=0
+            hours_since=999999
+            last_success="never"
+          fi
+
+          echo "Last successful live-template watch run: ${last_success} (${hours_since}h ago; threshold ${THRESHOLD_HOURS}h)"
+
+          existing=$(gh issue list \
+            --label claude-code-drift \
+            --state open \
+            --search '"Claude Code live template watcher stale" in:title' \
+            --json number \
+            --jq '.[0].number // ""')
+
+          if [ "$hours_since" -lt "$THRESHOLD_HOURS" ]; then
+            if [ -n "$existing" ]; then
+              gh issue close "$existing" \
+                --comment "Auto-closed: live template watcher recovered; latest successful run was ${hours_since}h ago (${last_success})."
+            fi
+            exit 0
+          fi
+
+          echo "::warning::live template watcher is stale; attempting one workflow_dispatch before alerting"
+          dispatch_status="not-attempted"
+          if gh workflow run claude-code-live-template-watch.yml --ref "$GITHUB_REF_NAME" 2>/dev/null; then
+            dispatch_status="triggered"
+          else
+            dispatch_status="failed"
+          fi
+
+          body_file=$(mktemp)
+          {
+            echo "## Claude Code live template watcher stale"
+            echo ""
+            echo "The GitHub-hosted liveness check found no successful claude-code-live-template-watch.yml run within ${THRESHOLD_HOURS} hours."
+            echo ""
+            echo "- Last successful run: ${last_success}"
+            echo "- Hours since success: ${hours_since}"
+            echo "- Self-recovery dispatch: ${dispatch_status}"
+            echo "- Liveness run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo ""
+            echo "### Fix checklist"
+            echo ""
+            echo "- [ ] Confirm the self-hosted runner labeled claude-auth is online."
+            echo "- [ ] Confirm Claude Code is installed and authenticated on that runner."
+            echo "- [ ] Inspect the latest claude-code-live-template-watch.yml run if one exists."
+            echo "- [ ] Re-run the watcher manually after recovery."
+          } > "$body_file"
+
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --body-file "$body_file"
+          else
+            gh issue create \
+              --title "Claude Code live template watcher stale" \
+              --label claude-code-drift \
+              --body-file "$body_file"
+          fi
