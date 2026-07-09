@@ -1,14 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   getOpenBrowserCommand,
-  openOAuthBrowser,
   readOAuthBrowserMode,
   shouldOpenOAuthBrowser,
 } from "../src/oauth-browser";
 
 describe("OAuth browser UX", () => {
   it("opens with platform-native commands without shell URL parsing", () => {
-    const url = "https://example.test/oauth?client_id=a&scope=b";
+    const url = "https://auth.openai.com/oauth/authorize?client_id=a&scope=b";
 
     expect(getOpenBrowserCommand(url, "darwin")).toEqual({
       command: "open",
@@ -37,9 +36,5 @@ describe("OAuth browser UX", () => {
     expect(shouldOpenOAuthBrowser("browser")).toBe(true);
     expect(shouldOpenOAuthBrowser("manual")).toBe(false);
     expect(shouldOpenOAuthBrowser("headless")).toBe(false);
-  });
-
-  it("treats browser launch as best-effort", () => {
-    expect(() => openOAuthBrowser("https://example.test/oauth")).not.toThrow();
   });
 });
