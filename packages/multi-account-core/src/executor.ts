@@ -5,6 +5,7 @@ import {
   type PluginClient,
   type TokenRefreshResult,
 } from "./types";
+import type { SupervisedTurnResponse, TurnResponseSupervisor } from "./turn-supervisor";
 
 const MIN_MAX_RETRIES = 6;
 const RETRIES_PER_ACCOUNT = 3;
@@ -43,6 +44,7 @@ export interface ExecutorDependencies {
     variant: "info" | "warning" | "success" | "error",
   ) => Promise<void>;
   getAccountLabel: (account: ManagedAccount) => string;
+  responseSupervisor?: TurnResponseSupervisor;
 }
 
 function isAbortError(error: unknown): boolean {
@@ -142,6 +144,27 @@ function extractStickyKey(input: RequestInfo | URL, init?: RequestInit): string 
   return readStickyHeaderFromInit(init?.headers) ?? requestHeader;
 }
 
+type FetchArguments = readonly [input: RequestInfo | URL, init?: RequestInit];
+
+async function createFetchArgumentsFactory(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<() => FetchArguments> {
+  if (!(input instanceof Request)) {
+    if (!(init?.body instanceof ReadableStream)) return () => [input, init];
+
+    const body = new Uint8Array(await new Response(init.body).arrayBuffer());
+    return () => [input, {
+      ...init,
+      body: body.slice(),
+    }];
+  }
+
+  const request = new Request(input, init);
+  const body = request.body ? new Uint8Array(await request.arrayBuffer()) : undefined;
+  return () => [new Request(request, { body: body?.slice() })];
+}
+
 export function createExecutorForProvider(
   providerName: string,
   dependencies: ExecutorDependencies,
@@ -160,6 +183,7 @@ export function createExecutorForProvider(
     sleep,
     showToast,
     getAccountLabel,
+    responseSupervisor,
   } = dependencies;
 
   async function executeWithAccountRotation(
@@ -171,7 +195,12 @@ export function createExecutorForProvider(
   ): Promise<Response> {
     const maxRetries = Math.max(MIN_MAX_RETRIES, manager.getAccountCount() * RETRIES_PER_ACCOUNT);
     let previousAccountUuid: string | undefined;
+    let lastStartupFailure: Response | undefined;
+    const startupFailureAccounts = new Set<string>();
     const stickyKey = extractStickyKey(input, init);
+    const createFetchArguments = responseSupervisor
+      ? await createFetchArgumentsFactory(input, init)
+      : () => [input, init] as FetchArguments;
 
     type StatusTransition =
       | { type: "success"; response: Response }
@@ -181,15 +210,15 @@ export function createExecutorForProvider(
     async function retryServerErrors(
       account: ManagedAccount,
       runtime: Awaited<ReturnType<ExecutorRuntimeFactory["getRuntime"]>>,
-    ): Promise<Response | null> {
+    ): Promise<SupervisedTurnResponse | null> {
+      let lastResult: SupervisedTurnResponse | undefined;
       for (let attempt = 0; attempt < MAX_SERVER_RETRIES_PER_ATTEMPT; attempt++) {
         const backoff = Math.min(SERVER_RETRY_BASE_MS * 2 ** attempt, SERVER_RETRY_MAX_MS);
         const jitteredBackoff = backoff * (0.5 + Math.random() * 0.5);
         await sleep(jitteredBackoff);
 
-        let retryResponse: Response;
         try {
-          retryResponse = await runtime.fetch(input, init);
+          lastResult = await fetchAndSupervise(runtime);
         } catch (error) {
           if (isAbortError(error)) throw error;
           if (await handleRuntimeFetchFailure(manager, runtimeFactory, client, account, error)) {
@@ -199,26 +228,44 @@ export function createExecutorForProvider(
           return null;
         }
 
-        if (retryResponse.status < 500) return retryResponse;
+        if (lastResult.response.status < 500) return lastResult;
       }
 
-      return null;
+      return lastResult?.failure?.retryScope === "same_account" ? lastResult : null;
+    }
+
+    async function fetchAndSupervise(
+      runtime: Awaited<ReturnType<ExecutorRuntimeFactory["getRuntime"]>>,
+    ): Promise<SupervisedTurnResponse> {
+      const [attemptInput, attemptInit] = createFetchArguments();
+      const response = await runtime.fetch(attemptInput, attemptInit);
+      return responseSupervisor ? responseSupervisor(response) : { response };
     }
 
     const dispatchResponseStatus = async (
       account: ManagedAccount,
       accountUuid: string,
       runtime: Awaited<ReturnType<ExecutorRuntimeFactory["getRuntime"]>>,
-      response: Response,
+      initialResult: SupervisedTurnResponse,
       allow401Retry: boolean,
       from401RefreshRetry: boolean,
     ): Promise<StatusTransition> => {
+      let result = initialResult;
+      let response = result.response;
+      if (result.failure && (result.downstreamVisible || result.failure.retryScope === "none")) {
+        return { type: "handled", response };
+      }
+
       if (response.status >= 500) {
         const recovered = await retryServerErrors(account, runtime);
         if (recovered === null) {
           return { type: "retryOuter" };
         }
-        response = recovered;
+        result = recovered;
+        response = result.response;
+        if (result.failure?.retryScope === "same_account" && response.status >= 500) {
+          return { type: "handled", response };
+        }
       }
 
       if (response.status === 401) {
@@ -226,8 +273,8 @@ export function createExecutorForProvider(
           runtimeFactory.invalidate(accountUuid);
           try {
             const retryRuntime = await runtimeFactory.getRuntime(accountUuid);
-            const retryResponse = await retryRuntime.fetch(input, init);
-            return dispatchResponseStatus(account, accountUuid, retryRuntime, retryResponse, false, true);
+            const retryResult = await fetchAndSupervise(retryRuntime);
+            return dispatchResponseStatus(account, accountUuid, retryRuntime, retryResult, false, true);
           } catch (error) {
             if (isAbortError(error)) throw error;
             await handleRuntimeFetchFailure(manager, runtimeFactory, client, account, error);
@@ -275,6 +322,13 @@ export function createExecutorForProvider(
 
       if (response.status === 429) {
         await handleRateLimitResponse(manager, client, account, response);
+        if (result.failure?.retryScope === "next_account") {
+          startupFailureAccounts.add(accountUuid);
+          lastStartupFailure = response;
+          if (startupFailureAccounts.size >= manager.getAccountCount()) {
+            return { type: "handled", response };
+          }
+        }
         return { type: "handled" };
       }
 
@@ -293,10 +347,10 @@ export function createExecutorForProvider(
       previousAccountUuid = accountUuid;
 
       let runtime: Awaited<ReturnType<ExecutorRuntimeFactory["getRuntime"]>>;
-      let response: Response;
+      let result: SupervisedTurnResponse;
       try {
         runtime = await runtimeFactory.getRuntime(accountUuid);
-        response = await runtime.fetch(input, init);
+        result = await fetchAndSupervise(runtime);
       } catch (error) {
         if (isAbortError(error)) throw error;
         if (await handleRuntimeFetchFailure(manager, runtimeFactory, client, account, error)) {
@@ -306,7 +360,7 @@ export function createExecutorForProvider(
         continue;
       }
 
-      const transition = await dispatchResponseStatus(account, accountUuid, runtime, response, true, false);
+      const transition = await dispatchResponseStatus(account, accountUuid, runtime, result, true, false);
       if (transition.type === "retryOuter" || transition.type === "handled") {
         if (transition.type === "handled" && transition.response) {
           return transition.response;
@@ -318,6 +372,7 @@ export function createExecutorForProvider(
       return transition.response;
     }
 
+    if (lastStartupFailure) return lastStartupFailure;
     throw new Error(
       `Exhausted ${maxRetries} retries across all accounts. All attempts failed due to auth errors, rate limits, or token issues.`,
     );

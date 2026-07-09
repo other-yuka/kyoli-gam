@@ -4,7 +4,13 @@ import { join } from "node:path";
 import { CodexMultiAuthPlugin } from "../../src/index";
 import { AccountRuntimeFactory } from "../../src/runtime-factory";
 import { AccountStore } from "../../src/account-store";
-import { ACCOUNTS_FILENAME, CODEX_API_ENDPOINT, OPENAI_CLI_USER_AGENT, TOKEN_EXPIRY_BUFFER_MS } from "../../src/constants";
+import {
+  ACCOUNTS_FILENAME,
+  CODEX_API_ENDPOINT,
+  CODEX_USAGE_ENDPOINT,
+  OPENAI_CLI_USER_AGENT,
+  TOKEN_EXPIRY_BUFFER_MS,
+} from "../../src/constants";
 import { clearRefreshMutex } from "../../src/token";
 import { buildFakeJwt, createMockClient, setupTestEnv } from "../helpers";
 
@@ -41,6 +47,15 @@ async function seedAccount(store: AccountStore, overrides: Record<string, unknow
     ...overrides,
   });
   await store.setActiveUuid((overrides.uuid as string | undefined) ?? "acct-contract");
+}
+
+function sseResponse(events: Array<Record<string, unknown>>): Response {
+  return new Response(events.map((event) => (
+    `event: ${String(event.type)}\ndata: ${JSON.stringify(event)}\n\n`
+  )).join(""), {
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
+  });
 }
 
 afterEach(() => {
@@ -137,6 +152,89 @@ describe("OpenCode Codex native contract", () => {
       expect(headers.get("user-agent")).toBe(OPENAI_CLI_USER_AGENT);
       expect(headers.get("chatgpt-account-id")).toBe("account-id-contract");
       expect(String(init?.body)).toContain("gpt-5.3-codex");
+    } finally {
+      globalThis.fetch = originalFetch;
+      await cleanup();
+    }
+  });
+
+  test("loader hides startup quota failure and replays the request with the next account", async () => {
+    const { cleanup } = await setupTestEnv();
+    const originalFetch = globalThis.fetch;
+    const requestBodies: string[] = [];
+    const upstreamAccounts: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url === CODEX_USAGE_ENDPOINT) {
+        return new Response(JSON.stringify({ plan_type: "plus", rate_limit: {} }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      const headers = new Headers(init?.headers);
+      const accountId = headers.get("chatgpt-account-id") ?? "";
+      upstreamAccounts.push(accountId);
+      requestBodies.push(await new Request(input, init).text());
+      if (accountId === "account-id-first") {
+        return sseResponse([
+          { type: "response.created", response: { id: "resp_first", status: "in_progress" } },
+          { type: "response.in_progress", response: { id: "resp_first", status: "in_progress" } },
+          {
+            type: "response.failed",
+            response: {
+              id: "resp_first",
+              status: "failed",
+              error: { code: "usage_limit_reached", message: "usage limit reached" },
+            },
+          },
+        ]);
+      }
+      return sseResponse([
+        { type: "response.created", response: { id: "resp_second", status: "in_progress" } },
+        { type: "response.output_text.delta", response_id: "resp_second", delta: "ok" },
+        { type: "response.completed", response: { id: "resp_second", status: "completed" } },
+      ]);
+    });
+
+    try {
+      const store = new AccountStore();
+      await seedAccount(store, {
+        uuid: "acct-first",
+        accountId: "account-id-first",
+        accessToken: buildAccessToken("account-id-first"),
+        refreshToken: "refresh-first",
+      });
+      await seedAccount(store, {
+        uuid: "acct-second",
+        accountId: "account-id-second",
+        accessToken: buildAccessToken("account-id-second"),
+        refreshToken: "refresh-second",
+      });
+      await store.setActiveUuid("acct-first");
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      const plugin = await CodexMultiAuthPlugin({ client: createMockClient() } as never);
+      const auth = (plugin as Record<string, unknown>).auth as {
+        loader: (getAuth: () => Promise<unknown>, provider: unknown) => Promise<{ apiKey: string; fetch: typeof fetch }>;
+      };
+      const loaded = await auth.loader(
+        async () => ({ type: "api", key: "" }),
+        { id: "openai", name: "OpenAI", env: {}, models: {} },
+      );
+      const requestBody = JSON.stringify({ model: "gpt-5.3-codex", input: "Say ok", stream: true });
+
+      const response = await loaded.fetch(new Request("https://api.openai.com/v1/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: requestBody,
+      }));
+      const body = await response.text();
+
+      expect(upstreamAccounts).toEqual(["account-id-first", "account-id-second"]);
+      expect(requestBodies).toEqual([requestBody, requestBody]);
+      expect(body).toContain("resp_second");
+      expect(body).not.toContain("resp_first");
+      expect(body).not.toContain("usage_limit_reached");
     } finally {
       globalThis.fetch = originalFetch;
       await cleanup();

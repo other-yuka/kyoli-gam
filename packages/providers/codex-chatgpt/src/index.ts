@@ -14,20 +14,18 @@ import { createHash } from "node:crypto";
 import {
   executeWithAccountFailover,
   CredentialUnavailableError,
+  classifyCodexFailure,
+  classifyCodexJsonEventFailure,
+  CODEX_UNKNOWN_RATE_LIMIT_BACKOFF_MS,
+  drainSseFrames,
+  isCodexStartupOutputEvent,
   jsonResponse,
+  parseCodexRetryAfterSeconds,
   stripProviderPrefix,
+  superviseCodexResponseStartup,
   type SelectedCredential,
 } from "@kyoli-gam/core";
 import { WebSocket as WsWebSocket } from "ws";
-import {
-  classifyCodexFailure,
-  classifyCodexJsonEventFailure,
-  classifyCodexSseStartupFailure,
-  CODEX_UNKNOWN_RATE_LIMIT_BACKOFF_MS,
-  isCodexStartupOutputEvent,
-  isCodexStartupOutputFrame,
-  parseCodexRetryAfterSeconds,
-} from "./failures";
 import { canReplayCodexWebSocketFailure } from "./websocket/replay-policy";
 import { CodexWebSocketTurnRouter, type CodexWebSocketRoutePlan } from "./websocket/turn-router";
 import { readCodexWebSocketTurn } from "./websocket/turn-state";
@@ -48,7 +46,6 @@ const CODEX_BRIDGE_ORIGINATOR = "codex_chatgpt_desktop";
 const CODEX_USER_AGENT = "codex_cli_rs/0.0.0";
 const TOKEN_EXPIRY_BUFFER_MS = 60_000;
 const TOKEN_REFRESH_TIMEOUT_MS = 30_000;
-const CODEX_STARTUP_PROBE_MAX_BYTES = 64 * 1024;
 const CODEX_WEBSOCKET_REPLAY_MAX_MESSAGES = 64;
 const DEFAULT_COMPACT_REQUEST_BUDGET_MS = 180_000;
 const MAX_CODEX_FILE_SIZE_BYTES = 512 * 1024 * 1024;
@@ -1059,7 +1056,7 @@ async function fetchCodexJsonWithAuthRefresh(input: {
       response = await fetchCodexJsonRequest(input, currentCredential);
     }
   }
-  return input.normalizeStartupFailure ? normalizeCodexStartupFailure(response) : response;
+  return input.normalizeStartupFailure ? superviseCodexResponseStartup(response) : response;
 }
 
 function fetchCodexJsonRequest(
@@ -2490,23 +2487,6 @@ async function convertResponsesStreamToResponsePayload(
   };
 }
 
-function drainSseFrames(buffer: string, onFrame: (frame: string) => void): string {
-  let remainder = buffer;
-
-  while (true) {
-    const normalizedIndex = remainder.indexOf("\n\n");
-    const windowsIndex = remainder.indexOf("\r\n\r\n");
-    const indexes = [normalizedIndex, windowsIndex].filter((index) => index >= 0);
-    if (indexes.length === 0) return remainder;
-
-    const index = Math.min(...indexes);
-    const separatorLength = remainder.startsWith("\r\n\r\n", index) ? 4 : 2;
-    const frame = remainder.slice(0, index);
-    remainder = remainder.slice(index + separatorLength);
-    if (frame.trim()) onFrame(frame);
-  }
-}
-
 function splitSseFrames(value: string): string[] {
   const frames: string[] = [];
   drainSseFrames(`${value}\n\n`, (frame) => frames.push(frame));
@@ -2861,7 +2841,7 @@ function extractChatToolCalls(payload: Record<string, unknown>): Record<string, 
 
 function readSseEvent(frame: string): string | undefined {
   return frame
-    .split(/\r?\n/)
+    .split(/\r\n|\r|\n/)
     .map((line) => line.trim())
     .find((line) => line.startsWith("event:"))
     ?.slice("event:".length)
@@ -2870,7 +2850,7 @@ function readSseEvent(frame: string): string | undefined {
 
 function readSseData(frame: string): string | undefined {
   const lines = frame
-    .split(/\r?\n/)
+    .split(/\r\n|\r|\n/)
     .map((line) => line.trim())
     .filter((line) => line.startsWith("data:"))
     .map((line) => line.slice("data:".length).trimStart());
@@ -3015,115 +2995,6 @@ async function readJsonRecord(response: Response): Promise<Record<string, unknow
   } catch {
     return undefined;
   }
-}
-
-async function normalizeCodexStartupFailure(response: Response): Promise<AccountExecutionResult> {
-  if (!response.ok || !response.body || !response.headers.get("content-type")?.includes("text/event-stream")) {
-    return { response };
-  }
-
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  const decoder = new TextDecoder();
-  let pendingText = "";
-  let failure: AccountFailureSignal | undefined;
-  let downstreamVisible = false;
-  let done = false;
-
-  while (byteLength(chunks) < CODEX_STARTUP_PROBE_MAX_BYTES && !failure && !downstreamVisible) {
-    const next = await reader.read();
-    if (next.done) {
-      done = true;
-      break;
-    }
-    chunks.push(next.value);
-    pendingText += decoder.decode(next.value, { stream: true });
-    pendingText = drainSseFrames(pendingText, (frame) => {
-      if (failure || downstreamVisible) return;
-      const frameFailure = classifyCodexSseStartupFailure(frame);
-      if (frameFailure) {
-        failure = frameFailure;
-        return;
-      }
-      if (isCodexStartupOutputFrame(frame)) downstreamVisible = true;
-    });
-  }
-
-  if (done && !failure && !downstreamVisible) {
-    pendingText += decoder.decode();
-    if (pendingText.trim()) {
-      const pendingFailure = classifyCodexSseStartupFailure(pendingText);
-      if (pendingFailure) {
-        failure = pendingFailure;
-      } else if (isCodexStartupOutputFrame(pendingText)) {
-        downstreamVisible = true;
-      }
-    }
-  }
-
-  if (failure) {
-    await reader.cancel().catch(() => undefined);
-    const headers: Record<string, string> = {};
-    if (failure.retryAfterSeconds) headers["retry-after"] = String(failure.retryAfterSeconds);
-    if (failure.resetAt) headers["x-kyoli-account-reset-at"] = failure.resetAt;
-    return {
-      failure,
-      downstreamVisible: false,
-      response: jsonResponse(
-        {
-          error: {
-            type: failure.code ?? "upstream_response_failed",
-            message: failure.message ?? "Codex upstream failed before producing output.",
-            upstream_status: "response.failed",
-          },
-        },
-        { status: failure.httpStatus ?? 502, headers },
-      ),
-    };
-  }
-
-  return {
-    downstreamVisible,
-    response: new Response(replayResponseBody(chunks, reader), {
-      status: response.status,
-      statusText: response.statusText,
-      headers: filterStreamingResponseHeaders(response.headers),
-    }),
-  };
-}
-
-function replayResponseBody(chunks: Uint8Array[], reader: ReadableStreamDefaultReader<Uint8Array>): ReadableStream<Uint8Array> {
-  let index = 0;
-  return new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      if (index < chunks.length) {
-        controller.enqueue(chunks[index++]);
-        return;
-      }
-      const next = await reader.read();
-      if (next.done) {
-        controller.close();
-        return;
-      }
-      controller.enqueue(next.value);
-    },
-    cancel(reason) {
-      return reader.cancel(reason);
-    },
-  });
-}
-
-function filterStreamingResponseHeaders(headers: Headers): Headers {
-  const filtered = new Headers(headers);
-  filtered.delete("content-encoding");
-  filtered.delete("content-length");
-  filtered.delete("transfer-encoding");
-  filtered.delete("connection");
-  return filtered;
-}
-
-function byteLength(chunks: Uint8Array[]): number {
-  return chunks.reduce((total, chunk) => total + chunk.byteLength, 0);
 }
 
 function readFileIdFromPath(pathname: string): string | undefined {

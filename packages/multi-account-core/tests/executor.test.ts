@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { createExecutorForProvider } from "../src/executor";
+import { superviseCodexResponseStartup } from "../src/adapters/codex-responses";
 import type { ManagedAccount, PluginClient } from "../src/types";
+import type { TurnResponseSupervisor } from "../src/turn-supervisor";
 
 function createAccount(overrides: Partial<ManagedAccount> = {}): ManagedAccount {
   return {
@@ -121,6 +123,7 @@ function createTokenRefreshError(permanent: boolean, status?: number): Error {
 function createExecutor(
   provider: "Anthropic" | "Codex",
   handleRateLimitResponse: ReturnType<typeof vi.fn> = vi.fn(async () => {}),
+  responseSupervisor?: TurnResponseSupervisor,
 ) {
   return createExecutorForProvider(provider, {
     handleRateLimitResponse,
@@ -128,7 +131,28 @@ function createExecutor(
     sleep: async () => {},
     showToast: async () => {},
     getAccountLabel: () => "Account",
+    responseSupervisor,
   });
+}
+
+function sseResponse(events: Array<Record<string, unknown>>): Response {
+  return new Response(events.map((event) => (
+    `event: ${String(event.type)}\ndata: ${JSON.stringify(event)}\n\n`
+  )).join(""), {
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
+  });
+}
+
+function startupFailure(code: string, message = code): Response {
+  return sseResponse([
+    { type: "response.created", response: { id: `resp_${code}`, status: "in_progress" } },
+    { type: "response.in_progress", response: { id: `resp_${code}`, status: "in_progress" } },
+    {
+      type: "response.failed",
+      response: { id: `resp_${code}`, status: "failed", error: { code, message } },
+    },
+  ]);
 }
 
 describe("core/executor", () => {
@@ -155,6 +179,31 @@ describe("core/executor", () => {
 
     expect(response.status).toBe(200);
     expect(manager.markSuccess).toHaveBeenCalledWith("acct-1");
+  });
+
+  test("preserves the original Request for providers without a response supervisor", async () => {
+    const account = createAccount();
+    const manager = createSingleAccountManager(account);
+    const request = new Request("https://api.example.com", {
+      method: "POST",
+      body: JSON.stringify({ input: "hello" }),
+    });
+    let receivedInput: RequestInfo | URL | undefined;
+    const runtimeFactory = {
+      getRuntime: vi.fn(async () => ({
+        fetch: async (input: RequestInfo | URL) => {
+          receivedInput = input;
+          return jsonResponse(200, { ok: true });
+        },
+      })),
+      invalidate: vi.fn(),
+    };
+    const { executeWithAccountRotation } = createExecutor("Anthropic");
+
+    await executeWithAccountRotation(manager, runtimeFactory, client, request);
+
+    expect(receivedInput).toBe(request);
+    expect(request.bodyUsed).toBe(false);
   });
 
   test("derives sticky key from first user message before session header", async () => {
@@ -198,6 +247,163 @@ describe("core/executor", () => {
     const response = await executeWithAccountRotation(manager, runtimeFactory, client, "https://api.example.com");
     expect(response.status).toBe(200);
     expect(handleRateLimitResponse).toHaveBeenCalledTimes(1);
+  });
+
+  test("hides startup quota events and retries the same request with the next account", async () => {
+    const acct1 = createAccount({ uuid: "acct-1" });
+    const acct2 = createAccount({ uuid: "acct-2", index: 1, refreshToken: "rt-2" });
+    const manager = createRotatingManager([acct1, acct2]);
+    const runtimeFactory = createQueuedRuntimeFactory({
+      "acct-1": [startupFailure("usage_limit_reached", "usage limit reached")],
+      "acct-2": [sseResponse([{ type: "response.completed", response: { id: "resp_ok" } }])],
+    });
+    const handleRateLimitResponse = vi.fn(async () => {});
+    const { executeWithAccountRotation } = createExecutor(
+      "Codex",
+      handleRateLimitResponse,
+      superviseCodexResponseStartup,
+    );
+
+    const response = await executeWithAccountRotation(manager, runtimeFactory, client, "https://api.example.com");
+    const body = await response.text();
+
+    expect(runtimeFactory.calls).toEqual(["acct-1", "acct-2"]);
+    expect(handleRateLimitResponse).toHaveBeenCalledTimes(1);
+    expect(manager.markSuccess).toHaveBeenCalledTimes(1);
+    expect(manager.markSuccess).toHaveBeenCalledWith("acct-2");
+    expect(manager.markSuccess).not.toHaveBeenCalledWith("acct-1");
+    expect(body).toContain("resp_ok");
+    expect(body).not.toContain("usage_limit_reached");
+  });
+
+  test("replays a URL request with a streaming body after startup failover", async () => {
+    const acct1 = createAccount({ uuid: "acct-1" });
+    const acct2 = createAccount({ uuid: "acct-2", index: 1, refreshToken: "rt-2" });
+    const manager = createRotatingManager([acct1, acct2]);
+    const requestBodies: string[] = [];
+    const outcomesByUuid: Record<string, Response[]> = {
+      "acct-1": [startupFailure("usage_limit_reached")],
+      "acct-2": [sseResponse([{ type: "response.completed", response: { id: "resp_ok" } }])],
+    };
+    const runtimeFactory = {
+      getRuntime: vi.fn(async (uuid: string) => ({
+        fetch: async (_input: RequestInfo | URL, init?: RequestInit) => {
+          requestBodies.push(await new Response(init?.body).text());
+          return outcomesByUuid[uuid]!.shift()!;
+        },
+      })),
+      invalidate: vi.fn(),
+    };
+    const { executeWithAccountRotation } = createExecutor(
+      "Codex",
+      vi.fn(async () => {}),
+      superviseCodexResponseStartup,
+    );
+    const requestBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"input":"hello"}'));
+        controller.close();
+      },
+    });
+
+    const response = await executeWithAccountRotation(
+      manager,
+      runtimeFactory,
+      client,
+      "https://api.example.com",
+      { method: "POST", body: requestBody, duplex: "half" } as RequestInit,
+    );
+
+    expect(response.status).toBe(200);
+    expect(requestBodies).toEqual(['{"input":"hello"}', '{"input":"hello"}']);
+  });
+
+  test("returns the final startup quota error once every account has failed", async () => {
+    const acct1 = createAccount({ uuid: "acct-1" });
+    const acct2 = createAccount({ uuid: "acct-2", index: 1, refreshToken: "rt-2" });
+    const manager = createRotatingManager([acct1, acct2]);
+    const runtimeFactory = createQueuedRuntimeFactory({
+      "acct-1": [startupFailure("usage_limit_reached", "first exhausted")],
+      "acct-2": [startupFailure("usage_limit_reached", "second exhausted")],
+    });
+    const handleRateLimitResponse = vi.fn(async () => {});
+    const { executeWithAccountRotation } = createExecutor(
+      "Codex",
+      handleRateLimitResponse,
+      superviseCodexResponseStartup,
+    );
+
+    const response = await executeWithAccountRotation(manager, runtimeFactory, client, "https://api.example.com");
+
+    expect(response.status).toBe(429);
+    expect(await response.text()).toContain("second exhausted");
+    expect(runtimeFactory.calls).toEqual(["acct-1", "acct-2"]);
+    expect(handleRateLimitResponse).toHaveBeenCalledTimes(2);
+    expect(manager.markSuccess).not.toHaveBeenCalled();
+  });
+
+  test.each(["server_is_overloaded", "slow_down", "model_at_capacity"])(
+    "retries %s on the same account without rate-limit penalty",
+    async (code) => {
+      const acct1 = createAccount({ uuid: "acct-1" });
+      const acct2 = createAccount({ uuid: "acct-2", index: 1, refreshToken: "rt-2" });
+      const manager = createRotatingManager([acct1, acct2]);
+      const runtimeFactory = createQueuedRuntimeFactory({
+        "acct-1": [
+          startupFailure(code, "Selected model is at capacity."),
+          startupFailure(code, "Selected model is at capacity."),
+          startupFailure(code, "Selected model is at capacity."),
+        ],
+        "acct-2": [sseResponse([{ type: "response.completed", response: { id: "must_not_run" } }])],
+      });
+      const handleRateLimitResponse = vi.fn(async () => {});
+      const { executeWithAccountRotation } = createExecutor(
+        "Codex",
+        handleRateLimitResponse,
+        superviseCodexResponseStartup,
+      );
+
+      const response = await executeWithAccountRotation(manager, runtimeFactory, client, "https://api.example.com");
+
+      expect(response.status).toBe(502);
+      expect(await response.text()).toContain("Selected model is at capacity.");
+      expect(runtimeFactory.calls).toEqual(["acct-1", "acct-1", "acct-1"]);
+      expect(handleRateLimitResponse).not.toHaveBeenCalled();
+      expect(manager.markSuccess).not.toHaveBeenCalled();
+    },
+  );
+
+  test("never replays a turn after output has been committed", async () => {
+    const acct1 = createAccount({ uuid: "acct-1" });
+    const acct2 = createAccount({ uuid: "acct-2", index: 1, refreshToken: "rt-2" });
+    const manager = createRotatingManager([acct1, acct2]);
+    const committedFailure = sseResponse([
+      { type: "response.created", response: { id: "resp_visible", status: "in_progress" } },
+      { type: "response.output_text.delta", response_id: "resp_visible", delta: "visible" },
+      {
+        type: "response.failed",
+        response: { id: "resp_visible", error: { code: "usage_limit_reached", message: "late limit" } },
+      },
+    ]);
+    const runtimeFactory = createQueuedRuntimeFactory({
+      "acct-1": [committedFailure],
+      "acct-2": [sseResponse([{ type: "response.completed", response: { id: "must_not_run" } }])],
+    });
+    const handleRateLimitResponse = vi.fn(async () => {});
+    const { executeWithAccountRotation } = createExecutor(
+      "Codex",
+      handleRateLimitResponse,
+      superviseCodexResponseStartup,
+    );
+
+    const response = await executeWithAccountRotation(manager, runtimeFactory, client, "https://api.example.com");
+    const body = await response.text();
+
+    expect(runtimeFactory.calls).toEqual(["acct-1"]);
+    expect(handleRateLimitResponse).not.toHaveBeenCalled();
+    expect(body).toContain("visible");
+    expect(body).toContain("usage_limit_reached");
+    expect(body).not.toContain("must_not_run");
   });
 
   test("throws provider-scoped auth error when all accounts unusable", async () => {

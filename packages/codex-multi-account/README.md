@@ -33,6 +33,8 @@ Codex accounts or open the account management menu.
 - Uses OpenCode's built-in `openai` provider.
 - Stores accounts under OpenCode's config directory.
 - Rotates accounts on auth/rate-limit failures.
+- Hides pre-output Codex quota failures while replaying the same request with the next account.
+- Retries model-capacity failures on the same account without putting it into quota cooldown.
 - Refreshes tokens before expiry.
 - Supports browser OAuth and device-code authentication.
 

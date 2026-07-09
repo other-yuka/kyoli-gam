@@ -1,4 +1,7 @@
-import { createExecutorForProvider } from "opencode-multi-account-core";
+import {
+  createExecutorForProvider,
+  superviseCodexResponseStartup,
+} from "opencode-multi-account-core";
 import { handleRateLimitResponse as handleRateLimitResponseForProvider } from "./rate-limit";
 import { formatWaitTime, getAccountLabel, showToast, sleep } from "./utils";
 
@@ -14,6 +17,7 @@ const { executeWithAccountRotation } = createExecutorForProvider("Codex", {
   sleep,
   showToast,
   getAccountLabel,
+  responseSupervisor: superviseCodexResponseStartup,
 });
 
 export { executeWithAccountRotation };

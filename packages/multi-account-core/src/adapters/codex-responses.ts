@@ -1,6 +1,34 @@
-import type { AccountFailureClass, AccountFailureSignal } from "@kyoli-gam/core";
+import {
+  superviseSseResponseStartup,
+  type SupervisedTurnResponse,
+  type TurnFailureClass,
+  type TurnFailurePhase,
+  type TurnFailureSignal,
+} from "../turn-supervisor";
 
 export const CODEX_UNKNOWN_RATE_LIMIT_BACKOFF_MS = 5 * 60 * 1000;
+export const CODEX_STARTUP_PROBE_MAX_BYTES = 64 * 1024;
+
+export function superviseCodexResponseStartup(response: Response): Promise<SupervisedTurnResponse> {
+  return superviseSseResponseStartup(response, {
+    maxBufferedBytes: CODEX_STARTUP_PROBE_MAX_BYTES,
+    classifyFailure: classifyCodexSseStartupFailure,
+    isCommitFrame: isCodexStartupOutputFrame,
+    createBufferLimitFailure: createCodexBufferLimitFailure,
+    createFailureResponse: codexFailureResponse,
+  });
+}
+
+function createCodexBufferLimitFailure(bufferedBytes: number): TurnFailureSignal {
+  return {
+    class: "transient",
+    phase: "startup",
+    code: "startup_buffer_limit_exceeded",
+    message: `Codex upstream produced ${bufferedBytes} bytes without output; retrying before exposing the stream.`,
+    httpStatus: 502,
+    retryScope: "same_account",
+  };
+}
 
 export function isCodexStartupOutputFrame(frame: string): boolean {
   const payload = readSseJsonRecord(frame);
@@ -31,7 +59,7 @@ export function isCodexStartupOutputEvent(value: unknown, event?: string): boole
   return false;
 }
 
-export function classifyCodexSseStartupFailure(frame: string): AccountFailureSignal | undefined {
+export function classifyCodexSseStartupFailure(frame: string): TurnFailureSignal | undefined {
   const event = readSseEvent(frame);
   const payload = readSseJsonRecord(frame);
   if (!payload) return undefined;
@@ -46,8 +74,8 @@ export function classifyCodexSseStartupFailure(frame: string): AccountFailureSig
 
 export function classifyCodexJsonEventFailure(
   value: unknown,
-  phase: AccountFailureSignal["phase"],
-): AccountFailureSignal | undefined {
+  phase: TurnFailurePhase,
+): TurnFailureSignal | undefined {
   const payload = readRecord(value);
   if (!payload) return undefined;
   const payloadType = readString(payload.type);
@@ -58,7 +86,7 @@ export function classifyCodexJsonEventFailure(
 export function classifyCodexFailure(
   code: string | undefined,
   message: string,
-): AccountFailureClass {
+): TurnFailureClass {
   const normalizedCode = code?.toLowerCase();
   if (normalizedCode === "rate_limit_exceeded" || normalizedCode === "usage_limit_reached") return "rate_limit";
   if (
@@ -67,6 +95,11 @@ export function classifyCodexFailure(
     normalizedCode === "quota_exceeded"
   ) return "quota";
   if (normalizedCode === "invalid_api_key" || normalizedCode === "invalid_iam_token") return "auth";
+  if (
+    normalizedCode === "server_is_overloaded" ||
+    normalizedCode === "slow_down" ||
+    normalizedCode === "model_at_capacity"
+  ) return "transient";
 
   const normalized = `${code ?? ""} ${message}`.toLowerCase();
   if (
@@ -95,8 +128,8 @@ export function parseCodexRetryAfterSeconds(message: string): number | undefined
 
 function classifyCodexFailurePayload(
   payload: Record<string, unknown>,
-  phase: AccountFailureSignal["phase"],
-): AccountFailureSignal | undefined {
+  phase: TurnFailurePhase,
+): TurnFailureSignal {
   const response = readRecord(payload.response);
   const error = readRecord(response?.error) ?? readRecord(payload.error);
   const code = readString(error?.code) ?? readString(error?.type) ?? readString(payload.code);
@@ -126,7 +159,23 @@ function classifyCodexFailurePayload(
   };
 }
 
-function httpStatusFromCodexFailure(failureClass: AccountFailureClass): number {
+function codexFailureResponse(failure: TurnFailureSignal): Response {
+  const headers = new Headers({ "content-type": "application/json; charset=utf-8" });
+  if (failure.retryAfterSeconds) headers.set("retry-after", String(failure.retryAfterSeconds));
+  if (failure.resetAt) headers.set("x-kyoli-account-reset-at", failure.resetAt);
+  return new Response(JSON.stringify({
+    error: {
+      type: failure.code ?? "upstream_response_failed",
+      message: failure.message ?? "Codex upstream failed before producing output.",
+      upstream_status: "response.failed",
+    },
+  }), {
+    status: failure.httpStatus ?? 502,
+    headers,
+  });
+}
+
+function httpStatusFromCodexFailure(failureClass: TurnFailureClass): number {
   if (failureClass === "rate_limit" || failureClass === "quota") return 429;
   if (failureClass === "auth") return 401;
   if (failureClass === "permanent") return 403;
@@ -135,24 +184,21 @@ function httpStatusFromCodexFailure(failureClass: AccountFailureClass): number {
 
 function parseCodexResetMetadata(value: Record<string, unknown> | undefined): string | undefined {
   if (!value) return undefined;
-
   const resetsAt = readNumeric(value.resets_at);
   if (resetsAt !== undefined && resetsAt > 0) {
     const ms = resetsAt > 1_000_000_000_000 ? resetsAt : resetsAt * 1000;
     const date = new Date(ms);
     return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
   }
-
   const resetsInSeconds = readNumeric(value.resets_in_seconds);
   if (resetsInSeconds !== undefined && resetsInSeconds > 0) {
     return new Date(Date.now() + resetsInSeconds * 1000).toISOString();
   }
-
   return undefined;
 }
 
 function defaultCodexResetAt(
-  failureClass: AccountFailureClass,
+  failureClass: TurnFailureClass,
   code: string | undefined,
   message: string,
 ): string | undefined {
@@ -172,14 +218,14 @@ function isCodexUsageLimitFailure(code: string | undefined, message: string): bo
 }
 
 function readSseEvent(frame: string): string | undefined {
-  return frame.split(/\r?\n/)
+  return frame.split(/\r\n|\r|\n/)
     .find((line) => line.startsWith("event:"))
     ?.slice("event:".length)
     .trim();
 }
 
 function readSseData(frame: string): string | undefined {
-  const lines = frame.split(/\r?\n/)
+  const lines = frame.split(/\r\n|\r|\n/)
     .filter((line) => line.startsWith("data:"))
     .map((line) => line.slice("data:".length).trimStart());
   return lines.length > 0 ? lines.join("\n") : undefined;
@@ -212,7 +258,6 @@ function readNumber(value: unknown): number | undefined {
 function readNumeric(value: unknown): number | undefined {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value !== "string") return undefined;
-
   const parsed = Number(value.trim());
   return Number.isFinite(parsed) ? parsed : undefined;
 }
