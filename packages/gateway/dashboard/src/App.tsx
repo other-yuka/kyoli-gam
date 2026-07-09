@@ -130,6 +130,50 @@ interface DashboardData {
   sessions: StickySession[];
 }
 
+interface CodexResetCredit {
+  id: string;
+  status?: string;
+  reset_type?: string;
+  title?: string;
+  granted_at?: string;
+  expires_at?: string;
+  redeemed_at?: string;
+}
+
+interface CodexResetCreditStatusResponse {
+  object: "codex_reset_credit_status";
+  account: AccountRecord;
+  credits: {
+    available_count: number;
+    credits: CodexResetCredit[];
+  };
+}
+
+interface CodexResetCreditRedemptionResponse {
+  object: "codex_reset_credit_redemption";
+  account: AccountRecord;
+  consumed: boolean;
+  reason?: string;
+  credit?: CodexResetCredit;
+  result?: {
+    code?: string;
+    windows_reset?: number;
+  };
+  credits?: CodexResetCreditStatusResponse["credits"];
+  usage_refresh?: {
+    ok: boolean;
+    message?: string;
+    status?: number;
+  };
+}
+
+type ResetCreditDialogState =
+  | { status: "loading"; account: AccountRecord }
+  | { status: "ready"; account: AccountRecord; data: CodexResetCreditStatusResponse }
+  | { status: "redeeming"; account: AccountRecord; data: CodexResetCreditStatusResponse }
+  | { status: "redeemed"; account: AccountRecord; data: CodexResetCreditStatusResponse; result: CodexResetCreditRedemptionResponse }
+  | { status: "error"; account: AccountRecord; message: string };
+
 interface StickySessionsResponse {
   data: StickySession[];
   stalePromptCacheCount?: number;
@@ -258,8 +302,10 @@ export function App() {
   const [commandOpen, setCommandOpen] = useState(false);
   const [commandQuery, setCommandQuery] = useState("");
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
+  const [resetCreditDialog, setResetCreditDialog] = useState<ResetCreditDialogState | undefined>();
 
   const commandInputRef = useRef<HTMLInputElement>(null);
+  const resetCreditRequestRef = useRef(0);
 
   const requestJson = useCallback(async <T,>(path: string, init: RequestInit = {}): Promise<T> => {
     const headers = new Headers(init.headers);
@@ -444,37 +490,98 @@ export function App() {
     () => buildAccountQuotaEntries(filteredAccounts),
     [filteredAccounts],
   );
+
+  const openResetCreditDialog = useCallback(async (account: AccountRecord) => {
+    const requestId = ++resetCreditRequestRef.current;
+    const accountId = encodeURIComponent(account.id);
+    setResetCreditDialog({ status: "loading", account });
+
+    try {
+      const data = await requestJson<CodexResetCreditStatusResponse>(`/admin/accounts/${accountId}/codex-reset`);
+      if (requestId !== resetCreditRequestRef.current) return;
+      setResetCreditDialog({ status: "ready", account: data.account ?? account, data });
+    } catch (caught) {
+      if (requestId !== resetCreditRequestRef.current) return;
+      if (caught instanceof UnauthorizedError) {
+        setResetCreditDialog(undefined);
+        return;
+      }
+      setResetCreditDialog({
+        status: "error",
+        account,
+        message: caught instanceof Error ? caught.message : "Codex reset credit check failed.",
+      });
+    }
+  }, [requestJson]);
+
+  const redeemResetCredit = useCallback(async () => {
+    if (!resetCreditDialog || (resetCreditDialog.status !== "ready" && resetCreditDialog.status !== "redeeming")) return;
+    const target = firstAvailableResetCredit(resetCreditDialog.data.credits.credits);
+    if (!target) return;
+
+    const requestId = ++resetCreditRequestRef.current;
+    const account = resetCreditDialog.account;
+    const accountId = encodeURIComponent(account.id);
+    setResetCreditDialog({ ...resetCreditDialog, status: "redeeming" });
+
+    try {
+      const result = await requestJson<CodexResetCreditRedemptionResponse>(`/admin/accounts/${accountId}/codex-reset`, {
+        method: "POST",
+        body: JSON.stringify({ creditId: target.id }),
+      });
+      await refresh("manual");
+      if (requestId !== resetCreditRequestRef.current) return;
+      setResetCreditDialog({
+        status: "redeemed",
+        account: result.account ?? account,
+        data: resetCreditDialog.data,
+        result,
+      });
+    } catch (caught) {
+      if (requestId !== resetCreditRequestRef.current) return;
+      if (caught instanceof UnauthorizedError) {
+        setResetCreditDialog(undefined);
+        return;
+      }
+      setResetCreditDialog({
+        status: "error",
+        account,
+        message: caught instanceof Error ? caught.message : "Codex reset credit redemption failed.",
+      });
+    }
+  }, [refresh, requestJson, resetCreditDialog]);
+
+  const closeResetCreditDialog = useCallback(() => {
+    resetCreditRequestRef.current += 1;
+    setResetCreditDialog(undefined);
+  }, []);
+
   const performAccountAction = useCallback(async (
     account: AccountRecord,
     action: AccountAction,
   ) => {
+    if (action === "reset-credit") {
+      await openResetCreditDialog(account);
+      return;
+    }
+
     const accountId = encodeURIComponent(account.id);
     const verb = action === "pause" ? "pause"
       : action === "reactivate" ? "reactivate"
-      : action === "reset-credit" ? "redeem a Codex reset credit for"
       : "reset";
-    const detail = action === "reset-credit"
-      ? " This consumes one available reset credit and clears the matching Codex quota window."
-      : "";
-    if (!window.confirm(`${verb} ${account.name}?${detail}`)) return;
+    if (!window.confirm(`${verb} ${account.name}?`)) return;
 
     try {
-      if (action === "reset-credit") {
-        await requestJson(`/admin/accounts/${accountId}/codex-reset`, {
-          method: "POST",
-        });
-      } else {
-        await requestJson(`/admin/accounts/${accountId}/${action}`, {
-          method: "POST",
-          body: action === "reset" ? JSON.stringify({ enable: true }) : undefined,
-        });
-      }
+      await requestJson(`/admin/accounts/${accountId}/${action}`, {
+        method: "POST",
+        body: action === "reset" ? JSON.stringify({ enable: true }) : undefined,
+      });
       await refresh("manual");
     } catch (caught) {
       if (caught instanceof UnauthorizedError) return;
       setError(caught instanceof Error ? caught.message : "Account action failed.");
     }
-  }, [refresh, requestJson]);
+  }, [openResetCreditDialog, refresh, requestJson]);
 
   const deleteStickySession = useCallback(async (session: StickySession) => {
     if (!window.confirm(`release route pin ${session.key}?`)) return;
@@ -815,6 +922,12 @@ export function App() {
         onClose={() => setCommandOpen(false)}
         onKeyDown={handleCommandKeyDown}
         onRun={runCommand}
+      />
+      <ResetCreditDialog
+        state={resetCreditDialog}
+        onClose={closeResetCreditDialog}
+        onRetry={(account) => void openResetCreditDialog(account)}
+        onRedeem={() => void redeemResetCredit()}
       />
     </div>
   );
@@ -1952,6 +2065,167 @@ function SessionField(props: { label: string; value: string; detail?: string; mo
   );
 }
 
+function ResetCreditDialog(props: {
+  state: ResetCreditDialogState | undefined;
+  onClose(): void;
+  onRetry(account: AccountRecord): void;
+  onRedeem(): void;
+}) {
+  const state = props.state;
+  const available = state && (state.status === "ready" || state.status === "redeeming" || state.status === "redeemed")
+    ? availableResetCredits(state.data.credits.credits)
+    : [];
+  const primaryCredit = available[0];
+  return (
+    <AnimatePresence>
+      {state ? (
+        <motion.div
+          className="fixed inset-0 z-50 bg-[#17211b]/36 p-4 backdrop-blur-sm"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.16 }}
+          onMouseDown={props.onClose}
+        >
+          <motion.div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Codex reset credit"
+            className="mx-auto mt-24 max-w-md overflow-hidden rounded-lg bg-white shadow-[0_24px_72px_rgba(23,33,27,0.28)]"
+            initial={{ opacity: 0, y: 8, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 4, scale: 0.98 }}
+            transition={{ type: "spring", duration: 0.3, bounce: 0 }}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-start gap-3 border-b border-black/10 p-4">
+              <span className="mt-0.5 flex size-10 shrink-0 items-center justify-center rounded-lg bg-[#fff1c2] text-[#7a4d00]">
+                <KeyRound size={18} aria-hidden="true" />
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="text-sm font-semibold text-[#17211b]">Codex reset credit</div>
+                <div className="mt-1 truncate text-xs text-[#59645d]" title={state.account.name}>
+                  {accountDisplayName(state.account, { compact: true })}
+                </div>
+              </div>
+              <button
+                type="button"
+                className="focus-ring flex size-9 shrink-0 items-center justify-center rounded-lg text-[#59645d] transition-colors duration-150 hover:bg-[#eef1e7]"
+                onClick={props.onClose}
+                aria-label="Close reset credit dialog"
+              >
+                <X size={17} aria-hidden="true" />
+              </button>
+            </div>
+
+            <div className="p-4">
+              {state.status === "loading" ? (
+                <div className="flex items-center gap-3 rounded-lg bg-[#f7f8f3] p-3 text-sm text-[#59645d]">
+                  <RefreshCw size={16} className="animate-spin" aria-hidden="true" />
+                  Checking this account for reset credits...
+                </div>
+              ) : state.status === "error" ? (
+                <div className="rounded-lg bg-[#fff1e6] p-3 text-sm text-[#7a3418] shadow-[inset_0_0_0_1px_rgba(194,65,12,0.16)]">
+                  <div className="font-medium">Could not check reset credits.</div>
+                  <div className="mt-1">{state.message}</div>
+                </div>
+              ) : state.status === "redeemed" ? (
+                <div className="rounded-lg bg-[#dff3ee] p-3 text-sm text-[#116a61]">
+                  <div className="font-semibold">Reset credit redeemed.</div>
+                  <div className="mt-1 text-xs">
+                    {joinMeta([
+                      state.result.result?.code ? `code ${state.result.result.code}` : undefined,
+                      state.result.result?.windows_reset !== undefined ? `${state.result.result.windows_reset} window${state.result.result.windows_reset === 1 ? "" : "s"} reset` : undefined,
+                      state.result.usage_refresh?.ok ? "usage refreshed" : state.result.usage_refresh?.message,
+                    ]) ?? "Quota state refreshed."}
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div className="grid gap-3 sm:grid-cols-[auto_minmax(0,1fr)] sm:items-center">
+                    <div className="numeric text-4xl font-semibold text-[#17211b]">{state.data.credits.available_count}</div>
+                    <div>
+                      <div className="text-sm font-medium text-[#17211b]">
+                        {state.data.credits.available_count === 1 ? "available reset credit" : "available reset credits"}
+                      </div>
+                      <div className="mt-1 text-xs text-[#59645d]">
+                        Checked on demand for this account only.
+                      </div>
+                    </div>
+                  </div>
+                  <div className="mt-4 space-y-2">
+                    {state.data.credits.credits.length === 0 ? (
+                      <div className="rounded-lg bg-[#f7f8f3] p-3 text-sm text-[#59645d]">No reset credits returned by the backend.</div>
+                    ) : state.data.credits.credits.slice(0, 3).map((credit) => (
+                      <ResetCreditRow key={credit.id} credit={credit} />
+                    ))}
+                  </div>
+                  {state.data.credits.available_count === 0 ? (
+                    <div className="mt-3 rounded-lg bg-[#f7f8f3] p-3 text-xs text-[#59645d]">
+                      Nothing to redeem for this account right now.
+                    </div>
+                  ) : null}
+                </>
+              )}
+            </div>
+
+            <div className="flex flex-col-reverse gap-2 border-t border-black/10 bg-[#f7f8f3] p-3 sm:flex-row sm:justify-end">
+              {state.status === "error" ? (
+                <button
+                  type="button"
+                  className="focus-ring inline-flex min-h-10 items-center justify-center rounded-lg bg-white px-4 text-sm font-medium text-[#465149] shadow-[0_1px_2px_rgba(23,33,27,0.08)] transition-transform duration-150 active:scale-[0.96]"
+                  onClick={() => props.onRetry(state.account)}
+                >
+                  Retry
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="focus-ring inline-flex min-h-10 items-center justify-center rounded-lg bg-white px-4 text-sm font-medium text-[#465149] shadow-[0_1px_2px_rgba(23,33,27,0.08)] transition-transform duration-150 active:scale-[0.96]"
+                onClick={props.onClose}
+              >
+                {state.status === "redeemed" ? "Done" : "Close"}
+              </button>
+              {(state.status === "ready" || state.status === "redeeming") ? (
+                <button
+                  type="button"
+                  className="focus-ring inline-flex min-h-10 items-center justify-center gap-2 rounded-lg bg-[#116a61] px-4 text-sm font-medium text-white shadow-[0_10px_24px_rgba(17,106,97,0.2)] transition-transform duration-150 active:scale-[0.96] disabled:cursor-not-allowed disabled:opacity-50"
+                  onClick={props.onRedeem}
+                  disabled={!primaryCredit || state.status === "redeeming"}
+                >
+                  {state.status === "redeeming" ? <RefreshCw size={16} className="animate-spin" aria-hidden="true" /> : null}
+                  {primaryCredit ? "Redeem" : "No credit"}
+                </button>
+              ) : null}
+            </div>
+          </motion.div>
+        </motion.div>
+      ) : null}
+    </AnimatePresence>
+  );
+}
+
+function ResetCreditRow({ credit }: { credit: CodexResetCredit }) {
+  const available = isAvailableResetCredit(credit);
+  return (
+    <div className="rounded-lg bg-[#f7f8f3] p-3 text-sm shadow-[inset_0_0_0_1px_rgba(23,33,27,0.06)]">
+      <div className="flex min-w-0 items-center justify-between gap-3">
+        <div className="min-w-0 truncate font-medium text-[#17211b]" title={credit.title ?? credit.id}>
+          {credit.title ?? shorten(credit.id, 28)}
+        </div>
+        <StatusPill tone={available ? "good" : "neutral"}>{credit.status ?? "unknown"}</StatusPill>
+      </div>
+      <div className="mt-1 truncate text-xs text-[#59645d]">
+        {joinMeta([
+          credit.reset_type,
+          credit.expires_at ? `expires ${relativeTime(credit.expires_at)}` : undefined,
+          credit.redeemed_at ? `redeemed ${relativeTime(credit.redeemed_at)}` : undefined,
+        ]) ?? shorten(credit.id, 36)}
+      </div>
+    </div>
+  );
+}
+
 function CommandPalette(props: {
   open: boolean;
   query: string;
@@ -2733,6 +3007,18 @@ function joinMeta(values: Array<string | number | undefined | null | false>): st
     normalized.findIndex((candidate) => candidate.toLowerCase() === value.toLowerCase()) === index
   );
   return unique.length > 0 ? unique.join(" · ") : undefined;
+}
+
+function availableResetCredits(credits: CodexResetCredit[]): CodexResetCredit[] {
+  return credits.filter(isAvailableResetCredit);
+}
+
+function firstAvailableResetCredit(credits: CodexResetCredit[]): CodexResetCredit | undefined {
+  return availableResetCredits(credits)[0];
+}
+
+function isAvailableResetCredit(credit: CodexResetCredit): boolean {
+  return credit.status === "available";
 }
 
 function shorten(value: string, size: number): string {

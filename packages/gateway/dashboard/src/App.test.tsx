@@ -315,15 +315,29 @@ describe("Kyoli dashboard", () => {
     });
   });
 
-  it("redeems Codex reset credits from the account table after confirmation", async () => {
+  it("checks Codex reset credits before redeeming from the account table", async () => {
     const fetchMock = createFetchMock();
     vi.stubGlobal("fetch", fetchMock);
-    vi.spyOn(window, "confirm").mockReturnValue(true);
 
     render(<App />);
     await screen.findAllByText("Codex Primary");
 
     await userEvent.click(screen.getByRole("button", { name: "Redeem Codex reset credit" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Codex reset credit" });
+    expect(dialog).toBeTruthy();
+    expect(await within(dialog).findByText("1")).toBeTruthy();
+    expect(within(dialog).getByText("available reset credit")).toBeTruthy();
+    expect(within(dialog).getByText("One free rate limit reset")).toBeTruthy();
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([path, init]) =>
+        path === "/admin/accounts/acct_codex_1/codex-reset" &&
+        (init as RequestInit | undefined)?.method !== "POST"
+      )).toBe(true);
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "Redeem" }));
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
@@ -331,10 +345,73 @@ describe("Kyoli dashboard", () => {
         expect.objectContaining({ method: "POST" }),
       );
     });
+    expect(await screen.findByText("Reset credit redeemed.")).toBeTruthy();
+  });
+
+  it("shows an account-scoped empty reset credit state without redeeming", async () => {
+    const fetchMock = createFetchMock({ resetCreditsAvailable: 0 });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+    await screen.findAllByText("Codex Primary");
+
+    await userEvent.click(screen.getByRole("button", { name: "Redeem Codex reset credit" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Codex reset credit" });
+    expect(dialog).toBeTruthy();
+    expect(await within(dialog).findByText("0")).toBeTruthy();
+    expect(within(dialog).getByText("Nothing to redeem for this account right now.")).toBeTruthy();
+    expect((within(dialog).getByRole("button", { name: "No credit" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      "/admin/accounts/acct_codex_1/codex-reset",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("ignores a reset credit response after the dialog is closed", async () => {
+    let resolveResetCredits!: (response: Response) => void;
+    const resetCreditsResponse = new Promise<Response>((resolve) => {
+      resolveResetCredits = resolve;
+    });
+    const fetchMock = createFetchMock({ resetCreditsResponse });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+    await screen.findAllByText("Codex Primary");
+
+    await userEvent.click(screen.getByRole("button", { name: "Redeem Codex reset credit" }));
+    await screen.findByRole("dialog", { name: "Codex reset credit" });
+    await userEvent.click(screen.getByRole("button", { name: "Close reset credit dialog" }));
+
+    resolveResetCredits(Response.json(resetCreditStatusResponse()));
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Codex reset credit" })).toBeNull();
+    });
+  });
+
+  it("closes the reset credit dialog when authentication is required", async () => {
+    vi.stubGlobal("fetch", createFetchMock({ resetCreditsUnauthorized: true }));
+
+    render(<App />);
+    await screen.findAllByText("Codex Primary");
+
+    await userEvent.click(screen.getByRole("button", { name: "Redeem Codex reset credit" }));
+
+    expect(await screen.findByLabelText("Admin token")).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Codex reset credit" })).toBeNull();
+    });
   });
 });
 
-function createFetchMock(options: { unauthorized?: boolean; responses?: typeof defaultResponses } = {}) {
+function createFetchMock(options: {
+  unauthorized?: boolean;
+  responses?: typeof defaultResponses;
+  resetCreditsAvailable?: number;
+  resetCreditsResponse?: Promise<Response>;
+  resetCreditsUnauthorized?: boolean;
+} = {}) {
   const responses = options.responses ?? defaultResponses;
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string"
@@ -355,6 +432,13 @@ function createFetchMock(options: { unauthorized?: boolean; responses?: typeof d
     if (path === "/admin/accounts/acct_codex_1/pause" && init?.method === "POST") {
       return Response.json({ ...account, enabled: false });
     }
+    if (path === "/admin/accounts/acct_codex_1/codex-reset" && init?.method !== "POST") {
+      if (options.resetCreditsUnauthorized) {
+        return Response.json({ error: { message: "Unauthorized" } }, { status: 401 });
+      }
+      return options.resetCreditsResponse
+        ?? Response.json(resetCreditStatusResponse(options.resetCreditsAvailable));
+    }
     if (path === "/admin/accounts/acct_codex_1/codex-reset" && init?.method === "POST") {
       return Response.json({
         object: "codex_reset_credit_redemption",
@@ -367,4 +451,23 @@ function createFetchMock(options: { unauthorized?: boolean; responses?: typeof d
     }
     return Response.json({ error: { message: `Unhandled ${path}` } }, { status: 404 });
   });
+}
+
+function resetCreditStatusResponse(availableCount = 1) {
+  return {
+    object: "codex_reset_credit_status",
+    account,
+    credits: {
+      available_count: availableCount,
+      credits: availableCount > 0
+        ? [{
+            id: "RateLimitResetCredit_test",
+            status: "available",
+            reset_type: "codex_rate_limits",
+            title: "One free rate limit reset",
+            expires_at: "2026-07-12T01:33:14.000Z",
+          }]
+        : [],
+    },
+  };
 }
