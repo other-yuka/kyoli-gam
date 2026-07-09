@@ -1,6 +1,8 @@
 name: Claude Code billing claim canary
 
 on:
+  schedule:
+    - cron: "30 6 * * *"
   workflow_dispatch:
     inputs:
       model:
@@ -49,7 +51,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build CLI
-        run: pnpm --filter @kyoli-gam/cli build
+        run: pnpm --filter @kyoli-gam/cli... build
 
       - name: Run billing claim doctor
         id: check
