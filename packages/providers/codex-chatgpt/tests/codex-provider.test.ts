@@ -8,6 +8,52 @@ import {
 import { createCodexChatGPTProvider, refreshCodexOAuthToken } from "../src";
 import { classifyCodexJsonEventFailure, parseCodexRetryAfterSeconds } from "../src/failures";
 
+class DelayedUpdateAccountPool extends StickyAccountPool {
+  private updateCalls = 0;
+  private releaseUpdates!: () => void;
+  private resolveFirstUpdate!: () => void;
+  private resolveSecondUpdate!: () => void;
+  readonly firstUpdateStarted = new Promise<void>((resolve) => {
+    this.resolveFirstUpdate = resolve;
+  });
+  readonly secondUpdateStarted = new Promise<void>((resolve) => {
+    this.resolveSecondUpdate = resolve;
+  });
+  private readonly updatesReleased = new Promise<void>((resolve) => {
+    this.releaseUpdates = resolve;
+  });
+
+  override async update(...args: Parameters<StickyAccountPool["update"]>) {
+    this.updateCalls += 1;
+    if (this.updateCalls === 1) this.resolveFirstUpdate();
+    if (this.updateCalls === 2) this.resolveSecondUpdate();
+    await this.updatesReleased;
+    return super.update(...args);
+  }
+
+  allowUpdates(): void {
+    this.releaseUpdates();
+  }
+}
+
+class RetryableFailureAccountPool extends StickyAccountPool {
+  override async recordFailure(): Promise<void> {}
+}
+
+function codexResponsesRequest(sessionKey: string) {
+  return {
+    request: new Request("http://127.0.0.1:2021/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "gpt-5.6-sol", input: "hello" }),
+    }),
+    route: "/v1/responses" as const,
+    sessionKey,
+    body: { model: "gpt-5.6-sol", input: "hello" },
+    model: "gpt-5.6-sol",
+  };
+}
+
 describe("createCodexChatGPTProvider", () => {
   it("refreshes OAuth tokens with the codex-lb JSON scope contract", async () => {
     const originalFetch = globalThis.fetch;
@@ -45,6 +91,114 @@ describe("createCodexChatGPTProvider", () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+
+  it("keeps OAuth refresh coalesced until rotated credentials are persisted", async () => {
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      name: "Codex first",
+      credentials: {
+        accessToken: "access-expired",
+        refreshToken: "refresh-shared",
+        expiresAt: Date.now() - 1,
+        accountId: "acct_test",
+      },
+    });
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      name: "Codex second",
+      credentials: {
+        accessToken: "access-expired",
+        refreshToken: "refresh-shared",
+        expiresAt: Date.now() - 1,
+        accountId: "acct_test",
+      },
+    });
+    const accounts = new DelayedUpdateAccountPool(store, { strategy: "round-robin" });
+    const tokenRefresh = vi.fn(async () => ({
+      accessToken: "access-shared",
+      refreshToken: "refresh-rotated",
+      expiresAt: Date.now() + 60 * 60 * 1000,
+      accountId: "acct_test",
+    }));
+    const provider = createCodexChatGPTProvider({
+      accounts,
+      tokenRefresh,
+      fetch: async () => new Response(JSON.stringify({ id: "resp_test" }), {
+        headers: { "content-type": "application/json" },
+      }),
+    });
+
+    const first = provider.handleRequest(codexResponsesRequest("session-first"));
+    await accounts.firstUpdateStarted;
+    const second = provider.handleRequest(codexResponsesRequest("session-second"));
+    await accounts.secondUpdateStarted;
+
+    expect(tokenRefresh).toHaveBeenCalledTimes(1);
+    accounts.allowUpdates();
+    const responses = await Promise.all([first, second]);
+    const savedAccounts = await store.listByProvider("codex");
+
+    expect(responses.map((response) => response.status)).toEqual([200, 200]);
+    expect(tokenRefresh).toHaveBeenCalledTimes(1);
+    expect(savedAccounts.map((account) => account.credentials.refreshToken)).toEqual([
+      "refresh-rotated",
+      "refresh-rotated",
+    ]);
+  });
+
+  it("allows a new OAuth refresh after a coalesced refresh fails", async () => {
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-expired",
+        refreshToken: "refresh-retry",
+        expiresAt: Date.now() - 1,
+        accountId: "acct_test",
+      },
+    });
+    const accounts = new RetryableFailureAccountPool(store);
+    let releaseFailure!: () => void;
+    const failureReleased = new Promise<void>((resolve) => {
+      releaseFailure = resolve;
+    });
+    const tokenRefresh = vi.fn()
+      .mockImplementationOnce(async () => {
+        await failureReleased;
+        throw new Error("temporary refresh failure");
+      })
+      .mockResolvedValue({
+        accessToken: "access-recovered",
+        refreshToken: "refresh-recovered",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        accountId: "acct_test",
+      });
+    const provider = createCodexChatGPTProvider({
+      accounts,
+      tokenRefresh,
+      maxAccountAttempts: 1,
+      fetch: async () => new Response(JSON.stringify({ id: "resp_test" }), {
+        headers: { "content-type": "application/json" },
+      }),
+    });
+
+    const failed = [
+      provider.handleRequest(codexResponsesRequest("session-first")),
+      provider.handleRequest(codexResponsesRequest("session-second")),
+    ];
+    await vi.waitFor(() => expect(tokenRefresh).toHaveBeenCalledTimes(1));
+    releaseFailure();
+    const failedResponses = await Promise.all(failed);
+    const recovered = await provider.handleRequest(codexResponsesRequest("session-retry"));
+
+    expect(failedResponses.every((response) => response.status >= 400)).toBe(true);
+    expect(recovered.status).toBe(200);
+    expect(tokenRefresh).toHaveBeenCalledTimes(2);
   });
 
   it("falls back to the verified GPT-5.6 Codex catalog without live credentials", async () => {

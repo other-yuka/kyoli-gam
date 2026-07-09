@@ -3,11 +3,14 @@ import type {
   AccountFailureSignal,
   AccountExecutionTraceEvent,
   AccountPool,
+  AccountRecord,
+  AccountUpdateInput,
   GatewayWebSocketContext,
   GatewayWebSocketMessage,
   ModelInfo,
   ProviderAdapter,
 } from "@kyoli-gam/core";
+import { createHash } from "node:crypto";
 import {
   executeWithAccountFailover,
   CredentialUnavailableError,
@@ -137,6 +140,17 @@ export interface CodexTokenRefreshResult {
 }
 
 type CodexTokenRefresh = (refreshToken: string) => Promise<CodexTokenRefreshResult>;
+interface CodexOAuthRefreshEntry {
+  result: Promise<CodexTokenRefreshResult>;
+  participants: number;
+}
+const codexOAuthRefreshesByGrant = new Map<string, CodexOAuthRefreshEntry>();
+class CodexOAuthPersistenceError extends Error {
+  constructor(readonly originalError: unknown) {
+    super(originalError instanceof Error ? originalError.message : String(originalError));
+    this.name = "CodexOAuthPersistenceError";
+  }
+}
 type CodexUsageRefresh = (
   accessToken: string,
   chatgptAccountId?: string,
@@ -225,6 +239,7 @@ export function createCodexChatGPTProvider(
     refreshUsage: ({ account }) =>
       refreshCodexUsageForAccount({
         account,
+        accounts: options.accounts,
         tokenRefresh: options.tokenRefresh ?? refreshCodexToken,
         usageRefresh,
       }),
@@ -1470,6 +1485,64 @@ function collectImageBase64(value: unknown, found: string[]): void {
   for (const child of Object.values(record)) collectImageBase64(child, found);
 }
 
+async function refreshAndPersistCodexOAuthToken(input: {
+  refreshToken: string;
+  tokenRefresh: CodexTokenRefresh;
+  persist: (refreshed: CodexTokenRefreshResult) => Promise<void>;
+}): Promise<CodexTokenRefreshResult> {
+  const grantFingerprint = createHash("sha256").update(input.refreshToken).digest("hex");
+  let entry = codexOAuthRefreshesByGrant.get(grantFingerprint);
+  if (!entry) {
+    entry = {
+      result: input.tokenRefresh(input.refreshToken),
+      participants: 0,
+    };
+    codexOAuthRefreshesByGrant.set(grantFingerprint, entry);
+  }
+
+  entry.participants += 1;
+  try {
+    const refreshed = await entry.result;
+    try {
+      await input.persist(refreshed);
+    } catch (error) {
+      throw new CodexOAuthPersistenceError(error);
+    }
+    return refreshed;
+  } finally {
+    entry.participants -= 1;
+    if (
+      entry.participants === 0 &&
+      codexOAuthRefreshesByGrant.get(grantFingerprint) === entry
+    ) {
+      codexOAuthRefreshesByGrant.delete(grantFingerprint);
+    }
+  }
+}
+
+function codexOAuthRefreshUpdate(
+  account: AccountRecord,
+  refreshToken: string,
+  refreshed: CodexTokenRefreshResult,
+): AccountUpdateInput {
+  const chatgptAccountId = refreshed.accountId ?? readString(account.credentials.accountId);
+  return {
+    credentials: {
+      ...account.credentials,
+      accessToken: refreshed.accessToken,
+      expiresAt: refreshed.expiresAt,
+      refreshToken: refreshed.refreshToken ?? refreshToken,
+      accountId: chatgptAccountId,
+    },
+    metadata: {
+      ...account.metadata,
+      email: refreshed.email ?? account.metadata.email,
+      accountId: refreshed.accountId ?? account.metadata.accountId,
+      planTier: refreshed.planTier ?? account.metadata.planTier,
+    },
+  };
+}
+
 async function readOAuthCredential(input: {
   accounts: AccountPool | undefined;
   sessionKey: string;
@@ -1508,7 +1581,14 @@ async function readOAuthCredential(input: {
   if (!accessToken || !expiresAt || expiresAt <= Date.now() + TOKEN_EXPIRY_BUFFER_MS) {
     if (!refreshToken) return undefined;
 
-    const refreshed = await input.tokenRefresh(refreshToken).catch(async (error) => {
+    const refreshed = await refreshAndPersistCodexOAuthToken({
+      refreshToken,
+      tokenRefresh: input.tokenRefresh,
+      persist: async (result) => {
+        await input.accounts?.update(account.id, codexOAuthRefreshUpdate(account, refreshToken, result));
+      },
+    }).catch(async (error) => {
+      if (error instanceof CodexOAuthPersistenceError) throw error.originalError;
       await input.accounts?.recordFailure(account.id, {
         ...codexOAuthRefreshFailureInput(error),
         reauthRequiredReason: "Codex OAuth token refresh failed",
@@ -1518,22 +1598,6 @@ async function readOAuthCredential(input: {
     accessToken = refreshed.accessToken;
     expiresAt = refreshed.expiresAt;
     chatgptAccountId = refreshed.accountId ?? chatgptAccountId;
-
-    await input.accounts?.update(account.id, {
-      credentials: {
-        ...account.credentials,
-        accessToken,
-        expiresAt,
-        refreshToken: refreshed.refreshToken ?? refreshToken,
-        accountId: chatgptAccountId,
-      },
-      metadata: {
-        ...account.metadata,
-        email: refreshed.email ?? account.metadata.email,
-        accountId: refreshed.accountId ?? account.metadata.accountId,
-        planTier: refreshed.planTier ?? account.metadata.planTier,
-      },
-    });
   }
 
   return {
@@ -1556,7 +1620,14 @@ async function refreshOAuthCredentialForAccount(input: {
   const refreshToken = readString(account.credentials.refreshToken);
   if (!refreshToken) return undefined;
 
-  const refreshed = await input.tokenRefresh(refreshToken).catch(async (error) => {
+  const refreshed = await refreshAndPersistCodexOAuthToken({
+    refreshToken,
+    tokenRefresh: input.tokenRefresh,
+    persist: async (result) => {
+      await input.accounts?.update(account.id, codexOAuthRefreshUpdate(account, refreshToken, result));
+    },
+  }).catch(async (error) => {
+    if (error instanceof CodexOAuthPersistenceError) throw error.originalError;
     await input.accounts?.recordFailure(account.id, {
       ...codexOAuthRefreshFailureInput(error),
       reauthRequiredReason: "Codex OAuth token refresh failed",
@@ -1566,21 +1637,6 @@ async function refreshOAuthCredentialForAccount(input: {
   if (!refreshed) return undefined;
 
   const chatgptAccountId = refreshed.accountId ?? readString(account.credentials.accountId);
-  await input.accounts?.update(account.id, {
-    credentials: {
-      ...account.credentials,
-      accessToken: refreshed.accessToken,
-      expiresAt: refreshed.expiresAt,
-      refreshToken: refreshed.refreshToken ?? refreshToken,
-      accountId: chatgptAccountId,
-    },
-    metadata: {
-      ...account.metadata,
-      email: refreshed.email ?? account.metadata.email,
-      accountId: refreshed.accountId ?? account.metadata.accountId,
-      planTier: refreshed.planTier ?? account.metadata.planTier,
-    },
-  });
 
   return {
     value: refreshed.accessToken,
@@ -1590,17 +1646,36 @@ async function refreshOAuthCredentialForAccount(input: {
 }
 
 async function refreshCodexUsageForAccount(input: {
-  account: import("@kyoli-gam/core").AccountRecord;
+  account: AccountRecord;
+  accounts: AccountPool | undefined;
   tokenRefresh: CodexTokenRefresh;
   usageRefresh: CodexUsageRefresh;
 }): Promise<import("@kyoli-gam/core").ProviderUsageRefreshResult> {
-  const refreshToken = readString(input.account.credentials.refreshToken);
+  let refreshToken = readString(input.account.credentials.refreshToken);
   let accessToken = readString(input.account.credentials.accessToken);
   let expiresAt = readNumber(input.account.credentials.expiresAt);
   let chatgptAccountId = readString(input.account.credentials.accountId) ??
     readString(input.account.metadata.accountId);
   let credentials = input.account.credentials;
   let metadata = input.account.metadata;
+  const refreshTokenForUsage = () => {
+    if (!refreshToken) throw new Error("Codex account has no refresh token for usage refresh.");
+    const currentRefreshToken = refreshToken;
+    return refreshAndPersistCodexOAuthToken({
+      refreshToken: currentRefreshToken,
+      tokenRefresh: input.tokenRefresh,
+      persist: async (result) => {
+        await input.accounts?.update(
+          input.account.id,
+          codexOAuthRefreshUpdate(
+            { ...input.account, credentials, metadata },
+            currentRefreshToken,
+            result,
+          ),
+        );
+      },
+    });
+  };
 
   const tokenNeedsRefresh = !accessToken || !expiresAt || expiresAt <= Date.now() + TOKEN_EXPIRY_BUFFER_MS;
   const shouldBackfillAccountId = !tokenNeedsRefresh && !chatgptAccountId && Boolean(refreshToken);
@@ -1615,9 +1690,10 @@ async function refreshCodexUsageForAccount(input: {
       };
     }
 
-    const refreshed = await input.tokenRefresh(refreshToken).catch((error) => ({
-      error: codexOAuthRefreshFailureInput(error),
-    }));
+    const refreshed = await refreshTokenForUsage().catch((error) => {
+      if (error instanceof CodexOAuthPersistenceError) throw error.originalError;
+      return { error: codexOAuthRefreshFailureInput(error) };
+    });
     if ("error" in refreshed) {
       if (shouldBackfillAccountId && accessToken) {
         // Account id backfill is opportunistic for usage refresh. WHAM usage can
@@ -1635,11 +1711,12 @@ async function refreshCodexUsageForAccount(input: {
       accessToken = refreshed.accessToken;
       expiresAt = refreshed.expiresAt;
       chatgptAccountId = refreshed.accountId ?? chatgptAccountId;
+      refreshToken = refreshed.refreshToken ?? refreshToken;
       credentials = {
         ...credentials,
         accessToken,
         expiresAt,
-        refreshToken: refreshed.refreshToken ?? refreshToken,
+        refreshToken,
         accountId: chatgptAccountId,
       };
       metadata = {
@@ -1664,17 +1741,19 @@ async function refreshCodexUsageForAccount(input: {
     error: error instanceof CodexUsageFetchError ? error : new CodexUsageFetchError(0, error instanceof Error ? error.message : String(error)),
   }));
   if ("error" in usage && usage.error.status === 401 && refreshToken) {
-    const refreshed = await input.tokenRefresh(refreshToken).catch((error) => ({
-      error: codexOAuthRefreshFailureInput(error),
-    }));
+    const refreshed = await refreshTokenForUsage().catch((error) => {
+      if (error instanceof CodexOAuthPersistenceError) throw error.originalError;
+      return { error: codexOAuthRefreshFailureInput(error) };
+    });
     if (!("error" in refreshed)) {
       accessToken = refreshed.accessToken;
       chatgptAccountId = refreshed.accountId ?? chatgptAccountId;
+      refreshToken = refreshed.refreshToken ?? refreshToken;
       credentials = {
         ...credentials,
         accessToken,
         expiresAt: refreshed.expiresAt,
-        refreshToken: refreshed.refreshToken ?? refreshToken,
+        refreshToken,
         accountId: chatgptAccountId,
       };
       metadata = {
