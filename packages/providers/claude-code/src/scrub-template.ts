@@ -10,6 +10,7 @@ interface TemplateToolLike {
 interface TemplateLike {
   agent_identity: string;
   system_prompt: string;
+  system_prompt_fable?: string;
   tools: TemplateToolLike[];
   tool_names: string[];
   header_order?: string[];
@@ -23,6 +24,7 @@ const HOST_CONTEXT_SECTION_NAMES = new Set([
   "useremail",
   "currentdate",
   "gitstatus",
+  "language",
 ]);
 
 const USER_PATH_REPLACEMENTS = [
@@ -234,6 +236,9 @@ export function scrubTemplate<T extends TemplateLike>(data: T, options?: ScrubTe
     ...data,
     agent_identity: scrubText(data.agent_identity),
     system_prompt: systemPrompt,
+    ...(typeof data.system_prompt_fable === "string"
+      ? { system_prompt_fable: scrubText(removeHostContextSections(data.system_prompt_fable)) }
+      : {}),
     tools,
     tool_names: tools.map((tool) => tool.name),
     header_order: data.header_order ? [...data.header_order] : undefined,

@@ -33,6 +33,12 @@ function createTemplate(overrides: Partial<TemplateData> = {}): TemplateData {
       "# Remaining",
       `Use ${RAW_MAC_HOME}/project for examples.`,
     ].join("\n"),
+    system_prompt_fable: [
+      "# Language",
+      "Always respond in Korean.",
+      "# Remaining",
+      `Use ${RAW_MAC_HOME}/fable for examples.`,
+    ].join("\n"),
     tools: [
       {
         name: "Bash",
@@ -96,6 +102,8 @@ describe("removeHostContextSections", () => {
       "2026-04-18",
       "# gitStatus",
       "M file.ts",
+      "# Language",
+      "Always respond in Korean.",
       "# Kept",
       "body",
     ].join("\n"));
@@ -176,6 +184,7 @@ describe("scrubTemplate", () => {
     const scrubbed = scrubTemplate(createTemplate());
 
     expect(scrubbed.system_prompt).toBe(["# Remaining", `Use ${SCRUBBED_MAC_HOME}/project for examples.`].join("\n"));
+    expect(scrubbed.system_prompt_fable).toBe(["# Remaining", `Use ${SCRUBBED_MAC_HOME}/fable for examples.`].join("\n"));
     expect(scrubbed.tools).toHaveLength(1);
     expect(scrubbed.tools[0]?.name).toBe("Bash");
     expect(scrubbed.tool_names).toEqual(["Bash"]);
@@ -232,5 +241,9 @@ describe("bundled fingerprint-data.json", () => {
   test("contains zero residual user path hits", () => {
     const hits = findUserPathHits(JSON.stringify(bundledData));
     expect(hits).toHaveLength(0);
+  });
+
+  test("is already scrubbed of host context", () => {
+    expect(scrubTemplate(bundledData).system_prompt_fable).toBe(bundledData.system_prompt_fable);
   });
 });

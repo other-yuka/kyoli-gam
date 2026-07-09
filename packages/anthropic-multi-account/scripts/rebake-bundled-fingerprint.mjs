@@ -103,10 +103,11 @@ async function main() {
   }
 
   const pinnedBundled = await loadBundledFingerprint();
-  const scrubbed = scrubTemplate(live, { dropMcpTools: true });
-  const bundled = prepareBundledTemplate(
-    preserveBundledFablePrompt(preserveInteractiveOnlyTools(scrubbed, pinnedBundled), pinnedBundled),
+  const hydrated = preserveBundledFablePrompt(
+    preserveInteractiveOnlyTools(live, pinnedBundled),
+    pinnedBundled,
   );
+  const bundled = prepareBundledTemplate(scrubTemplate(hydrated, { dropMcpTools: true }));
   assertClaudeCodeFingerprint(bundled, pinnedBundled);
   const residualHits = findUserPathHits(JSON.stringify(bundled));
   if (residualHits.length > 0) {
