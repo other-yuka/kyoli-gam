@@ -24,3 +24,4 @@ export * from "./native-plugin-lifecycle";
 export * from "./native-plugin-auth";
 export * from "./native-plugin-loader";
 export * from "./native-plugin-bootstrap-auth";
+export * from "./native-plugin-models";

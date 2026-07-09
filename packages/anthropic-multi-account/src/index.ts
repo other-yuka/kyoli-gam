@@ -1,10 +1,11 @@
 import type { Plugin } from "@opencode-ai/plugin";
-import { composeClaudeCodeBillingSystemEntry } from "../../providers/claude-code/src/opencode-shared";
+import { composeClaudeCodeBillingSystemEntry } from "@kyoli-gam/provider-claude-code/opencode";
 import {
   CascadeStateManager,
   createOpenCodeNativeAuthMethods,
   createOpenCodeNativeAuthLoader,
   createOpenCodeNativePluginLifecycle,
+  zeroCostProviderModels,
   loadPoolChainConfig,
   migrateFromAuthJson,
   PoolManager,
@@ -415,6 +416,11 @@ export const ClaudeMultiAuthPlugin: Plugin = async (ctx) => {
         upstreamAgentIdentity,
         upstreamSystemPrompt,
       ]);
+    },
+
+    provider: {
+      id: ANTHROPIC_OAUTH_ADAPTER.authProviderId,
+      models: zeroCostProviderModels,
     },
 
     auth: {

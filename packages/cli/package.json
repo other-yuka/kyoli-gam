@@ -43,7 +43,6 @@
   "dependencies": {
     "@kyoli-gam/core": "workspace:*",
     "@kyoli-gam/gateway": "workspace:*",
-    "@kyoli-gam/model-registry": "workspace:*",
     "@kyoli-gam/provider-claude-code": "workspace:*",
     "@kyoli-gam/provider-codex-chatgpt": "workspace:*"
   },

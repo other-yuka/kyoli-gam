@@ -119,8 +119,8 @@ within that session so prompt-cache-heavy conversations stay on the same account
 When an account is rate-limited, disabled, or needs re-authentication, kyoli can rotate to
 another usable account and records the account state for later inspection.
 
-Model metadata is loaded from `models.dev` with local fallbacks, so OpenCode can keep a
-fresh model list without a separate kyoli provider namespace.
+Model metadata comes from provider-owned catalogs with baked fallbacks, so OpenCode
+sees only models kyoli can actually route.
 
 ---
 
@@ -270,7 +270,6 @@ pnpm --dir packages/cli install opencode
 | [`@kyoli-gam/cli`](./packages/cli) | CLI for login, serve, account management, OpenCode install/restore, doctors |
 | [`@kyoli-gam/gateway`](./packages/gateway) | Local HTTP gateway and provider route surface |
 | [`@kyoli-gam/core`](./packages/core) | SQLite account store, sticky sessions, request logs, account pool |
-| [`@kyoli-gam/model-registry`](./packages/model-registry) | `models.dev` model registry with local fallbacks |
 | [`@kyoli-gam/provider-codex-chatgpt`](./packages/providers/codex-chatgpt) | ChatGPT/Codex OAuth provider adapter |
 | [`@kyoli-gam/provider-claude-code`](./packages/providers/claude-code) | Claude Code OAuth provider adapter |
 | [`opencode-codex-multi-account`](./packages/codex-multi-account) | OpenCode plugin for ChatGPT/Codex OAuth |

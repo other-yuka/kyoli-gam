@@ -170,6 +170,8 @@ export * from "./sticky-sessions";
 export * from "./request-logs";
 export * from "./provider-executor";
 export * from "./usage-refresh";
+export * from "./model-registry";
+export * from "./model-catalog";
 
 export function notImplementedResponse(provider: ProviderId, route: GatewayRoute): Response {
   return jsonResponse(

@@ -37,7 +37,6 @@
   },
   "dependencies": {
     "@kyoli-gam/core": "workspace:*",
-    "@kyoli-gam/model-registry": "workspace:*",
     "@kyoli-gam/provider-codex-chatgpt": "workspace:*",
     "developer-icons": "^6.0.5",
     "lucide-react": "^1.23.0",

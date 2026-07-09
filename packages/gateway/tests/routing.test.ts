@@ -697,7 +697,12 @@ describe("gateway routing", () => {
           capabilities: ["responses", "tools", "reasoning", "codex"],
           aliases: ["test-codex"],
           metadata: {
+            slug: "metadata-must-not-win",
             experimental_supported_tools: ["shell"],
+            supported_reasoning_levels: [
+              { effort: "max", description: "Maximum reasoning" },
+              { effort: "ultra", description: "Native Codex Ultra" },
+            ],
           },
         },
       ],
@@ -727,9 +732,42 @@ describe("gateway routing", () => {
       supports_reasoning_summaries: true,
       shell_type: "shell_command",
       experimental_supported_tools: ["shell"],
+      supported_reasoning_levels: [
+        { effort: "max", description: "Maximum reasoning" },
+        { effort: "ultra", description: "Native Codex Ultra" },
+      ],
       prefer_websockets: true,
       visibility: "list",
     });
+  });
+
+  it("surfaces model catalog access errors instead of serving fallback models", async () => {
+    const codex: ProviderAdapter = {
+      id: "codex",
+      displayName: "codex",
+      routes: ["/backend-api/codex/responses"],
+      listModels: async () => {
+        throw Object.assign(new Error("workspace not allowlisted"), { status: 403 });
+      },
+      handleRequest: async () => Response.json({ ok: true }),
+    };
+    const gateway = createGateway({
+      accounts: new MemoryAccountStore(),
+      providers: [codex],
+    });
+
+    for (const path of ["/v1/models", "/backend-api/codex/models"]) {
+      const response = await gateway.fetch(new Request(`http://127.0.0.1:2021${path}`));
+      const payload = await response.json();
+
+      expect(response.status).toBe(403);
+      expect(payload).toEqual({
+        error: {
+          type: "model_catalog_error",
+          message: "workspace not allowlisted",
+        },
+      });
+    }
   });
 
   it("exposes Codex fast service tier metadata for GPT models", async () => {

@@ -16,7 +16,7 @@
     "build": "tsup",
     "typecheck": "tsc --noEmit",
     "test": "vitest run tests",
-    "test:contract:native": "vitest run tests/index.test.ts tests/model/capabilities.test.ts tests/request/tool-adapter.test.ts tests/request/client-adapter.test.ts tests/request/upstream-request.test.ts tests/contract/native-contract-invariants.test.ts tests/request/transform.test.ts tests/runtime/factory.test.ts",
+    "test:contract:native": "vitest run tests/index.test.ts tests/model/capabilities.test.ts tests/request/tool-adapter.test.ts tests/request/client-adapter.test.ts tests/request/upstream-request.test.ts tests/contract/native-contract-invariants.test.ts tests/contract/package-boundary.test.ts tests/request/transform.test.ts tests/runtime/factory.test.ts",
     "test:live:opencode-claude-native": "vitest run tests/live/opencode-claude-native.test.ts",
     "check:fingerprint-drift": "pnpm run build && node scripts/check-live-fingerprint-drift.mjs",
     "check:cc-authorize-probe": "pnpm run build && node scripts/check-cc-authorize-probe.mjs",

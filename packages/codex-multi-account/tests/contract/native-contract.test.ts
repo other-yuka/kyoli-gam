@@ -63,7 +63,17 @@ describe("OpenCode Codex native contract", () => {
       );
 
       expect(process.env.OPENCODE_CONFIG_DIR).toBe(dir);
+      const provider = (plugin as Record<string, unknown>).provider as {
+        id: string;
+        models(provider: unknown): Promise<Record<string, unknown>>;
+      };
+      const models = await provider.models({
+        models: { "openai/gpt-5.3-codex": { cost: { input: 1, output: 1 } } },
+      });
+
       expect((plugin as Record<string, unknown>).tool).toBeUndefined();
+      expect(provider.id).toBe("openai");
+      expect(models["openai/gpt-5.3-codex"]).toMatchObject({ cost: { input: 0, output: 0 } });
       expect(loaded.apiKey).toBe("");
       expect(loaded.fetch).toBe(fetch);
       await expect(fs.access(join(dir, ACCOUNTS_FILENAME))).rejects.toThrow();

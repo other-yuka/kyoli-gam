@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   MemoryAccountStore,
   StickyAccountPool,
@@ -45,6 +45,195 @@ describe("createCodexChatGPTProvider", () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+
+  it("falls back to the verified GPT-5.6 Codex catalog without live credentials", async () => {
+    const provider = createCodexChatGPTProvider({
+      fetch: async () => {
+        throw new Error("network should be ignored without credentials");
+      },
+    });
+
+    const models = await provider.listModels();
+    const ids = models.map((model) => model.upstreamId);
+
+    expect(ids).toEqual(expect.arrayContaining(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]));
+    expect(ids).not.toContain("gpt-5.6-pro");
+    expect(models.find((model) => model.upstreamId === "gpt-5.6-sol")?.metadata).toMatchObject({
+      supported_reasoning_levels: expect.arrayContaining([expect.objectContaining({ effort: "max" })]),
+    });
+  });
+
+  it("uses the live Codex model catalog and forwards ChatGPT account identity", async () => {
+    let catalogUrl = "";
+    let catalogAccountId = "";
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+        accountId: "acct_test",
+      },
+    });
+
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      fetch: async (input, init) => {
+        catalogUrl = String(input);
+        catalogAccountId = new Headers(init?.headers).get("ChatGPT-Account-ID") ?? "";
+        return new Response(JSON.stringify({
+          models: [
+            {
+              slug: "gpt-5.6-sol",
+              display_name: "GPT-5.6 Sol",
+              supported_in_api: true,
+              visibility: "list",
+              supports_parallel_tool_calls: true,
+              supported_reasoning_levels: [{ effort: "low" }, { effort: "max" }, { effort: "ultra" }],
+            },
+            { slug: "gpt-5.6-pro", supported_in_api: false },
+            { slug: "hidden-model", visibility: "hide" },
+          ],
+        }), { headers: { "content-type": "application/json" } });
+      },
+    });
+
+    const models = await provider.listModels();
+
+    expect(catalogUrl).toContain("/backend-api/codex/models?client_version=0.0.0");
+    expect(catalogAccountId).toBe("acct_test");
+    expect(models).toHaveLength(1);
+    expect(models[0]).toMatchObject({
+      id: "openai/gpt-5.6-sol",
+      upstreamId: "gpt-5.6-sol",
+      displayName: "GPT-5.6 Sol",
+      capabilities: expect.arrayContaining(["tools", "reasoning", "codex"]),
+      metadata: {
+        supported_reasoning_levels: [{ effort: "low" }, { effort: "max" }, { effort: "ultra" }],
+      },
+    });
+  });
+
+  it("tries the next Codex account when model catalog token refresh fails", async () => {
+    const catalogAuths: string[] = [];
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-expired",
+        expiresAt: Date.now() - 1000,
+        refreshToken: "refresh-bad",
+        accountId: "acct_bad",
+      },
+    });
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-live",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-live",
+        accountId: "acct_live",
+      },
+    });
+    const tokenRefresh = vi.fn(async () => {
+      throw new Error("refresh failed");
+    });
+
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      tokenRefresh,
+      fetch: async (_input, init) => {
+        const headers = new Headers(init?.headers);
+        catalogAuths.push(`${headers.get("authorization") ?? ""}:${headers.get("ChatGPT-Account-ID") ?? ""}`);
+        return new Response(JSON.stringify({
+          models: [{ slug: "gpt-5.6-sol", supported_in_api: true }],
+        }), { headers: { "content-type": "application/json" } });
+      },
+    });
+
+    const models = await provider.listModels();
+
+    expect(tokenRefresh).toHaveBeenCalledWith("refresh-bad");
+    expect(catalogAuths).toEqual(["Bearer access-live:acct_live"]);
+    expect(models).toContainEqual(expect.objectContaining({ upstreamId: "gpt-5.6-sol" }));
+  });
+
+  it("tries another Codex account before surfacing live catalog access errors", async () => {
+    const catalogAuths: string[] = [];
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-denied",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-denied",
+        accountId: "acct_denied",
+      },
+    });
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-live",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-live",
+        accountId: "acct_live",
+      },
+    });
+
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      fetch: async (_input, init) => {
+        const authorization = new Headers(init?.headers).get("authorization") ?? "";
+        catalogAuths.push(authorization);
+        if (authorization === "Bearer access-denied") {
+          return new Response(JSON.stringify({ error: { message: "workspace not allowlisted" } }), {
+            status: 403,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify({
+          models: [{ slug: "gpt-5.6-sol", supported_in_api: true }],
+        }), { headers: { "content-type": "application/json" } });
+      },
+    });
+
+    const models = await provider.listModels();
+
+    expect(catalogAuths).toEqual(["Bearer access-denied", "Bearer access-live"]);
+    expect(models).toContainEqual(expect.objectContaining({ upstreamId: "gpt-5.6-sol" }));
+  });
+
+  it("does not hide Codex live catalog access errors behind fallback models", async () => {
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+      },
+    });
+
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      fetch: async () => new Response(JSON.stringify({ error: { message: "workspace not allowlisted" } }), {
+        status: 403,
+        headers: { "content-type": "application/json" },
+      }),
+    });
+
+    await expect(provider.listModels()).rejects.toMatchObject({
+      status: 403,
+      message: "workspace not allowlisted",
+    });
   });
 
   it("records OAuth refresh error codes when compact refresh fails", async () => {
@@ -490,7 +679,8 @@ describe("createCodexChatGPTProvider", () => {
     expect(refreshed?.reauthRequiredReason).toBe("Codex usage refresh failed");
   });
 
-  it("preserves native Codex originator and user-agent headers", async () => {
+  it("preserves native Codex headers while stripping Kyoli routing headers", async () => {
+    let upstreamHeaders = new Headers();
     let upstreamOriginator = "";
     let upstreamUserAgent = "";
 
@@ -509,6 +699,7 @@ describe("createCodexChatGPTProvider", () => {
       accounts: new StickyAccountPool(store),
       fetch: async (_input, init) => {
         const headers = new Headers(init?.headers);
+        upstreamHeaders = headers;
         upstreamOriginator = headers.get("originator") ?? "";
         upstreamUserAgent = headers.get("user-agent") ?? "";
 
@@ -526,6 +717,11 @@ describe("createCodexChatGPTProvider", () => {
           "content-type": "application/json",
           originator: "codex_vscode",
           "user-agent": "codex_vscode/0.0.0",
+          "x-codex-turn-state": "turn-state",
+          "x-kyoli-session-id": "kyoli-thread",
+          "x-client-session-id": "client-thread",
+          "x-session-id": "generic-thread",
+          "session-id": "dash-thread",
         },
         body: JSON.stringify({
           model: "codex/gpt-5.3-codex",
@@ -544,6 +740,11 @@ describe("createCodexChatGPTProvider", () => {
     expect(response.status).toBe(200);
     expect(upstreamOriginator).toBe("codex_vscode");
     expect(upstreamUserAgent).toBe("codex_vscode/0.0.0");
+    expect(upstreamHeaders.get("x-codex-turn-state")).toBe("turn-state");
+    expect(upstreamHeaders.get("x-kyoli-session-id")).toBeNull();
+    expect(upstreamHeaders.get("x-client-session-id")).toBeNull();
+    expect(upstreamHeaders.get("x-session-id")).toBeNull();
+    expect(upstreamHeaders.get("session-id")).toBeNull();
   });
 
   it("scrubs non-native OpenAI SDK headers on the /v1 Responses bridge", async () => {
@@ -767,6 +968,67 @@ describe("createCodexChatGPTProvider", () => {
     expect(upstreamBody.user).toBeUndefined();
     expect(upstreamBody.promptCacheKey).toBeUndefined();
     expect(upstreamBody.textVerbosity).toBeUndefined();
+  });
+
+  it("preserves officially advertised Codex reasoning efforts and maps ultra to max upstream", async () => {
+    const upstreamBodies: Array<Record<string, unknown>> = [];
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+      },
+    });
+
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      fetch: async (_input, init) => {
+        upstreamBodies.push(JSON.parse(String(init?.body)));
+        return new Response(JSON.stringify({ id: "resp_test" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    const cases: Array<{ body: Record<string, unknown>; expectedReasoning: Record<string, string> }> = [
+      { body: { reasoningEffort: "xhigh" }, expectedReasoning: { effort: "xhigh" } },
+      { body: { reasoning_effort: "max" }, expectedReasoning: { effort: "max" } },
+      { body: { reasoningEffort: "ultra" }, expectedReasoning: { effort: "max" } },
+      { body: { thinking: { effort: "ultra" } }, expectedReasoning: { effort: "max" } },
+      { body: { reasoning: { effort: "ultra", summary: "auto" } }, expectedReasoning: { effort: "max", summary: "auto" } },
+    ];
+
+    for (const testCase of cases) {
+      const requestBody = {
+        model: "codex/gpt-5.3-codex",
+        input: "hello",
+        ...testCase.body,
+      };
+      const response = await provider.handleRequest({
+        request: new Request("http://127.0.0.1:2021/v1/responses", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(requestBody),
+        }),
+        route: "/v1/responses",
+        sessionKey: "session-a",
+        body: requestBody,
+        model: "codex/gpt-5.3-codex",
+      });
+
+      expect(response.status).toBe(200);
+    }
+
+    expect(upstreamBodies.map((body) => body.reasoning)).toEqual(cases.map((testCase) => testCase.expectedReasoning));
+    for (const upstreamBody of upstreamBodies) {
+      expect(upstreamBody.reasoningEffort).toBeUndefined();
+      expect(upstreamBody.reasoning_effort).toBeUndefined();
+      expect(upstreamBody.thinking).toBeUndefined();
+    }
   });
 
   it("rewrites fast model aliases to priority service tier", async () => {
@@ -3642,6 +3904,10 @@ describe("createCodexChatGPTProvider", () => {
           originator: "codex_vscode",
           "user-agent": "codex_vscode/0.0.0",
           "x-codex-turn-state": "turn-test",
+          "x-kyoli-session-id": "kyoli-ws-thread",
+          "x-client-session-id": "client-ws-thread",
+          "x-session-id": "generic-ws-thread",
+          "session-id": "dash-ws-thread",
         },
       }),
       route: "/backend-api/codex/responses",
@@ -3656,6 +3922,11 @@ describe("createCodexChatGPTProvider", () => {
     expect(upstreamHeaders.originator).toBe("codex_vscode");
     expect(upstreamHeaders["user-agent"]).toBe("codex_vscode/0.0.0");
     expect(upstreamHeaders["openai-beta"]).toBe("responses_websockets=2026-02-06");
+    expect(upstreamHeaders["x-codex-turn-state"]).toBe("turn-test");
+    expect(upstreamHeaders["x-kyoli-session-id"]).toBeUndefined();
+    expect(upstreamHeaders["x-client-session-id"]).toBeUndefined();
+    expect(upstreamHeaders["x-session-id"]).toBeUndefined();
+    expect(upstreamHeaders["session-id"]).toBeUndefined();
     expect(upstreamHeaders["sec-websocket-key"]).toBeUndefined();
     expect(upstreamSocket?.sent).toEqual(['{"type":"response.create"}']);
     expect(upstreamSocket?.closed).toEqual({ code: 1000, reason: "done" });

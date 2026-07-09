@@ -17,7 +17,7 @@
     "build": "tsup",
     "typecheck": "tsc --noEmit",
     "test": "vitest run tests",
-    "test:contract:native": "vitest run tests/native-plugin-lifecycle.test.ts tests/native-plugin-auth.test.ts tests/native-plugin-loader.test.ts tests/native-plugin-bootstrap-auth.test.ts",
+    "test:contract:native": "vitest run tests/native-plugin-lifecycle.test.ts tests/native-plugin-auth.test.ts tests/native-plugin-loader.test.ts tests/native-plugin-bootstrap-auth.test.ts tests/native-plugin-models.test.ts",
     "prepack": "pnpm run build",
     "dev": "tsup --watch"
   },

@@ -12,7 +12,7 @@ import {
   clampEffortAfterRejection,
   clampUnsupportedEffortInBody,
   parseEffortCapabilityRejection,
-} from "../../../providers/claude-code/src/effort-capability";
+} from "@kyoli-gam/provider-claude-code/opencode";
 import {
   addExcludedBeta,
   ensureOauthBeta,

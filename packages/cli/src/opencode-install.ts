@@ -1,6 +1,6 @@
 import type { ModelInfo } from "@kyoli-gam/core";
 import { stripProviderPrefix } from "@kyoli-gam/core";
-import { ModelRegistry, ModelsDevRegistrySource } from "@kyoli-gam/model-registry";
+import { ModelRegistry } from "@kyoli-gam/core";
 import { createClaudeCodeProvider } from "@kyoli-gam/provider-claude-code";
 import { createCodexChatGPTProvider } from "@kyoli-gam/provider-codex-chatgpt";
 import { spawn } from "node:child_process";
@@ -418,10 +418,7 @@ async function loadOpenCodeModels(
   const fromGateway = await loadModelsFromGateway(baseUrl, options.fetch ?? fetch);
   if (fromGateway.models.length > 0) return { source: "gateway", ...fromGateway };
 
-  const registry = new ModelRegistry(
-    [createCodexChatGPTProvider(), createClaudeCodeProvider()],
-    { modelsDev: ModelsDevRegistrySource.fromEnv(options.env ?? process.env) },
-  );
+  const registry = new ModelRegistry([createCodexChatGPTProvider(), createClaudeCodeProvider()]);
   const registryModels = await registry.listModels();
   return {
     source: "registry",

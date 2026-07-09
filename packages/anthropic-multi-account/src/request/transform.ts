@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { resolveClaudeCodeModelAlias } from "../../../providers/claude-code/src/opencode-shared";
+import { resolveClaudeCodeModelAlias } from "@kyoli-gam/provider-claude-code/opencode";
 import { ensureOauthBeta, getModelBetas } from "./betas";
 import { claudeCodeIntegration } from "../claude-code";
 import { ANTHROPIC_OAUTH_ADAPTER } from "../shared/constants";

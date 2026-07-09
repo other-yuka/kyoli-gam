@@ -10,7 +10,7 @@ admin routes backed by the kyoli SQLite account pool.
 | Route | Provider path | Notes |
 |---|---|---|
 | `GET /health` | local | Gateway health check |
-| `GET /v1/models` | local registry | `models.dev` backed model list |
+| `GET /v1/models` | local registry | provider-owned model list |
 | `GET /backend-api/codex/models` | local registry | Codex CLI model catalog shape |
 | `POST /v1/responses` | Codex OAuth pool | Preferred OpenCode Server Mode path for Codex |
 | `POST /v1/chat/completions` | Codex OAuth pool | Generic OpenAI-compatible bridge |

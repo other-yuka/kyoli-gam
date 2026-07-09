@@ -54,9 +54,6 @@ importers:
       '@kyoli-gam/gateway':
         specifier: workspace:*
         version: link:../gateway
-      '@kyoli-gam/model-registry':
-        specifier: workspace:*
-        version: link:../model-registry
       '@kyoli-gam/provider-claude-code':
         specifier: workspace:*
         version: link:../providers/claude-code
@@ -114,9 +111,6 @@ importers:
       '@kyoli-gam/core':
         specifier: workspace:*
         version: link:../core
-      '@kyoli-gam/model-registry':
-        specifier: workspace:*
-        version: link:../model-registry
       '@kyoli-gam/provider-codex-chatgpt':
         specifier: workspace:*
         version: link:../providers/codex-chatgpt
@@ -175,19 +169,6 @@ importers:
       vite:
         specifier: ^8.1.3
         version: 8.1.3(@types/node@25.9.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.0)(yaml@2.9.0)
-
-  packages/model-registry:
-    dependencies:
-      '@kyoli-gam/core':
-        specifier: workspace:*
-        version: link:../core
-    devDependencies:
-      '@types/node':
-        specifier: ^25.9.3
-        version: 25.9.3
-      typescript:
-        specifier: ^6.0.3
-        version: 6.0.3
 
   packages/multi-account-core:
     dependencies:

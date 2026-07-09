@@ -5,7 +5,6 @@ import type {
   AccountFailureSignal,
   AccountPool,
   AccountRecord,
-  ModelInfo,
   ProviderAdapter,
   ProviderUsageRefreshResult,
   SelectedCredential,
@@ -58,6 +57,7 @@ import {
   classifyClaudeCodeSseStartupFailure,
   isClaudeCodeStartupOutputFrame,
 } from "./failures";
+import { createClaudeCodeModelCatalog } from "./model-catalog";
 
 const CLAUDE_CODE_API_BASE_URL = "https://api.anthropic.com";
 const templateMetadata = getClaudeCodeTemplateMetadata();
@@ -97,72 +97,6 @@ function getSystemPromptForModel(modelId: string | undefined): string {
     ? CLAUDE_CODE_FABLE_SYSTEM_PROMPT
     : CLAUDE_CODE_SYSTEM_PROMPT;
 }
-
-const models: ModelInfo[] = [
-  {
-    id: `anthropic/${CLAUDE_FABLE_MODEL_ID}`,
-    provider: "claude-code",
-    upstreamId: CLAUDE_FABLE_MODEL_ID,
-    displayName: "Claude Fable 5 via Claude Code",
-    aliases: [
-      CLAUDE_FABLE_MODEL_ID,
-      "fable",
-      `claude-code/${CLAUDE_FABLE_MODEL_ID}`,
-      "claude-code/fable",
-    ],
-    capabilities: ["messages", "tools", "streaming", "reasoning", "claude-code"],
-    metadata: { max_context_window: 1_000_000 },
-  },
-  {
-    id: `anthropic/${CLAUDE_FABLE_1M_MODEL_ID}`,
-    provider: "claude-code",
-    upstreamId: CLAUDE_FABLE_1M_MODEL_ID,
-    displayName: "Claude Fable 5 [1m] via Claude Code",
-    aliases: [
-      CLAUDE_FABLE_1M_MODEL_ID,
-      "fable1m",
-      `claude-code/${CLAUDE_FABLE_1M_MODEL_ID}`,
-      "claude-code/fable1m",
-    ],
-    capabilities: ["messages", "tools", "streaming", "reasoning", "claude-code"],
-    metadata: { max_context_window: 1_000_000 },
-  },
-  {
-    id: "anthropic/claude-sonnet-4-5",
-    provider: "claude-code",
-    upstreamId: "claude-sonnet-4-5",
-    displayName: "Claude Sonnet 4.5 via Claude Code",
-    aliases: ["claude-sonnet-4-5", "claude-code/claude-sonnet-4-5"],
-    capabilities: ["messages", "tools", "streaming", "claude-code"],
-  },
-  {
-    id: `anthropic/${CLAUDE_SONNET_MODEL_ID}`,
-    provider: "claude-code",
-    upstreamId: CLAUDE_SONNET_MODEL_ID,
-    displayName: "Claude Sonnet 5 via Claude Code",
-    aliases: [
-      CLAUDE_SONNET_MODEL_ID,
-      "sonnet",
-      `claude-code/${CLAUDE_SONNET_MODEL_ID}`,
-      "claude-code/sonnet",
-    ],
-    capabilities: ["messages", "tools", "streaming", "reasoning", "claude-code"],
-  },
-  {
-    id: `anthropic/${CLAUDE_SONNET_1M_MODEL_ID}`,
-    provider: "claude-code",
-    upstreamId: CLAUDE_SONNET_1M_MODEL_ID,
-    displayName: "Claude Sonnet 5 [1m] via Claude Code",
-    aliases: [
-      CLAUDE_SONNET_1M_MODEL_ID,
-      "sonnet1m",
-      `claude-code/${CLAUDE_SONNET_1M_MODEL_ID}`,
-      "claude-code/sonnet1m",
-    ],
-    capabilities: ["messages", "tools", "streaming", "reasoning", "claude-code"],
-    metadata: { max_context_window: 1_000_000 },
-  },
-];
 
 export interface ClaudeCodeProviderOptions {
   accounts?: AccountPool;
@@ -301,13 +235,26 @@ export function createClaudeCodeProvider(
   const retryContext1m = options.retryContext1m ?? true;
   const retryRejectedBetas = options.retryRejectedBetas ?? true;
   const sessionRotation = resolveSessionRotationOptions(options.sessionRotation);
+  const modelCatalog = createClaudeCodeModelCatalog({
+    fetchImpl,
+    selectCredential: (excludeAccountIds) => readOAuthCredential({
+      accounts: options.accounts,
+      sessionKey: "claude-code-model-catalog",
+      excludeAccountIds,
+      tokenRefresh: options.tokenRefresh ?? refreshClaudeCodeOAuthToken,
+    }),
+    userAgent: CLAUDE_CODE_USER_AGENT,
+    xApp: CLAUDE_CODE_X_APP,
+    anthropicVersion: CLAUDE_CODE_ANTHROPIC_VERSION,
+    anthropicBeta: CLAUDE_CODE_BETA,
+  });
 
   return {
     id: "claude-code",
     displayName: "Claude Code OAuth",
     routes: ["/v1/messages", "/v1/messages/count_tokens"],
     async listModels() {
-      return models.filter((model) => !isSuspendedClaudeCodeModel(model.upstreamId));
+      return modelCatalog.listModels();
     },
     refreshUsage: ({ account }) =>
       refreshClaudeCodeUsageForAccount({

@@ -97,19 +97,6 @@ const EMPTY_OAUTH_CREDENTIALS: OAuthCredentials = {
   expires: 0,
 };
 
-function zeroProviderModelCosts(provider?: Record<string, unknown>): void {
-  const models = provider?.models;
-  if (!models || typeof models !== "object") {
-    return;
-  }
-
-  for (const model of Object.values(models) as Record<string, unknown>[]) {
-    if (model) {
-      model.cost = { input: 0, output: 0, cache: { read: 0, write: 0 } };
-    }
-  }
-}
-
 export function createOpenCodeNativePluginLifecycle<
   TStore extends NativePluginStoreLike,
   TAccount extends NativePluginManagedAccount,
@@ -222,8 +209,6 @@ export function createOpenCodeNativePluginLifecycle<
         const recoveredFromStore = await initializeManagerFromStore();
         return recoveredFromStore ? createLoaderResult() : createPassthroughResult();
       }
-
-      zeroProviderModelCosts(provider);
 
       const credentials = auth as OAuthCredentials;
       await options.migrateFromAuthJson?.(options.authJsonProviderKey, options.store);

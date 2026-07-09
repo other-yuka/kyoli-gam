@@ -23,7 +23,7 @@ import {
   ingestProviderModelsCapabilities,
   resetRuntimeModelCapabilitiesForTest,
 } from "../../src/model/capabilities";
-import { CLIENT_SYSTEM_PREFACE } from "../../../providers/claude-code/src/opencode-shared";
+import { CLIENT_SYSTEM_PREFACE } from "@kyoli-gam/provider-claude-code/opencode";
 
 afterEach(() => {
   resetUpstreamRequestForTest();

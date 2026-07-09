@@ -289,6 +289,123 @@ describe("createClaudeCodeProvider", () => {
     );
   });
 
+  it("derives Claude Code family and 1m aliases from the advertised base catalog", async () => {
+    const provider = createTestClaudeCodeProvider();
+    const models = await provider.listModels();
+
+    expect(models).toContainEqual(expect.objectContaining({
+      upstreamId: "claude-opus-4-8",
+      aliases: expect.arrayContaining(["opus", "claude-code/opus"]),
+    }));
+    expect(models).toContainEqual(expect.objectContaining({
+      upstreamId: "claude-opus-4-8[1m]",
+      aliases: expect.arrayContaining(["opus1m", "claude-code/opus1m"]),
+      metadata: expect.objectContaining({ max_context_window: 1_000_000 }),
+    }));
+    expect(models).toContainEqual(expect.objectContaining({
+      upstreamId: "claude-sonnet-5",
+      aliases: expect.arrayContaining(["sonnet", "claude-code/sonnet"]),
+    }));
+    expect(models).toContainEqual(expect.objectContaining({
+      upstreamId: "claude-sonnet-5[1m]",
+      aliases: expect.arrayContaining(["sonnet1m", "claude-code/sonnet1m"]),
+    }));
+  });
+
+  it("uses the live Claude Code model catalog when OAuth credentials are available", async () => {
+    let catalogUrl = "";
+    let catalogAuth = "";
+    let catalogBeta = "";
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+      },
+    });
+    const provider = createTestClaudeCodeProvider({
+      accounts: new StickyAccountPool(store),
+      fetch: async (input, init) => {
+        catalogUrl = String(input);
+        const headers = new Headers(init?.headers);
+        catalogAuth = headers.get("authorization") ?? "";
+        catalogBeta = headers.get("anthropic-beta") ?? "";
+        return new Response(JSON.stringify({
+          data: [
+            { id: "claude-fable-5", display_name: "Claude Fable 5" },
+            { id: "claude-opus-4-9-20270101", display_name: "Claude Opus 4.9 dated" },
+            { id: "claude-opus-4-9", display_name: "Claude Opus 4.9" },
+            { id: "claude-sonnet-5", display_name: "Claude Sonnet 5" },
+            { id: "claude-3-5-sonnet-20241022", display_name: "Claude 3.5 Sonnet" },
+            { id: "gpt-5.6-sol", display_name: "GPT 5.6 Sol" },
+          ],
+        }), { headers: { "content-type": "application/json" } });
+      },
+    });
+
+    const models = await provider.listModels();
+
+    expect(catalogUrl).toContain("/v1/models?limit=100");
+    expect(catalogAuth).toBe("Bearer access-test");
+    expect(catalogBeta).toContain("oauth-");
+    expect(models).toContainEqual(expect.objectContaining({
+      upstreamId: "claude-opus-4-9",
+      aliases: expect.arrayContaining(["opus"]),
+    }));
+    expect(models).toContainEqual(expect.objectContaining({
+      upstreamId: "claude-opus-4-9[1m]",
+      aliases: expect.arrayContaining(["opus1m"]),
+    }));
+    expect(models).not.toContainEqual(expect.objectContaining({ upstreamId: "claude-opus-4-9-20270101" }));
+    expect(models).not.toContainEqual(expect.objectContaining({ upstreamId: "claude-3-5-sonnet-20241022" }));
+    expect(models).not.toContainEqual(expect.objectContaining({ upstreamId: "gpt-5.6-sol" }));
+  });
+
+  it("tries the next Claude Code account when catalog token refresh fails", async () => {
+    const catalogAuths: string[] = [];
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-expired",
+        expiresAt: Date.now() - 1000,
+        refreshToken: "refresh-bad",
+      },
+    });
+    await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-live",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-live",
+      },
+    });
+    const tokenRefresh = vi.fn(async () => {
+      throw new Error("refresh failed");
+    });
+    const provider = createTestClaudeCodeProvider({
+      accounts: new StickyAccountPool(store),
+      tokenRefresh,
+      fetch: async (_input, init) => {
+        catalogAuths.push(new Headers(init?.headers).get("authorization") ?? "");
+        return new Response(JSON.stringify({
+          data: [{ id: "claude-opus-4-9", display_name: "Claude Opus 4.9" }],
+        }), { headers: { "content-type": "application/json" } });
+      },
+    });
+
+    const models = await provider.listModels();
+
+    expect(tokenRefresh).toHaveBeenCalledWith("refresh-bad");
+    expect(catalogAuths).toEqual(["Bearer access-live"]);
+    expect(models).toContainEqual(expect.objectContaining({ upstreamId: "claude-opus-4-9" }));
+  });
+
   it("does not advertise suspended Fable models", async () => {
     await withSuspendedFable(async () => {
       const provider = createTestClaudeCodeProvider();

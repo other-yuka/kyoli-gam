@@ -1,6 +1,6 @@
 import derivedDefaultsJson from "../fixtures/defaults/cc-derived-defaults.json";
 import bundledTemplateJson from "./fingerprint/data.json";
-import { loadClaudeCodeSharedRequestProfile } from "../../../providers/claude-code/src/opencode-shared";
+import { loadClaudeCodeSharedRequestProfile } from "@kyoli-gam/provider-claude-code/opencode";
 import { detectCliVersion } from "./cli-version";
 import { loadTemplate, type TemplateData } from "./fingerprint/capture";
 import { detectOAuthConfig, type DetectedOAuthConfig } from "./oauth-config/detect";

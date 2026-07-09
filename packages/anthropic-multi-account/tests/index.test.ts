@@ -104,6 +104,19 @@ describe("index", () => {
     }
   });
 
+  test("exposes provider models through the OpenCode seam", async () => {
+    const plugin = await ClaudeMultiAuthPlugin({ client: createMockClient() } as any);
+    const models = await plugin.provider?.models?.({
+      models: { "anthropic/claude-sonnet-5": { cost: { input: 1, output: 1 }, limit: { output: 64000 } } },
+    } as any, {} as any);
+
+    expect(plugin.provider?.id).toBe("anthropic");
+    expect(models?.["anthropic/claude-sonnet-5"]).toMatchObject({
+      cost: { input: 0, output: 0 },
+      limit: { output: 64000 },
+    });
+  });
+
   test("exposes oauth-only auth method", async () => {
     const plugin = await ClaudeMultiAuthPlugin({ client: createMockClient() } as any);
 
