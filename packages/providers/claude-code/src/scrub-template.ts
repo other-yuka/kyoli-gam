@@ -80,17 +80,41 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function cleanupRemovedSections(text: string): string {
-  return text
-    .replace(/\n{3,}/g, "\n\n")
-    .replace(/^(?:\s*\n)+/, "")
-    .replace(/(?:\n\s*)+$/, "");
+  const lines = text.split("\n");
+  const cleaned: string[] = [];
+  let previousBlank = true;
+
+  for (const line of lines) {
+    const blank = line.trim().length === 0;
+    if (blank && previousBlank) continue;
+    cleaned.push(line);
+    previousBlank = blank;
+  }
+
+  while (cleaned.length > 0 && cleaned[cleaned.length - 1]!.trim().length === 0) {
+    cleaned.pop();
+  }
+
+  return cleaned.join("\n");
 }
 
 function removeDynamicStatusBlock(text: string): string {
-  return text.replace(
-    /\n\nStatus:\n(?:[\s\S]*?)\n\nRecent commits:\n/g,
-    "\n\nStatus:\n(dynamic)\n\nRecent commits:\n",
-  );
+  const statusStart = "\n\nStatus:\n";
+  const recentStart = "\n\nRecent commits:\n";
+  let scrubbed = text;
+  let searchFrom = 0;
+
+  while (true) {
+    const start = scrubbed.indexOf(statusStart, searchFrom);
+    if (start === -1) return scrubbed;
+
+    const contentStart = start + statusStart.length;
+    const end = scrubbed.indexOf(recentStart, contentStart);
+    if (end === -1) return scrubbed;
+
+    scrubbed = `${scrubbed.slice(0, contentStart)}(dynamic)${scrubbed.slice(end)}`;
+    searchFrom = contentStart + "(dynamic)".length + recentStart.length;
+  }
 }
 
 function removeDynamicRecentCommits(text: string): string {
@@ -131,11 +155,11 @@ export function removeHostContextSections(systemPrompt: string): string {
   let skippedHeadingDepth: number | null = null;
 
   for (const line of lines) {
-    const headingMatch = line.match(/^\s{0,3}(#{1,6})\s+(.+?)\s*$/);
+    const headingMatch = parseMarkdownHeading(line);
 
     if (headingMatch) {
-      const headingDepth = headingMatch[1]!.length;
-      const sectionName = normalizeSectionName(headingMatch[2]!);
+      const headingDepth = headingMatch.depth;
+      const sectionName = normalizeSectionName(headingMatch.title);
       const startsSkippedSection = HOST_CONTEXT_SECTION_NAMES.has(sectionName);
 
       if (startsSkippedSection) {
@@ -160,6 +184,25 @@ export function removeHostContextSections(systemPrompt: string): string {
   }
 
   return cleanupRemovedSections(removeDynamicGitMetadata(removeDynamicRecentCommits(removeDynamicStatusBlock(keptLines.join("\n")))));
+}
+
+function parseMarkdownHeading(line: string): { depth: number; title: string } | null {
+  const trimmedStart = line.trimStart();
+  if (line.length - trimmedStart.length > 3 || !trimmedStart.startsWith("#")) {
+    return null;
+  }
+
+  let depth = 0;
+  while (depth < trimmedStart.length && trimmedStart[depth] === "#") {
+    depth += 1;
+  }
+
+  if (depth < 1 || depth > 6 || trimmedStart[depth] !== " ") {
+    return null;
+  }
+
+  const title = trimmedStart.slice(depth + 1).trim();
+  return title ? { depth, title } : null;
 }
 
 export function scrubObjectStrings(value: unknown): unknown {
