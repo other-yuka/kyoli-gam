@@ -1,5 +1,14 @@
 # opencode-anthropic-multi-account
 
+## 0.2.83
+
+### Patch Changes
+
+- [#187](https://github.com/other-yuka/kyoli-gam/pull/187) [`aea4a3f`](https://github.com/other-yuka/kyoli-gam/commit/aea4a3ff7a09965ef9c5afd11aedd5c323bd9f28) Thanks [@other-yuka](https://github.com/other-yuka)! - Refresh the Claude Code fingerprint from a clean live runner and exclude host language settings from future captures.
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.83
+
 ## 0.2.82
 
 ### Patch Changes
