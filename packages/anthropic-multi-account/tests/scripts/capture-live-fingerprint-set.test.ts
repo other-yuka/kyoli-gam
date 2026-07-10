@@ -1,12 +1,6 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
-const { captureLiveTemplateAsync } = vi.hoisted(() => ({
-  captureLiveTemplateAsync: vi.fn(),
-}));
-
-vi.mock("../../dist/fingerprint-capture.js", () => ({
-  captureLiveTemplateAsync,
-}));
+const captureLiveTemplateAsync = vi.fn();
 
 const {
   captureLiveFingerprintSetAsync,
@@ -28,7 +22,7 @@ describe("capture live fingerprint set", () => {
   test("identifies a primary capture failure", async () => {
     captureLiveTemplateAsync.mockResolvedValueOnce(null);
 
-    await expect(captureLiveFingerprintSetAsync(10_000))
+    await expect(captureLiveFingerprintSetAsync(10_000, { captureLiveTemplateAsync }))
       .rejects.toThrow("primary live fingerprint capture failed");
   });
 
@@ -37,7 +31,7 @@ describe("capture live fingerprint set", () => {
       .mockResolvedValueOnce(template("primary"))
       .mockResolvedValueOnce(null);
 
-    await expect(captureLiveFingerprintSetAsync(10_000))
+    await expect(captureLiveFingerprintSetAsync(10_000, { captureLiveTemplateAsync }))
       .rejects.toThrow("Fable live fingerprint capture failed");
   });
 
@@ -46,7 +40,9 @@ describe("capture live fingerprint set", () => {
       .mockResolvedValueOnce(template("primary"))
       .mockResolvedValueOnce(template("fable"));
 
-    await expect(captureLiveFingerprintSetAsync(10_000)).resolves.toMatchObject({
+    await expect(
+      captureLiveFingerprintSetAsync(10_000, { captureLiveTemplateAsync }),
+    ).resolves.toMatchObject({
       system_prompt: "primary",
       system_prompt_fable: "fable",
     });
