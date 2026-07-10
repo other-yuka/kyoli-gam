@@ -280,7 +280,7 @@ jobs:
             --repo "${{ github.repository }}" \
             --state open \
             --limit 100 \
-            --json number,url,headRefName,headRefOid,baseRefName,baseRefOid,headRepositoryOwner,isCrossRepository,labels \
+            --json number,url,headRefName,headRefOid,baseRefName,headRepositoryOwner,isCrossRepository,labels \
             --jq 'map(select(
               (.isCrossRepository | not)
               and .headRepositoryOwner.login == env.repository_owner
@@ -292,7 +292,9 @@ jobs:
           if [ -n "$existing_url" ]; then
             existing_number=$(jq -r '.number' <<< "$existing_pr")
             existing_oid=$(jq -r '.headRefOid' <<< "$existing_pr")
-            existing_base_oid=$(jq -r '.baseRefOid' <<< "$existing_pr")
+            existing_base_oid=$(gh api \
+              "repos/${GITHUB_REPOSITORY}/pulls/${existing_number}" \
+              --jq '.base.sha')
             existing_files=$(gh api \
               "repos/${GITHUB_REPOSITORY}/pulls/${existing_number}/files?per_page=100" \
               --jq '[.[].filename]')
