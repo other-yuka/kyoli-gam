@@ -30,6 +30,9 @@ export const config: ModelConfig = {
     fable: {
       add: [FABLE_FALLBACK_CREDIT_BETA],
     },
+    "sonnet-5": {
+      add: [EFFORT_BETA],
+    },
     sonnet: {
       exclude: [MID_CONVERSATION_SYSTEM_BETA],
       add: [EFFORT_BETA],

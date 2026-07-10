@@ -44,8 +44,9 @@ describe("render-claude-code-drift-issue", () => {
       expect(body).toContain("@anthropic-ai/claude-code@2.1.140");
       expect(body).toContain("https://github.com/alice/kyoli-gam/actions/runs/12345");
       expect(body).toContain("oauth.clientId");
-      expect(body).toContain("pnpm --dir packages/cli doctor claude --wire");
-      expect(body).toContain("pnpm --dir packages/cli doctor claude --obedience");
+      expect(body).toContain("pnpm --dir packages/cli run doctor claude --wire");
+      expect(body).toContain("pnpm --dir packages/cli run doctor claude --obedience");
+      expect(body).not.toContain("pnpm --dir packages/cli doctor claude");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

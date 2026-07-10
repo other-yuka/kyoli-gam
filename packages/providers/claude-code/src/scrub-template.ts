@@ -188,6 +188,10 @@ export function removeHostContextSections(systemPrompt: string): string {
   return cleanupRemovedSections(removeDynamicGitMetadata(removeDynamicRecentCommits(removeDynamicStatusBlock(keptLines.join("\n")))));
 }
 
+export function scrubSystemPrompt(systemPrompt: string): string {
+  return scrubText(removeHostContextSections(systemPrompt));
+}
+
 function parseMarkdownHeading(line: string): { depth: number; title: string } | null {
   const trimmedStart = line.trimStart();
   if (line.length - trimmedStart.length > 3 || !trimmedStart.startsWith("#")) {
@@ -226,7 +230,7 @@ export function scrubObjectStrings(value: unknown): unknown {
 }
 
 export function scrubTemplate<T extends TemplateLike>(data: T, options?: ScrubTemplateOptions): T {
-  const systemPrompt = scrubText(removeHostContextSections(data.system_prompt));
+  const systemPrompt = scrubSystemPrompt(data.system_prompt);
   const dropMcpTools = options?.dropMcpTools ?? true;
   const tools = data.tools
     .filter((tool) => !dropMcpTools || !tool.name.startsWith("mcp__"))
@@ -237,7 +241,7 @@ export function scrubTemplate<T extends TemplateLike>(data: T, options?: ScrubTe
     agent_identity: scrubText(data.agent_identity),
     system_prompt: systemPrompt,
     ...(typeof data.system_prompt_fable === "string"
-      ? { system_prompt_fable: scrubText(removeHostContextSections(data.system_prompt_fable)) }
+      ? { system_prompt_fable: scrubSystemPrompt(data.system_prompt_fable) }
       : {}),
     tools,
     tool_names: tools.map((tool) => tool.name),
