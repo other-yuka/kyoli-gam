@@ -399,7 +399,6 @@ jobs:
             --repo "${{ github.repository }}" \
             --required \
             --watch \
-            --fail-fast \
             --interval 10
 
           current_pr=$(gh pr view "$PR_URL" \
