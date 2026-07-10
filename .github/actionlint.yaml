@@ -1,3 +1,9 @@
 self-hosted-runner:
   labels:
     - claude-auth
+
+# GitHub supports concurrency.queue, but actionlint v1.7.12 does not parse it yet.
+paths:
+  .github/workflows/release.yml:
+    ignore:
+      - 'unexpected key "queue" for "concurrency" section'

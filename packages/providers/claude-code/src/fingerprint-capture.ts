@@ -96,6 +96,7 @@ interface FingerprintCaptureTestOverrides {
     binaryPath: string;
     baseUrl: string;
     timeoutMs: number;
+    model?: string;
   }) => Promise<void>;
   detectCliVersion?: () => string;
 }
@@ -419,6 +420,7 @@ async function runClaudeCapture(params: {
   binaryPath: string;
   baseUrl: string;
   timeoutMs: number;
+  model?: string;
 }): Promise<void> {
   if (fingerprintCaptureTestOverrides.runClaudeCapture) {
     await fingerprintCaptureTestOverrides.runClaudeCapture(params);
@@ -430,6 +432,9 @@ async function runClaudeCapture(params: {
   const args = isNodeScript
     ? [params.binaryPath, "--print", "-p", "hi"]
     : ["--print", "-p", "hi"];
+  if (params.model) {
+    args.push("--model", params.model);
+  }
 
   await new Promise<void>((resolve, reject) => {
     const child = spawn(command, args, {
@@ -521,7 +526,10 @@ export function extractTemplate(captured: CapturedRequest): TemplateData | null 
   };
 }
 
-export async function captureLiveTemplateAsync(timeoutMs = DEFAULT_CAPTURE_TIMEOUT_MS): Promise<TemplateData | null> {
+export async function captureLiveTemplateAsync(
+  timeoutMs = DEFAULT_CAPTURE_TIMEOUT_MS,
+  options: { model?: string } = {},
+): Promise<TemplateData | null> {
   const binaryPath = findClaudeBinary();
   if (!binaryPath) {
     return null;
@@ -566,7 +574,7 @@ export async function captureLiveTemplateAsync(timeoutMs = DEFAULT_CAPTURE_TIMEO
     });
 
     const baseUrl = `http://${LOOPBACK_HOST}:${address.port}`;
-    await runClaudeCapture({ binaryPath, baseUrl, timeoutMs });
+    await runClaudeCapture({ binaryPath, baseUrl, timeoutMs, model: options.model });
 
     if (!capturedRequest) {
       return null;

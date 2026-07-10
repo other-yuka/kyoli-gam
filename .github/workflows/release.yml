@@ -7,34 +7,129 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
+  queue: max
 
 permissions:
   contents: write
+  issues: write
   pull-requests: write
   id-token: write
 
 jobs:
   release:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    outputs:
+      failure_reason: ${{ steps.release_policy.outputs.failure_reason }}
+      has_auto_changeset: ${{ steps.release_inputs.outputs.has_auto_changeset }}
+      trusted_lineage: ${{ steps.release_policy.outputs.trusted_lineage }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Select an authoritative release snapshot
+        id: snapshot
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" != "push" ]; then
+            echo "process=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          latest_main_oid=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" \
+            --jq '.object.sha')
+          if [ "$GITHUB_SHA" = "$latest_main_oid" ]; then
+            echo "process=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          trusted_release_snapshot=$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" \
+            --jq 'any(.[];
+              .merged_at != null
+              and .base.ref == "main"
+              and (
+                .head.ref == "changeset-release/main"
+                or any(.labels[]?; .name == "claude-code-auto-release")
+              )
+            )')
+          if [ "$trusted_release_snapshot" = "true" ]; then
+            echo "process=true" >> "$GITHUB_OUTPUT"
+            echo "Processing trusted release snapshot $GITHUB_SHA even though main advanced."
+          else
+            echo "process=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping stale main snapshot $GITHUB_SHA; a newer queued run owns the combined release state."
+          fi
 
       - uses: pnpm/action-setup@v6
+        if: steps.snapshot.outputs.process == 'true'
         with:
           version: 10.29.2
 
       - uses: actions/setup-node@v6
+        if: steps.snapshot.outputs.process == 'true'
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
           cache: "pnpm"
 
-      - run: corepack enable
+      - if: steps.snapshot.outputs.process == 'true'
+        run: corepack enable
 
-      - run: pnpm install --frozen-lockfile
+      - if: steps.snapshot.outputs.process == 'true'
+        run: pnpm install --frozen-lockfile
+
+      - name: Capture expected Changesets release plan
+        if: steps.snapshot.outputs.process == 'true'
+        id: release_inputs
+        run: |
+          set -euo pipefail
+          policy_path="${RUNNER_TEMP}/claude-release-policy-input.json"
+          echo "policy_path=$policy_path" >> "$GITHUB_OUTPUT"
+          mapfile -t auto_changesets < <(find .changeset -maxdepth 1 -type f -name 'claude-code-auto-[ab]-*.md' -print | sort)
+          if [ "${#auto_changesets[@]}" -ne 1 ]; then
+            if [ "${#auto_changesets[@]}" -gt 0 ]; then
+              echo "has_auto_changeset=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "has_auto_changeset=false" >> "$GITHUB_OUTPUT"
+            fi
+            node - "$policy_path" <<'NODE'
+          require("fs").writeFileSync(process.argv[2], JSON.stringify({
+            autoChangesetPath: null,
+            autoChangesetContent: null,
+            releases: [],
+          }, null, 2) + "\n");
+          NODE
+            exit 0
+          fi
+
+          auto_changeset="${auto_changesets[0]}"
+          status_path="${RUNNER_TEMP}/changeset-status.json"
+          echo "has_auto_changeset=true" >> "$GITHUB_OUTPUT"
+          echo "auto_changeset_path=$auto_changeset" >> "$GITHUB_OUTPUT"
+          pnpm exec changeset status --output "$status_path"
+          AUTO_CHANGESET="$auto_changeset" \
+          STATUS_PATH="$status_path" \
+          POLICY_PATH="$policy_path" \
+            node <<'NODE'
+          const fs = require("fs");
+          const status = JSON.parse(fs.readFileSync(process.env.STATUS_PATH, "utf8"));
+          fs.writeFileSync(process.env.POLICY_PATH, JSON.stringify({
+            autoChangesetPath: process.env.AUTO_CHANGESET,
+            autoChangesetContent: fs.readFileSync(process.env.AUTO_CHANGESET, "utf8"),
+            releases: status.releases ?? [],
+          }, null, 2) + "\n");
+          NODE
 
       - name: Create Release PR or Publish
+        if: steps.snapshot.outputs.process == 'true'
         id: changesets
         uses: changesets/action@v1
         with:
@@ -49,10 +144,14 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: "true"
 
-      - name: Report release PR for manual merge
-        if: steps.changesets.outputs.published != 'true'
+      - name: Classify and handle release PR
+        if: steps.snapshot.outputs.process == 'true' && steps.changesets.outputs.published != 'true'
+        id: release_policy
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.KYOLI_RELEASE_BOT_PAT || secrets.GITHUB_TOKEN }}
+          AUTO_CHANGESET_PATH: ${{ steps.release_inputs.outputs.auto_changeset_path }}
+          HAS_AUTO_CHANGESET: ${{ steps.release_inputs.outputs.has_auto_changeset }}
+          POLICY_PATH: ${{ steps.release_inputs.outputs.policy_path }}
         run: |
           set -euo pipefail
           pr=$(gh pr list \
@@ -63,9 +162,290 @@ jobs:
             --jq '.[0].number')
 
           if [ -z "$pr" ]; then
-            echo "No open Changesets release PR to auto-merge."
+            echo "No open Changesets release PR."
             exit 0
           fi
 
-          echo "::notice::Changesets release PR #$pr is ready for manual review and merge."
-          echo "Release publishing will run only after the release PR is merged."
+          gh pr view "$pr" \
+            --repo "${{ github.repository }}" \
+            --json number,body,headRefOid,url \
+            > release-pr.json
+
+          echo '{}' > source-pr.json
+          if [ -n "$AUTO_CHANGESET_PATH" ]; then
+            expected_source_changeset="${RUNNER_TEMP}/expected-source-changeset.md"
+            node - "$POLICY_PATH" "$expected_source_changeset" <<'NODE'
+          const fs = require("fs");
+          const policy = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+          fs.writeFileSync(process.argv[3], policy.autoChangesetContent ?? "");
+          NODE
+            node - "$GITHUB_REPOSITORY" release-pr.json <<'NODE' > source-pr-numbers.txt
+          const fs = require("fs");
+          const repo = process.argv[2].replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          const body = JSON.parse(fs.readFileSync(process.argv[3], "utf8")).body ?? "";
+          const matches = body.matchAll(new RegExp(`https://github\\.com/${repo}/pull/(\\d+)`, "g"));
+          for (const number of new Set([...matches].map((match) => match[1]))) console.log(number);
+          NODE
+            while read -r candidate; do
+              [ -z "$candidate" ] && continue
+              gh pr view "$candidate" \
+                --repo "${{ github.repository }}" \
+                --json number,labels,files,mergedAt,baseRefName,headRepository,isCrossRepository,mergeCommit \
+                > candidate-source-pr.json
+              trusted=$(jq \
+                --arg path "$AUTO_CHANGESET_PATH" \
+                --arg repo "$GITHUB_REPOSITORY" \
+                '.mergedAt != null
+                  and .baseRefName == "main"
+                  and .isCrossRepository == false
+                  and .headRepository.nameWithOwner == $repo
+                  and (.mergeCommit.oid // "") != ""
+                  and ([.labels[].name] | index("claude-code-auto-release") != null)
+                  and ([.files[].path] | index($path) != null)' \
+                candidate-source-pr.json)
+              if [ "$trusted" = "true" ]; then
+                source_oid=$(jq -r '.mergeCommit.oid' candidate-source-pr.json)
+                candidate_source_changeset="${RUNNER_TEMP}/candidate-source-changeset.md"
+                if ! gh api \
+                  -H "Accept: application/vnd.github.raw+json" \
+                  "repos/${GITHUB_REPOSITORY}/contents/${AUTO_CHANGESET_PATH}?ref=${source_oid}" \
+                  > "$candidate_source_changeset"; then
+                  continue
+                fi
+                if ! cmp -s "$expected_source_changeset" "$candidate_source_changeset"; then
+                  continue
+                fi
+                jq --rawfile changeset "$candidate_source_changeset" \
+                  '. + {changesetContent: $changeset}' \
+                  candidate-source-pr.json \
+                  > source-pr.json
+                echo "trusted_lineage=true" >> "$GITHUB_OUTPUT"
+                break
+              fi
+            done < source-pr-numbers.txt
+          fi
+
+          gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/pulls/${pr}/files?per_page=100" \
+            | jq -s 'add' \
+            > release-pr-files.json
+
+          node packages/anthropic-multi-account/scripts/classify-claude-code-release-pr.mjs \
+            source-pr.json \
+            release-pr.json \
+            release-pr-files.json \
+            "$POLICY_PATH" \
+            release-classification.json
+          cat release-classification.json
+
+          trusted_source=$(jq -r '[.labels[]?.name] | index("claude-code-auto-release") != null' source-pr.json)
+          auto_merge=$(jq -r '.autoMerge' release-classification.json)
+          reason=$(jq -r '.reason' release-classification.json)
+          if [ "$auto_merge" != "true" ]; then
+            if [ "$trusted_source" != "true" ] && [ "$HAS_AUTO_CHANGESET" != "true" ]; then
+              echo "::notice::Changesets release PR #$pr remains manual: $reason"
+              exit 0
+            fi
+            echo "failure_reason=$reason" >> "$GITHUB_OUTPUT"
+            echo "::error::Trusted Claude Code release PR #$pr is not isolated: $reason"
+            exit 1
+          fi
+
+          classified_oid=$(jq -r '.headRefOid' release-pr.json)
+          gh pr edit "$pr" \
+            --repo "${{ github.repository }}" \
+            --add-label claude-code-auto-release
+
+          check_count=0
+          for _ in $(seq 1 24); do
+            check_count=$(gh pr view "$pr" \
+              --repo "${{ github.repository }}" \
+              --json statusCheckRollup \
+              --jq '.statusCheckRollup | length')
+            [ "$check_count" -gt 0 ] && break
+            sleep 5
+          done
+          if [ "$check_count" -eq 0 ]; then
+            echo "failure_reason=required checks did not register for release PR #$pr" >> "$GITHUB_OUTPUT"
+            echo "::error::Required checks did not register for release PR #$pr."
+            exit 1
+          fi
+
+          gh pr checks "$pr" \
+            --repo "${{ github.repository }}" \
+            --required \
+            --watch \
+            --fail-fast \
+            --interval 10
+
+          current_oid=$(gh pr view "$pr" \
+            --repo "${{ github.repository }}" \
+            --json headRefOid \
+            --jq '.headRefOid')
+          if [ "$current_oid" != "$classified_oid" ]; then
+            echo "failure_reason=release PR #$pr changed after classification" >> "$GITHUB_OUTPUT"
+            echo "::error::Release PR #$pr changed after classification ($classified_oid -> $current_oid)."
+            exit 1
+          fi
+
+          gh pr merge "$pr" \
+            --repo "${{ github.repository }}" \
+            --squash \
+            --match-head-commit "$classified_oid"
+          state=$(gh pr view "$pr" --repo "${{ github.repository }}" --json state --jq '.state')
+          if [ "$state" != "MERGED" ]; then
+            echo "failure_reason=release PR #$pr did not reach merged state" >> "$GITHUB_OUTPUT"
+            echo "::error::Release PR #$pr did not reach MERGED state."
+            exit 1
+          fi
+          release_merge_oid=$(gh pr view "$pr" \
+            --repo "${{ github.repository }}" \
+            --json mergeCommit \
+            --jq '.mergeCommit.oid // empty')
+          if [ -z "$release_merge_oid" ]; then
+            echo "failure_reason=release PR #$pr has no merge commit" >> "$GITHUB_OUTPUT"
+            echo "::error::Merged release PR #$pr has no merge commit."
+            exit 1
+          fi
+          echo "release_merge_oid=$release_merge_oid" >> "$GITHUB_OUTPUT"
+          echo "Merged isolated Claude Code release PR #$pr at $release_merge_oid."
+
+      - name: Checkout merged automated release
+        if: steps.release_policy.outputs.release_merge_oid != ''
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          ref: ${{ steps.release_policy.outputs.release_merge_oid }}
+
+      - name: Prepare isolated inline publish
+        if: steps.release_policy.outputs.release_merge_oid != ''
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile
+          hold_dir="${RUNNER_TEMP}/pending-changesets"
+          mkdir -p "$hold_dir"
+          find .changeset \
+            -maxdepth 1 \
+            -type f \
+            -name '*.md' \
+            ! -name 'README.md' \
+            -exec mv {} "$hold_dir"/ \;
+          if find .changeset -maxdepth 1 -type f -name '*.md' ! -name 'README.md' -print -quit | grep -q .; then
+            echo "::error::Could not isolate the merged automated release from pending changesets."
+            exit 1
+          fi
+
+      - name: Publish merged automated release inline
+        if: steps.release_policy.outputs.release_merge_oid != ''
+        id: auto_publish
+        uses: changesets/action@v1
+        with:
+          publish: pnpm run release
+          createGithubReleases: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.KYOLI_RELEASE_BOT_PAT || secrets.GITHUB_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: "true"
+
+      - name: Require completed inline publish
+        if: steps.release_policy.outputs.release_merge_oid != '' && steps.auto_publish.outputs.published != 'true'
+        run: |
+          echo "::error::Merged automated release did not publish any packages inline."
+          exit 1
+
+      - name: Auto-close recovered Claude Code release alert
+        if: steps.changesets.outputs.published == 'true' || steps.auto_publish.outputs.published == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TRUSTED_LINEAGE: ${{ steps.release_policy.outputs.trusted_lineage }}
+        run: |
+          trusted="$TRUSTED_LINEAGE"
+          if [ "$trusted" != "true" ]; then
+            source_pr=$(gh api \
+              -H "Accept: application/vnd.github+json" \
+              "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" \
+              --jq 'map(select(.base.ref == "main" and .merged_at != null)) | .[0] // {}')
+            trusted=$(printf '%s' "$source_pr" \
+              | jq -r '[.labels[]?.name] | index("claude-code-auto-release") != null')
+          fi
+          if [ "$trusted" != "true" ]; then
+            echo "Published a non-Claude release; preserving Claude Code automation alerts."
+            exit 0
+          fi
+
+          gh issue list \
+            --label claude-code-automation-failure \
+            --state open \
+            --search '"Claude Code release automation failed" in:title' \
+            --json number \
+            --jq '.[].number' \
+            | while read -r n; do
+              [ -z "$n" ] && continue
+              gh issue close "$n" --comment "Auto-closed: Claude Code release published successfully on run https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID."
+            done
+
+  claude_code_release_failure:
+    needs: release
+    if: always() && needs.release.result == 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    steps:
+      - name: Alert only for trusted Claude Code release lineage
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          FAILURE_REASON: ${{ needs.release.outputs.failure_reason }}
+          HAS_AUTO_CHANGESET: ${{ needs.release.outputs.has_auto_changeset }}
+          TRUSTED_LINEAGE: ${{ needs.release.outputs.trusted_lineage }}
+        run: |
+          set -euo pipefail
+          source_pr=$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" \
+            --jq 'map(select(.base.ref == "main" and .merged_at != null)) | .[0] // {}')
+          associated_pr_trusted=$(printf '%s' "$source_pr" \
+            | jq -r '[.labels[]?.name] | index("claude-code-auto-release") != null')
+          trusted="$TRUSTED_LINEAGE"
+          if [ "$trusted" != "true" ] && [ "$HAS_AUTO_CHANGESET" = "true" ]; then
+            trusted=true
+          fi
+          if [ "$trusted" != "true" ] && [ "$associated_pr_trusted" = "true" ]; then
+            trusted=true
+          fi
+          if [ "$trusted" != "true" ]; then
+            echo "Release failure is not from trusted Claude Code automation; leaving normal workflow diagnostics only."
+            exit 0
+          fi
+
+          gh label create claude-code-automation-failure \
+            --color B60205 \
+            --description "Claude Code automatic update pipeline needs intervention" \
+            2>/dev/null || true
+          body_file=$(mktemp)
+          {
+            echo "## Claude Code release automation failed"
+            echo ""
+            echo "A trusted Class A/B update reached the release workflow, but publish or release preparation failed."
+            echo ""
+            echo "- Reason: ${FAILURE_REASON:-see workflow logs}"
+            echo "- Run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "- Commit: \`${GITHUB_SHA}\`"
+          } > "$body_file"
+          existing=$(gh issue list \
+            --label claude-code-automation-failure \
+            --state open \
+            --search '"Claude Code release automation failed" in:title' \
+            --json number \
+            --jq '.[0].number // ""')
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --body-file "$body_file"
+          else
+            gh issue create \
+              --title "Claude Code release automation failed" \
+              --label claude-code-automation-failure \
+              --body-file "$body_file"
+          fi

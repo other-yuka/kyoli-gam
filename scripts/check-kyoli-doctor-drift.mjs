@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
 import { execFileSync } from "node:child_process";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const DEFAULT_COMMANDS = [
   ["pnpm", "--dir", "packages/cli", "run", "doctor", "claude", "--binary", "--json"],
@@ -9,7 +11,7 @@ const DEFAULT_COMMANDS = [
   ["pnpm", "--dir", "packages/cli", "run", "doctor", "claude", "--obedience", "--json"],
 ];
 
-const DRIFT_WARNINGS = new Set([
+const CLASS_AB_FINGERPRINT_WARNINGS = new Set([
   "bundled template version",
   "bundled version",
   "system prompt",
@@ -56,13 +58,12 @@ function runDoctor(command) {
   }
 }
 
-function collectDrift(report) {
+export function collectActionableDoctorDrift(report) {
   const drift = [];
   for (const check of report.checks ?? []) {
-    if (check.status === "fail") {
-      drift.push({ report: report.name, check: check.name, status: check.status, detail: check.detail });
-    }
-    if (check.status === "warn" && DRIFT_WARNINGS.has(check.name)) {
+    const delegatedToClassAB = check.status === "warn"
+      && CLASS_AB_FINGERPRINT_WARNINGS.has(check.name);
+    if (check.status === "fail" || (check.status === "warn" && !delegatedToClassAB)) {
       drift.push({ report: report.name, check: check.name, status: check.status, detail: check.detail });
     }
   }
@@ -71,7 +72,7 @@ function collectDrift(report) {
 
 function main() {
   const reports = readCommands().map(runDoctor);
-  const drift = reports.flatMap(collectDrift);
+  const drift = reports.flatMap(collectActionableDoctorDrift);
   const summary = reports.reduce((acc, report) => {
     acc.pass += report.summary?.pass ?? 0;
     acc.warn += report.summary?.warn ?? 0;
@@ -90,9 +91,14 @@ function main() {
   process.exit(drift.length === 0 ? 0 : 1);
 }
 
-try {
-  main();
-} catch (error) {
-  process.stderr.write(`check-kyoli-doctor-drift: ${error instanceof Error ? error.message : String(error)}\n`);
-  process.exit(3);
+const isMain = process.argv[1]
+  && fileURLToPath(import.meta.url) === resolve(process.argv[1]);
+
+if (isMain) {
+  try {
+    main();
+  } catch (error) {
+    process.stderr.write(`check-kyoli-doctor-drift: ${error instanceof Error ? error.message : String(error)}\n`);
+    process.exit(3);
+  }
 }

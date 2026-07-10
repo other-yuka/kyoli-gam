@@ -4,6 +4,17 @@ on:
   schedule:
     - cron: "*/30 * * * *"
   workflow_dispatch:
+    inputs:
+      target_version:
+        description: Exact Claude Code version to capture; defaults to npm latest
+        required: false
+        type: string
+        default: ""
+      source_run_url:
+        description: Optional upstream static-drift run URL
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -18,11 +29,14 @@ jobs:
   live_template:
     if: github.ref == 'refs/heads/main' && vars.KYOLI_CLAUDE_LIVE_TEMPLATE_WATCH_ENABLED == 'true'
     runs-on: [self-hosted, claude-auth]
-    timeout-minutes: 15
+    timeout-minutes: 20
+    outputs:
+      target_version: ${{ steps.target.outputs.version }}
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+          ref: main
 
       - uses: pnpm/action-setup@v6
         with:
@@ -36,189 +50,452 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build Claude OpenCode package
-        run: pnpm --filter opencode-anthropic-multi-account... build
+      - name: Resolve exact Claude Code target
+        id: target
+        env:
+          REQUESTED_TARGET_VERSION: ${{ github.event.inputs.target_version }}
+        run: |
+          set -euo pipefail
+          target="$REQUESTED_TARGET_VERSION"
+          if [ -z "$target" ]; then
+            target=$(npm view @anthropic-ai/claude-code version)
+          fi
+          if ! [[ "$target" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Claude Code target is not a concrete version: $target"
+            exit 1
+          fi
 
-      - name: Run live template drift check
-        id: check
+          selected_bin=$(command -v claude || true)
+          selected_version=""
+          if [ -n "$selected_bin" ]; then
+            selected_version=$("$selected_bin" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+          fi
+
+          if [ "$selected_version" != "$target" ]; then
+            install_root="${RUNNER_TEMP}/claude-code-${target}"
+            rm -rf "$install_root"
+            npm install \
+              --prefix "$install_root" \
+              --no-save \
+              --no-audit \
+              --no-fund \
+              "@anthropic-ai/claude-code@${target}"
+            selected_bin="${install_root}/node_modules/.bin/claude"
+          fi
+
+          if [ ! -x "$selected_bin" ]; then
+            echo "::error::Resolved Claude Code binary is not executable: $selected_bin"
+            exit 1
+          fi
+          actual=$("$selected_bin" --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+          if [ "$actual" != "$target" ]; then
+            echo "::error::Resolved Claude Code v${actual:-unknown} instead of target v$target"
+            exit 1
+          fi
+
+          echo "Selected Claude Code v$actual at $selected_bin"
+          echo "version=$target" >> "$GITHUB_OUTPUT"
+          dirname "$selected_bin" >> "$GITHUB_PATH"
+          {
+            echo "KYOLI_CLAUDE_CODE_PATH=$selected_bin"
+            echo "ANTHROPIC_CLI_VERSION=$target"
+            echo "CLAUDE_CODE_TARGET_VERSION=$target"
+          } >> "$GITHUB_ENV"
+
+      - name: Gate exact target through static OAuth scan
         run: |
           set +e
-          node packages/anthropic-multi-account/scripts/check-live-fingerprint-drift.mjs > live-template-drift.json 2> live-template-drift.err
-          code=$?
-          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
-          if [ "$code" -eq 0 ]; then
-            echo "drift_detected=false" >> "$GITHUB_OUTPUT"
-            cat live-template-drift.json
-            exit 0
-          fi
-          if [ "$code" -eq 2 ] && [ -s live-template-drift.json ]; then
-            echo "drift_detected=true" >> "$GITHUB_OUTPUT"
-            cat live-template-drift.json
-            exit 0
-          fi
-          cat live-template-drift.err
-          exit "$code"
+          node packages/anthropic-multi-account/scripts/check-claude-code-static-oauth-drift.mjs \
+            > live-static-drift.json \
+            2> live-static-drift.err
+          static_code=$?
+          set -e
 
-      - name: Upload live template artifacts
+          node packages/anthropic-multi-account/scripts/plan-static-claude-code-drift.mjs \
+            live-static-drift.json \
+            live-static-plan.json
+          action=$(jq -r '.action' live-static-plan.json)
+          if [ "$action" != "none" ] && [ "$action" != "validate-live" ]; then
+            cat live-static-drift.json
+            cat live-static-drift.err 2>/dev/null || true
+            echo "::error::Exact target failed the static OAuth/scanner safety gate (exit=$static_code, action=$action)."
+            exit 1
+          fi
+          cat live-static-plan.json
+
+      - name: Build Claude packages
+        run: pnpm --filter opencode-anthropic-multi-account... build
+
+      - name: Classify live fingerprint
+        id: check
+        env:
+          KYOLI_LIVE_FINGERPRINT_OUTPUT: live-template-capture.json
+        run: |
+          set +e
+          node packages/anthropic-multi-account/scripts/check-live-fingerprint-drift.mjs \
+            > live-template-drift.json \
+            2> live-template-drift.err
+          code=$?
+          set -e
+
+          classification=$(jq -r '.classification // "unsafe"' live-template-drift.json 2>/dev/null || echo unsafe)
+          echo "classification=$classification" >> "$GITHUB_OUTPUT"
+
+          case "$code:$classification" in
+            0:clean|2:shape|3:label-only)
+              cat live-template-drift.json
+              ;;
+            *)
+              cat live-template-drift.err 2>/dev/null || true
+              cat live-template-drift.json 2>/dev/null || true
+              echo "::error::Unsafe or failed live classification (exit=$code, classification=$classification)"
+              exit 1
+              ;;
+          esac
+
+          case "$classification" in
+            label-only) class_name=A ;;
+            shape) class_name=B ;;
+            *) class_name="" ;;
+          esac
+          should_update=false
+          deferred=false
+          if [ -n "$class_name" ]; then
+            pending_changeset=$(find .changeset -maxdepth 1 -type f -name '*.md' ! -name 'README.md' -print -quit)
+            if [ -n "$pending_changeset" ]; then
+              deferred=true
+              echo "::notice::Deferring Class $class_name update until pending release input $pending_changeset is consumed, preserving an isolated auto-release."
+            else
+              should_update=true
+            fi
+          fi
+          {
+            echo "class_name=$class_name"
+            echo "should_update=$should_update"
+            echo "deferred=$deferred"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload live evidence
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: claude-code-live-template-watch
           path: |
+            live-static-drift.json
+            live-static-drift.err
+            live-static-plan.json
             live-template-drift.json
+            live-template-capture.json
             live-template-drift.err
           if-no-files-found: ignore
           retention-days: 30
 
-      - name: Open or update live template drift issue
-        if: steps.check.outputs.drift_detected == 'true'
+      - name: Require drift bot PAT
+        if: steps.check.outputs.should_update == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh label create claude-code-drift \
-            --color FBCA04 \
-            --description "Claude Code package drift requires kyoli compatibility review" \
-            2>/dev/null || true
-
-          body_file=$(mktemp)
-          {
-            echo "## Claude Code live template drift"
-            echo ""
-            echo "The self-hosted live template watch detected drift on $(date -Iseconds)."
-            echo ""
-            echo "### Fix checklist"
-            echo ""
-            echo "- [ ] Inspect \`live-template-drift.json\` for prompt, tool, or header drift."
-            echo "- [ ] Review the auto-rebake PR opened by this workflow."
-            echo "- [ ] Run \`pnpm --filter opencode-anthropic-multi-account test:contract:native\`."
-            echo ""
-            echo '```json'
-            cat live-template-drift.json
-            echo '```'
-            if [ -s live-template-drift.err ]; then
-              echo ""
-              echo "### stderr"
-              echo '```text'
-              cat live-template-drift.err
-              echo '```'
-            fi
-          } > "$body_file"
-
-          existing=$(gh issue list --label claude-code-drift --state open --search '"Claude Code live template drift" in:title' --json number --jq '.[0].number // ""')
-          if [ -n "$existing" ]; then
-            gh issue edit "$existing" --body-file "$body_file"
-          else
-            gh issue create --title "Claude Code live template drift detected" --label claude-code-drift --body-file "$body_file"
-          fi
-
-      - name: Auto-rebake and open PR
-        if: steps.check.outputs.drift_detected == 'true'
-        id: rebake
-        env:
-          GH_TOKEN: ${{ secrets.KYOLI_DRIFT_BOT_PAT }}
           KYOLI_DRIFT_BOT_PAT: ${{ secrets.KYOLI_DRIFT_BOT_PAT }}
-          ALLOW_FINGERPRINT_SHAPE_CHANGE: "1"
         run: |
-          set -euo pipefail
-
           if [ -z "$KYOLI_DRIFT_BOT_PAT" ]; then
-            echo "::error::KYOLI_DRIFT_BOT_PAT is required to push auto-rebake branches and open PRs that trigger normal pull_request checks."
+            echo "::error::KYOLI_DRIFT_BOT_PAT is required for Claude Code auto-update PRs."
             exit 1
           fi
 
-          existing_pr=$(gh pr list \
-            --repo "${{ github.repository }}" \
-            --state open \
-            --limit 100 \
-            --json headRefName,url \
-            --jq 'map(select(.headRefName | startswith("bot/claude-fingerprint-rebake-"))) | .[0].url // ""')
-          if [ -n "$existing_pr" ]; then
-            echo "Existing auto-rebake PR is still open: $existing_pr"
-            echo "pr_url=$existing_pr" >> "$GITHUB_OUTPUT"
-            echo "skipped=true" >> "$GITHUB_OUTPUT"
-            exit 0
+      - name: Prepare Class A or B update
+        if: steps.check.outputs.should_update == 'true'
+        id: prepare
+        env:
+          ALLOW_FINGERPRINT_SHAPE_CHANGE: "1"
+          KYOLI_LIVE_FINGERPRINT_OUTPUT: post-rebake-capture.json
+        run: |
+          set -euo pipefail
+          class_name='${{ steps.check.outputs.class_name }}'
+          if [ "$class_name" = "B" ]; then
+            pnpm --dir packages/anthropic-multi-account run bake:fingerprint
+
+            node packages/anthropic-multi-account/scripts/check-live-fingerprint-drift.mjs \
+              > post-rebake-drift.json \
+              2> post-rebake-drift.err
+            if [ "$(jq -r '.classification' post-rebake-drift.json)" != "clean" ]; then
+              cat post-rebake-drift.json
+              cat post-rebake-drift.err 2>/dev/null || true
+              echo "::error::Post-rebake live fingerprint is not clean."
+              exit 1
+            fi
           fi
 
-          pnpm --dir packages/anthropic-multi-account run bake:fingerprint
+          node packages/anthropic-multi-account/scripts/prepare-live-fingerprint-pr.mjs \
+            "$class_name" \
+            live-template-drift.json \
+            live-template-capture.json \
+            live-template-pr.json
+          cat live-template-pr.json
 
-          node packages/anthropic-multi-account/scripts/check-live-fingerprint-drift.mjs > post-rebake-drift.json 2> post-rebake-drift.err
-          cat post-rebake-drift.json
-
-          if git diff --quiet -- packages/providers/claude-code/src/fingerprint/data.json; then
-            echo "::warning::Drift check reported drift but rebake produced no fingerprint diff; skipping PR."
-            echo "skipped=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
+      - name: Run stable Server and OpenCode contracts
+        if: steps.check.outputs.should_update == 'true'
+        run: |
           pnpm --filter @kyoli-gam/provider-claude-code test
           pnpm --filter opencode-anthropic-multi-account test:contract:native
 
-          cc_version=$(node - <<'NODE'
-          const report = JSON.parse(require("fs").readFileSync("live-template-drift.json", "utf8"));
-          console.log(report.summary?.actualCcVersion || report.summary?.expectedCcVersion || "unknown");
-          NODE
-          )
-          safe_version=$(printf '%s' "$cc_version" | tr -c '0-9A-Za-z.-' '-')
-          changeset=".changeset/claude-code-live-template-${safe_version}.md"
-          mkdir -p .changeset
-          cat > "$changeset" <<EOF
-          ---
-          "opencode-anthropic-multi-account": patch
-          ---
-
-          Refresh Claude Code live fingerprint metadata for \`@anthropic-ai/claude-code@${cc_version}\`.
-          EOF
-
-          branch="bot/claude-fingerprint-rebake-${safe_version}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}"
-          git config user.email "actions@github.com"
-          git config user.name "kyoli-drift-watch[bot]"
-          git checkout -B "$branch"
-          git add packages/providers/claude-code/src/fingerprint/data.json "$changeset"
-          git commit -m "auto-rebake: Claude Code fingerprint drift v${cc_version}"
-          git push "https://x-access-token:${KYOLI_DRIFT_BOT_PAT}@github.com/${GITHUB_REPOSITORY}.git" "$branch"
-
-          body_file=$(mktemp)
-          {
-            echo "## Auto-rebake from Claude Code live template drift"
-            echo ""
-            echo "Generated by [\`claude-code-live-template-watch.yml\`](.github/workflows/claude-code-live-template-watch.yml) on $(date -Iseconds)."
-            echo ""
-            echo "The self-hosted watcher captured live Claude Code \`${cc_version}\`, rebaked \`packages/providers/claude-code/src/fingerprint/data.json\`, and added a patch changeset."
-            echo ""
-            echo "## Drift report"
-            echo ""
-            echo '```json'
-            cat live-template-drift.json
-            echo '```'
-          } > "$body_file"
-
-          pr_url=$(gh pr create \
-            --repo "${{ github.repository }}" \
-            --head "$branch" \
-            --base main \
-            --title "auto-rebake: Claude Code fingerprint drift v${cc_version}" \
-            --body-file "$body_file" \
-            --label claude-code-drift)
-          echo "pr_url=$pr_url" >> "$GITHUB_OUTPUT"
-          echo "skipped=false" >> "$GITHUB_OUTPUT"
-
-      - name: Upload post-rebake artifacts
-        if: always() && steps.check.outputs.drift_detected == 'true'
+      - name: Upload post-update evidence
+        if: steps.check.outputs.should_update == 'true'
         uses: actions/upload-artifact@v7
         with:
-          name: claude-code-live-template-post-rebake
+          name: claude-code-live-template-post-update
           path: |
+            live-template-pr.json
             post-rebake-drift.json
+            post-rebake-capture.json
             post-rebake-drift.err
           if-no-files-found: ignore
           retention-days: 30
 
-      - name: Auto-close live template drift issue on clean run
-        if: steps.check.outputs.drift_detected == 'false'
+      - name: Open or reuse trusted update PR
+        if: steps.check.outputs.should_update == 'true'
+        id: update_pr
+        env:
+          GH_TOKEN: ${{ secrets.KYOLI_DRIFT_BOT_PAT }}
+          KYOLI_DRIFT_BOT_PAT: ${{ secrets.KYOLI_DRIFT_BOT_PAT }}
+          BRANCH: ${{ steps.prepare.outputs.branch_name }}
+          CLASS_NAME: ${{ steps.prepare.outputs.class_name }}
+          COMMIT_MESSAGE: ${{ steps.prepare.outputs.commit_message }}
+          PR_TITLE: ${{ steps.prepare.outputs.pr_title }}
+          PR_BODY_PATH: ${{ steps.prepare.outputs.pr_body_path }}
+          CHANGED_FILES: ${{ steps.prepare.outputs.changed_files }}
+          CHANGESET_PATH: ${{ steps.prepare.outputs.changeset_path }}
+          TARGET_VERSION: ${{ steps.prepare.outputs.target_version }}
+        run: |
+          set -euo pipefail
+          current_base_oid=$(git rev-parse HEAD)
+          latest_main_oid=$(git ls-remote origin refs/heads/main | awk '{print $1}')
+          if [ -z "$latest_main_oid" ] || [ "$current_base_oid" != "$latest_main_oid" ]; then
+            echo "deferred=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Main advanced during validation; preserving existing PR state and deferring to a fresh run."
+            exit 0
+          fi
+
+          class_token=$(printf '%s' "$CLASS_NAME" | tr '[:upper:]' '[:lower:]')
+          branch_prefix="bot/claude-fingerprint-${class_token}-${TARGET_VERSION}-"
+          export branch_prefix
+          export repository_owner="$GITHUB_REPOSITORY_OWNER"
+          existing_pr=$(gh pr list \
+            --repo "${{ github.repository }}" \
+            --state open \
+            --limit 100 \
+            --json number,url,headRefName,headRefOid,baseRefName,baseRefOid,headRepositoryOwner,isCrossRepository,labels \
+            --jq 'map(select(
+              (.isCrossRepository | not)
+              and .headRepositoryOwner.login == env.repository_owner
+              and .baseRefName == "main"
+              and (.headRefName | startswith(env.branch_prefix))
+              and ([.labels[].name] | index("claude-code-auto-release") != null)
+            )) | .[0] // {}')
+          existing_url=$(jq -r '.url // empty' <<< "$existing_pr")
+          if [ -n "$existing_url" ]; then
+            existing_number=$(jq -r '.number' <<< "$existing_pr")
+            existing_oid=$(jq -r '.headRefOid' <<< "$existing_pr")
+            existing_base_oid=$(jq -r '.baseRefOid' <<< "$existing_pr")
+            existing_files=$(gh api \
+              "repos/${GITHUB_REPOSITORY}/pulls/${existing_number}/files?per_page=100" \
+              --jq '[.[].filename]')
+            expected_changeset="^\\.changeset/claude-code-auto-${class_token}-[0-9a-z.-]+\\.md$"
+            valid_files=$(jq \
+              --arg changeset "$expected_changeset" \
+              'length == 2
+                and index("packages/providers/claude-code/src/fingerprint/data.json") != null
+                and any(.[]; test($changeset))' \
+              <<< "$existing_files")
+            existing_changeset=$(jq \
+              --arg changeset "$expected_changeset" \
+              -r '.[] | select(test($changeset))' \
+              <<< "$existing_files")
+
+            git fetch --no-tags \
+              "https://x-access-token:${KYOLI_DRIFT_BOT_PAT}@github.com/${GITHUB_REPOSITORY}.git" \
+              "$existing_oid"
+            if [ "$valid_files" = "true" ] \
+              && [ "$existing_base_oid" = "$current_base_oid" ] \
+              && git diff --quiet "$existing_oid" -- packages/providers/claude-code/src/fingerprint/data.json \
+              && git show "$existing_oid:$existing_changeset" | cmp -s "$CHANGESET_PATH" -; then
+              echo "Reusing current Class $CLASS_NAME update PR for v$TARGET_VERSION: $existing_url"
+              {
+                echo "pr_url=$existing_url"
+                echo "head_oid=$existing_oid"
+              } >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            gh pr close "$existing_url" \
+              --repo "${{ github.repository }}" \
+              --comment "Superseded automatically because the latest exact-version live capture or trusted file set changed."
+          fi
+
+          gh label create claude-code-drift \
+            --repo "${{ github.repository }}" \
+            --color FBCA04 \
+            --description "Claude Code package drift requires kyoli compatibility review" \
+            2>/dev/null || true
+          gh label create claude-code-auto-release \
+            --repo "${{ github.repository }}" \
+            --color 0E8A16 \
+            --description "Trusted Class A/B update eligible for isolated auto-release" \
+            2>/dev/null || true
+
+          git config user.email "actions@github.com"
+          git config user.name "kyoli-claude-update[bot]"
+          git checkout -B "$BRANCH"
+          echo "$CHANGED_FILES" \
+            | node -pe "JSON.parse(require('fs').readFileSync(0, 'utf8')).join('\n')" \
+            | while IFS= read -r path; do
+                [ -z "$path" ] || git add -- "$path"
+              done
+          if git diff --cached --quiet; then
+            echo "::error::Prepared Class $CLASS_NAME update contains no staged changes."
+            exit 1
+          fi
+
+          git commit -m "$COMMIT_MESSAGE"
+          git push \
+            "https://x-access-token:${KYOLI_DRIFT_BOT_PAT}@github.com/${GITHUB_REPOSITORY}.git" \
+            "$BRANCH"
+          pr_url=$(gh pr create \
+            --repo "${{ github.repository }}" \
+            --head "$BRANCH" \
+            --base main \
+            --title "$PR_TITLE" \
+            --body-file "$PR_BODY_PATH" \
+            --label claude-code-drift \
+              --label claude-code-auto-release)
+          echo "Opened $pr_url"
+          {
+            echo "pr_url=$pr_url"
+            echo "head_oid=$(git rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Wait for required checks and merge update PR
+        if: steps.check.outputs.should_update == 'true' && steps.update_pr.outputs.deferred != 'true'
+        id: merge_pr
+        env:
+          GH_TOKEN: ${{ secrets.KYOLI_DRIFT_BOT_PAT }}
+          PR_URL: ${{ steps.update_pr.outputs.pr_url }}
+          EXPECTED_HEAD_OID: ${{ steps.update_pr.outputs.head_oid }}
+        run: |
+          set -euo pipefail
+          check_count=0
+          for _ in $(seq 1 24); do
+            check_count=$(gh pr view "$PR_URL" \
+              --repo "${{ github.repository }}" \
+              --json statusCheckRollup \
+              --jq '.statusCheckRollup | length')
+            [ "$check_count" -gt 0 ] && break
+            sleep 5
+          done
+          if [ "$check_count" -eq 0 ]; then
+            echo "::error::Required checks did not register for $PR_URL."
+            exit 1
+          fi
+
+          gh pr checks "$PR_URL" \
+            --repo "${{ github.repository }}" \
+            --required \
+            --watch \
+            --fail-fast \
+            --interval 10
+
+          current_pr=$(gh pr view "$PR_URL" \
+            --repo "${{ github.repository }}" \
+            --json headRefOid,baseRefOid)
+          current_oid=$(jq -r '.headRefOid' <<< "$current_pr")
+          if [ "$current_oid" != "$EXPECTED_HEAD_OID" ]; then
+            echo "::error::Update PR head changed after validation ($EXPECTED_HEAD_OID -> $current_oid)."
+            exit 1
+          fi
+          current_base_oid=$(jq -r '.baseRefOid' <<< "$current_pr")
+          latest_main_oid=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" \
+            --jq '.object.sha')
+          if [ "$current_base_oid" != "$latest_main_oid" ]; then
+            echo "deferred=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Main advanced while checks ran; deferring merge so a fresh run can recreate the update from current main."
+            exit 0
+          fi
+
+          state=$(gh pr view "$PR_URL" --repo "${{ github.repository }}" --json state --jq '.state')
+          if [ "$state" != "MERGED" ]; then
+            gh pr merge "$PR_URL" \
+              --repo "${{ github.repository }}" \
+              --squash \
+              --delete-branch \
+              --match-head-commit "$EXPECTED_HEAD_OID"
+          fi
+          state=$(gh pr view "$PR_URL" --repo "${{ github.repository }}" --json state --jq '.state')
+          if [ "$state" != "MERGED" ]; then
+            echo "::error::Update PR did not reach MERGED state: $PR_URL"
+            exit 1
+          fi
+          echo "Merged trusted Class ${{ steps.prepare.outputs.class_name }} update at $EXPECTED_HEAD_OID."
+
+      - name: Auto-close recovered automation failure
+        if: success() && steps.check.outputs.deferred != 'true' && steps.update_pr.outputs.deferred != 'true' && steps.merge_pr.outputs.deferred != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_VERSION: ${{ steps.target.outputs.version }}
         run: |
-          gh issue list --label claude-code-drift --state open --search '"Claude Code live template drift" in:title' --json number --jq '.[].number' | while read -r n; do
-            [ -z "$n" ] && continue
-            gh issue close "$n" --comment "Auto-closed: live template drift check is clean on run https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID."
-          done
+          gh issue list \
+            --label claude-code-automation-failure \
+            --state open \
+            --search '"Claude Code automation failed" in:title' \
+            --json number,title \
+            > automation-failures.json
+          node packages/anthropic-multi-account/scripts/select-superseded-claude-code-issues.mjs \
+            automation-failures.json \
+            "$TARGET_VERSION" \
+            > resolved-automation-failures.txt
+          while read -r n; do
+                [ -z "$n" ] && continue
+                gh issue close "$n" --comment "Auto-closed: superseded by successful Class A/B automation for v${TARGET_VERSION} on run https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID."
+          done < resolved-automation-failures.txt
+
+  automation_failure_alert:
+    needs: live_template
+    if: always() && (needs.live_template.result == 'failure' || needs.live_template.result == 'cancelled')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Alert on automation failure
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TARGET_VERSION: ${{ needs.live_template.outputs.target_version }}
+          SOURCE_RUN_URL: ${{ github.event.inputs.source_run_url }}
+        run: |
+          set -euo pipefail
+          gh label create claude-code-automation-failure \
+            --color B60205 \
+            --description "Claude Code automatic update pipeline needs intervention" \
+            2>/dev/null || true
+          title="Claude Code automation failed: v${TARGET_VERSION:-unknown}"
+          body_file=$(mktemp)
+          {
+            echo "## Claude Code automatic update failure"
+            echo ""
+            echo "The exact-version Class A/B pipeline failed before it could prove and release the update."
+            echo ""
+            echo "- Target: \`${TARGET_VERSION:-unknown}\`"
+            echo "- Run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "- Static source: ${SOURCE_RUN_URL:-scheduled live watch}"
+          } > "$body_file"
+          existing=$(gh issue list \
+            --label claude-code-automation-failure \
+            --state open \
+            --search "in:title \"${title}\"" \
+            --json number \
+            --jq '.[0].number // ""')
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --body-file "$body_file"
+          else
+            gh issue create \
+              --title "$title" \
+              --label claude-code-automation-failure \
+              --body-file "$body_file"
+          fi
