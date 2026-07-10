@@ -27,10 +27,7 @@ concurrency:
 
 jobs:
   live_template:
-    if: >-
-      vars.KYOLI_CLAUDE_LIVE_TEMPLATE_WATCH_ENABLED == 'true' &&
-      (github.ref == 'refs/heads/main' ||
-       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/claude-live-capture-fix'))
+    if: github.ref == 'refs/heads/main' && vars.KYOLI_CLAUDE_LIVE_TEMPLATE_WATCH_ENABLED == 'true'
     runs-on: [self-hosted, claude-auth]
     timeout-minutes: 20
     outputs:
