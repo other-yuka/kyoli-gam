@@ -526,7 +526,7 @@ describe("createClaudeCodeProvider", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          model: "claude-code/claude-sonnet-4-5",
+          model: "claude-code/claude-sonnet-5",
           max_tokens: 1024,
           messages: [{ role: "user", content: "hello" }],
         }),
@@ -534,11 +534,11 @@ describe("createClaudeCodeProvider", () => {
       route: "/v1/messages",
       sessionKey: "session-a",
       body: {
-        model: "claude-code/claude-sonnet-4-5",
+        model: "claude-code/claude-sonnet-5",
         max_tokens: 1024,
         messages: [{ role: "user", content: "hello" }],
       },
-      model: "claude-code/claude-sonnet-4-5",
+      model: "claude-code/claude-sonnet-5",
     });
 
     expect(response.status).toBe(200);
@@ -551,6 +551,7 @@ describe("createClaudeCodeProvider", () => {
     expect(upstreamXApp).toBe("cli");
     expect(upstreamBeta).toContain("claude-code-20250219");
     expect(upstreamBeta).toContain("oauth-2025-04-20");
+    expect(upstreamBeta).toContain("mid-conversation-system-2026-04-07");
     expect(upstreamSessionId).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
     );
@@ -559,7 +560,7 @@ describe("createClaudeCodeProvider", () => {
     );
     expect(upstreamTimeout).toBe("600");
     expect(upstreamBody).toMatchObject({
-      model: "claude-sonnet-4-5",
+      model: "claude-sonnet-5",
       max_tokens: 1024,
       messages: [{ role: "user", content: "hello" }],
     });
@@ -1920,10 +1921,10 @@ describe("createClaudeCodeProvider", () => {
     const interactiveOnlyTools = new Set(["AskUserQuestion", "EnterPlanMode", "ExitPlanMode"]);
     const tools = getClaudeCodeTemplateTools()
       .filter((tool) => !interactiveOnlyTools.has(tool.name));
-    const capturedSystemPrompt = (metadata.systemPrompt ?? "").replaceAll(
+    const capturedSystemPrompt = `${(metadata.systemPrompt ?? "").replaceAll(
       "/.claude/projects/project/memory/",
       "/.claude/projects/-tmp-example-repo/memory/",
-    );
+    )}\n\n# Language\nAlways respond in Korean.`;
 
     await writeFile(
       fakeClaudePath,

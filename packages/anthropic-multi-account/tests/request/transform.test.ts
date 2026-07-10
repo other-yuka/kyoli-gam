@@ -127,6 +127,16 @@ describe("buildRequestHeaders", () => {
     expect(sonnetBetas).not.toContain("mid-conversation-system-2026-04-07");
     expect(sonnetBetas).toContain("effort-2025-11-24");
 
+    const sonnet5Headers = new Headers(buildRequestHeaders(
+      "https://api.anthropic.com/v1/messages",
+      { headers: {} },
+      "token-123",
+      "claude-sonnet-5",
+    ));
+    const sonnet5Betas = splitBetas(sonnet5Headers.get("anthropic-beta"));
+    expect(sonnet5Betas).toContain("mid-conversation-system-2026-04-07");
+    expect(sonnet5Betas).toContain("effort-2025-11-24");
+
     const haikuHeaders = new Headers(buildRequestHeaders(
       "https://api.anthropic.com/v1/messages",
       { headers: {} },

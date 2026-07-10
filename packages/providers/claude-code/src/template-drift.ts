@@ -9,6 +9,7 @@ import {
   getClaudeCodeTemplateMetadata,
   getClaudeCodeTemplateTools,
 } from "./fingerprint-template";
+import { scrubSystemPrompt, scrubText } from "./scrub-template";
 
 export interface ClaudeCodeTemplateDriftReport {
   binaryPath?: string;
@@ -340,67 +341,6 @@ function extractCCVersion(...sources: Array<string | undefined>): string | undef
     if (userAgentMatch?.[1]) return userAgentMatch[1];
   }
   return undefined;
-}
-
-function scrubSystemPrompt(systemPrompt: string): string {
-  return cleanupRemovedSections(scrubText(removeHostContextSections(systemPrompt)));
-}
-
-function scrubText(text: string): string {
-  return text
-    .replace(/\/Users\/(?!user(?:\/|$))[A-Za-z0-9._-]+/g, "/Users/user")
-    .replace(/\/home\/(?!user(?:\/|$))[A-Za-z0-9._-]+/g, "/home/user")
-    .replace(/([A-Za-z]:\\Users\\)(?!user(?:\\|$))[A-Za-z0-9._-]+/g, "$1user")
-    .replace(/([A-Za-z])--Users-[^\s\\`'")\]]+/g, "$1--Users-user-project")
-    .replace(/(\/\.claude\/projects\/)-[A-Za-z0-9._-]+(?=\/|$)/g, "$1project")
-    .replace(/^Current branch: .+$/gm, "Current branch: (dynamic)")
-    .replace(/^Main branch \(you will usually use this for PRs\): .+$/gm, "Main branch (you will usually use this for PRs): (dynamic)")
-    .replace(/^Git user: .+$/gm, "Git user: (dynamic)");
-}
-
-function removeHostContextSections(systemPrompt: string): string {
-  const skippedSections = new Set([
-    "environment",
-    "automemory",
-    "claudemd",
-    "useremail",
-    "currentdate",
-    "gitstatus",
-  ]);
-  const lines = systemPrompt.split("\n");
-  const keptLines: string[] = [];
-  let skippedHeadingDepth: number | null = null;
-
-  for (const line of lines) {
-    const headingMatch = line.match(/^\s{0,3}(#{1,6})\s+(.+?)\s*$/);
-    if (headingMatch) {
-      const headingDepth = headingMatch[1]!.length;
-      const sectionName = headingMatch[2]!.toLowerCase().replace(/[^a-z0-9]+/g, "");
-      if (skippedSections.has(sectionName)) {
-        skippedHeadingDepth = headingDepth;
-        continue;
-      }
-      if (skippedHeadingDepth !== null && headingDepth > skippedHeadingDepth) {
-        continue;
-      }
-      skippedHeadingDepth = null;
-      keptLines.push(line);
-      continue;
-    }
-
-    if (skippedHeadingDepth === null) keptLines.push(line);
-  }
-
-  return keptLines.join("\n")
-    .replace(/\n\nStatus:\n(?:[\s\S]*?)\n\nRecent commits:\n/g, "\n\nStatus:\n(dynamic)\n\nRecent commits:\n")
-    .replace(/(\n\nRecent commits:\n)(?:[0-9a-f]{7,}\s.*\n?)+/g, "$1(dynamic)\n");
-}
-
-function cleanupRemovedSections(text: string): string {
-  return text
-    .replace(/\n{3,}/g, "\n\n")
-    .replace(/^(?:\s*\n)+/, "")
-    .replace(/(?:\n\s*)+$/, "");
 }
 
 function compare(

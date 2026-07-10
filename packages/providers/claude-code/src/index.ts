@@ -166,6 +166,7 @@ export {
   type ClaudeCodeTemplateDriftReport,
   type ClaudeCodeWireCapture,
 } from "./template-drift";
+export { scrubSystemPrompt } from "./scrub-template";
 export {
   refreshClaudeCodeAccountMetadata,
   refreshClaudeCodeOAuthToken,
@@ -1416,7 +1417,7 @@ function getClaudeCodeBetasForModel(
   if (normalizedModel.includes("haiku")) {
     drop(MID_CONVERSATION_SYSTEM_BETA);
     drop(EFFORT_BETA);
-  } else if (normalizedModel.includes("sonnet")) {
+  } else if (normalizedModel.includes("sonnet") && !normalizedModel.includes("sonnet-5")) {
     drop(MID_CONVERSATION_SYSTEM_BETA);
   }
 
