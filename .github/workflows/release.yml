@@ -287,20 +287,17 @@ jobs:
             exit 1
           fi
 
-          gh pr merge "$pr" \
-            --repo "${{ github.repository }}" \
-            --squash \
-            --match-head-commit "$classified_oid"
-          state=$(gh pr view "$pr" --repo "${{ github.repository }}" --json state --jq '.state')
-          if [ "$state" != "MERGED" ]; then
+          merge_result=$(gh api \
+            --method PUT \
+            "repos/${GITHUB_REPOSITORY}/pulls/${pr}/merge" \
+            -f merge_method=squash \
+            -f sha="$classified_oid")
+          if [ "$(jq -r '.merged' <<< "$merge_result")" != "true" ]; then
             echo "failure_reason=release PR #$pr did not reach merged state" >> "$GITHUB_OUTPUT"
             echo "::error::Release PR #$pr did not reach MERGED state."
             exit 1
           fi
-          release_merge_oid=$(gh pr view "$pr" \
-            --repo "${{ github.repository }}" \
-            --json mergeCommit \
-            --jq '.mergeCommit.oid // empty')
+          release_merge_oid=$(jq -r '.sha // empty' <<< "$merge_result")
           if [ -z "$release_merge_oid" ]; then
             echo "failure_reason=release PR #$pr has no merge commit" >> "$GITHUB_OUTPUT"
             echo "::error::Merged release PR #$pr has no merge commit."

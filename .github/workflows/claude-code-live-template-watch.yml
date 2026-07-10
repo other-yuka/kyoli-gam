@@ -401,15 +401,14 @@ jobs:
             --watch \
             --interval 10
 
-          current_pr=$(gh pr view "$PR_URL" \
-            --repo "${{ github.repository }}" \
-            --json headRefOid,baseRefOid)
-          current_oid=$(jq -r '.headRefOid' <<< "$current_pr")
+          pr_number=${PR_URL##*/}
+          current_pr=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${pr_number}")
+          current_oid=$(jq -r '.head.sha' <<< "$current_pr")
           if [ "$current_oid" != "$EXPECTED_HEAD_OID" ]; then
             echo "::error::Update PR head changed after validation ($EXPECTED_HEAD_OID -> $current_oid)."
             exit 1
           fi
-          current_base_oid=$(jq -r '.baseRefOid' <<< "$current_pr")
+          current_base_oid=$(jq -r '.base.sha' <<< "$current_pr")
           latest_main_oid=$(gh api \
             "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" \
             --jq '.object.sha')
@@ -419,18 +418,19 @@ jobs:
             exit 0
           fi
 
-          state=$(gh pr view "$PR_URL" --repo "${{ github.repository }}" --json state --jq '.state')
-          if [ "$state" != "MERGED" ]; then
-            gh pr merge "$PR_URL" \
-              --repo "${{ github.repository }}" \
-              --squash \
-              --delete-branch \
-              --match-head-commit "$EXPECTED_HEAD_OID"
-          fi
-          state=$(gh pr view "$PR_URL" --repo "${{ github.repository }}" --json state --jq '.state')
-          if [ "$state" != "MERGED" ]; then
-            echo "::error::Update PR did not reach MERGED state: $PR_URL"
-            exit 1
+          if [ "$(jq -r '.merged' <<< "$current_pr")" != "true" ]; then
+            gh api \
+              --method PUT \
+              "repos/${GITHUB_REPOSITORY}/pulls/${pr_number}/merge" \
+              -f merge_method=squash \
+              -f sha="$EXPECTED_HEAD_OID" \
+              --jq '.merged' \
+              | grep -qx true
+            head_ref=$(jq -r '.head.ref' <<< "$current_pr")
+            gh api \
+              --method DELETE \
+              "repos/${GITHUB_REPOSITORY}/git/refs/heads/${head_ref}" \
+              >/dev/null 2>&1 || true
           fi
           echo "Merged trusted Class ${{ steps.prepare.outputs.class_name }} update at $EXPECTED_HEAD_OID."
 
