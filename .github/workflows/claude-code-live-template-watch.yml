@@ -39,7 +39,6 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-          ref: main
 
       - uses: pnpm/action-setup@v6
         with:
