@@ -51,7 +51,7 @@ jobs:
       - name: Cache version sentinel
         id: version_cache
         if: steps.probe.outputs.version != 'unknown-fail-open'
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: .claude-code-version-sentinel
           key: claude-code-drift-checked-${{ steps.probe.outputs.version }}
