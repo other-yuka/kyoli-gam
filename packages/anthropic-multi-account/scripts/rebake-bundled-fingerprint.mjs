@@ -1,6 +1,5 @@
 import { writeFile } from "node:fs/promises";
 import {
-  captureLiveTemplateAsync,
   matchesBundledClaudeCodeFingerprint,
   prepareBundledTemplate,
 } from "../dist/fingerprint-capture.js";
@@ -12,6 +11,7 @@ import {
   bundledTemplatePath,
   loadBundledFingerprint,
 } from "./_bundled-fingerprint.mjs";
+import { captureLiveFingerprintSetAsync } from "./capture-live-fingerprint-set.mjs";
 
 const captureTimeoutMs = Number(process.env.FINGERPRINT_CAPTURE_TIMEOUT_MS ?? "10000");
 const INTERACTIVE_ONLY_TOOL_NAMES = new Set([
@@ -78,18 +78,6 @@ function preserveInteractiveOnlyTools(template, pinnedTemplate) {
   };
 }
 
-function preserveBundledFablePrompt(template, pinnedTemplate) {
-  const fablePrompt = pinnedTemplate.system_prompt_fable;
-  if (template.system_prompt_fable || typeof fablePrompt !== "string" || fablePrompt.length === 0) {
-    return template;
-  }
-
-  return {
-    ...template,
-    system_prompt_fable: fablePrompt,
-  };
-}
-
 async function main() {
   if (process.env.ALLOW_FINGERPRINT_OVERWRITE !== "1") {
     throw new Error(
@@ -97,16 +85,13 @@ async function main() {
     );
   }
 
-  const live = await captureLiveTemplateAsync(captureTimeoutMs);
+  const live = await captureLiveFingerprintSetAsync(captureTimeoutMs);
   if (!live) {
     throw new Error("live fingerprint capture failed; verify Claude Code is installed and authenticated");
   }
 
   const pinnedBundled = await loadBundledFingerprint();
-  const hydrated = preserveBundledFablePrompt(
-    preserveInteractiveOnlyTools(live, pinnedBundled),
-    pinnedBundled,
-  );
+  const hydrated = preserveInteractiveOnlyTools(live, pinnedBundled);
   const bundled = prepareBundledTemplate(scrubTemplate(hydrated, { dropMcpTools: true }));
   assertClaudeCodeFingerprint(bundled, pinnedBundled);
   const residualHits = findUserPathHits(JSON.stringify(bundled));

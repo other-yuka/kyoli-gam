@@ -38,7 +38,7 @@ function buildClaudeCodeDriftIssueBody({
 
 ### How kyoli handles this
 
-Kyoli keeps Claude Code compatibility explicit for both Server Mode and OpenCode Plugin Mode. Compat-range-only drift can be auto-drafted as a PR. OAuth URL/client drift, scanner drift, and runner failures stay manual because they can affect real-account traffic. The static scanner does not prove template or wire fidelity; use the local doctors for that.
+Kyoli keeps Claude Code compatibility explicit for both Server Mode and OpenCode Plugin Mode. Compat-range-only drift is sent to exact-version live classification and does not open this issue. This alert is reserved for OAuth URL/client drift, scanner drift, or an unsafe static result because those can affect real-account traffic.
 
 ### Fix checklist
 

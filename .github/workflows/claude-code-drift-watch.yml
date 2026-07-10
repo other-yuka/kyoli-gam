@@ -16,9 +16,9 @@ on:
           - "true"
 
 permissions:
-  contents: write
+  actions: write
+  contents: read
   issues: write
-  pull-requests: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -31,6 +31,10 @@ jobs:
       version: ${{ steps.probe.outputs.version }}
       should_run: ${{ steps.gate.outputs.should_run }}
     steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
       - name: Fetch latest Claude Code version
         id: probe
         run: |
@@ -48,21 +52,13 @@ jobs:
             echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Cache version sentinel
-        id: version_cache
-        if: steps.probe.outputs.version != 'unknown-fail-open'
-        uses: actions/cache@v5
-        with:
-          path: .claude-code-version-sentinel
-          key: claude-code-drift-checked-${{ steps.probe.outputs.version }}
-
       - name: Gate drift check
         id: gate
         run: |
           FORCED='${{ github.event_name == 'workflow_dispatch' && inputs.force == 'true' }}'
           VERSION='${{ steps.probe.outputs.version }}'
-          CACHE_HIT='${{ steps.version_cache.outputs.cache-hit }}'
           EVENT='${{ github.event.schedule }}'
+          BUNDLED=$(node -p "require('./packages/providers/claude-code/src/fingerprint/data.json').cc_version")
 
           if [ "$FORCED" = "true" ]; then
             echo "Manual force=true; running."
@@ -71,15 +67,13 @@ jobs:
             echo "Version probe failed; running."
             echo "should_run=true" >> "$GITHUB_OUTPUT"
           elif [ "$EVENT" = "0 2 * * *" ]; then
-            echo "Daily fallback cron; running even if the cache was hit."
-            touch .claude-code-version-sentinel
+            echo "Daily static OAuth/scanner fallback; running even when latest matches the bundle."
             echo "should_run=true" >> "$GITHUB_OUTPUT"
-          elif [ "$CACHE_HIT" = "true" ]; then
-            echo "Claude Code v$VERSION was already checked. Skipping."
+          elif [ "$VERSION" = "$BUNDLED" ]; then
+            echo "Claude Code v$VERSION already matches bundled fingerprint v$BUNDLED. Skipping hourly scan."
             echo "should_run=false" >> "$GITHUB_OUTPUT"
           else
-            echo "Claude Code v$VERSION is new. Running."
-            touch .claude-code-version-sentinel
+            echo "Claude Code target v$VERSION differs from bundled v$BUNDLED. Running."
             echo "should_run=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -88,14 +82,13 @@ jobs:
     if: needs.version_check.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
       issues: write
-      pull-requests: write
     outputs:
       exit_code: ${{ steps.drift.outputs.exit_code }}
       cc_version: ${{ steps.version.outputs.cc_version }}
       should_open_issue: ${{ steps.classify.outputs.should_open_issue }}
-      should_create_pr: ${{ steps.classify.outputs.should_create_pr }}
+      should_dispatch_live: ${{ steps.classify.outputs.should_dispatch_live }}
     steps:
       - uses: actions/checkout@v6
 
@@ -116,6 +109,8 @@ jobs:
 
       - name: Run static Claude Code drift check
         id: drift
+        env:
+          CLAUDE_CODE_TARGET_VERSION: ${{ needs.version_check.outputs.version }}
         run: |
           set +e
           node packages/anthropic-multi-account/scripts/check-claude-code-static-oauth-drift.mjs \
@@ -137,10 +132,10 @@ jobs:
         if: steps.drift.outputs.exit_code != '0'
         id: classify
         run: |
-          node packages/anthropic-multi-account/scripts/auto-draft-static-oauth-drift-fix.mjs \
+          node packages/anthropic-multi-account/scripts/plan-static-claude-code-drift.mjs \
             drift-report.json \
-            auto-draft-result.json
-          cat auto-draft-result.json
+            drift-plan.json
+          cat drift-plan.json
 
       - name: Upload drift artifacts
         if: always()
@@ -150,120 +145,71 @@ jobs:
           path: |
             drift-report.json
             drift-log.txt
-            auto-draft-result.json
+            drift-plan.json
           if-no-files-found: ignore
           retention-days: 30
 
-  auto_draft_pr:
+  dispatch_live_validation:
     needs: drift
-    if: needs.drift.outputs.should_create_pr == 'true'
+    if: needs.drift.outputs.should_dispatch_live == 'true'
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-      pull-requests: write
+      actions: write
+      contents: read
+      issues: write
     steps:
-      - name: Require drift bot PAT
-        env:
-          KYOLI_DRIFT_BOT_PAT: ${{ secrets.KYOLI_DRIFT_BOT_PAT }}
-        run: |
-          if [ -z "$KYOLI_DRIFT_BOT_PAT" ]; then
-            echo "::error::KYOLI_DRIFT_BOT_PAT is required to open drift PRs because GITHUB_TOKEN-created PRs do not reliably trigger required checks."
-            exit 1
-          fi
-
-      - uses: actions/checkout@v6
-        with:
-          # Use a PAT so bot-created PRs trigger normal pull_request checks.
-          token: ${{ secrets.KYOLI_DRIFT_BOT_PAT }}
-
-      - uses: actions/download-artifact@v8
-        with:
-          name: claude-code-drift-report
-
-      - uses: pnpm/action-setup@v6
-        with:
-          run_install: false
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: "22"
-          cache: pnpm
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Apply auto-draftable drift fix
-        id: auto_draft
-        run: |
-          node packages/anthropic-multi-account/scripts/auto-draft-static-oauth-drift-fix.mjs \
-            drift-report.json \
-            auto-draft-result.json \
-            --apply
-          cat auto-draft-result.json
-
-      - name: Ensure drift label exists
+      - name: Dispatch exact-version live classification
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh label create claude-code-drift \
-            --color FBCA04 \
-            --description "Claude Code package drift requires kyoli compatibility review" \
-            2>/dev/null || true
-
-      - name: Open PR for manual review
-        env:
-          GH_TOKEN: ${{ secrets.KYOLI_DRIFT_BOT_PAT }}
-          BRANCH: ${{ steps.auto_draft.outputs.branch_name }}
-          COMMIT_MESSAGE: ${{ steps.auto_draft.outputs.commit_message }}
-          PR_TITLE: ${{ steps.auto_draft.outputs.pr_title }}
-          PR_BODY_PATH: ${{ steps.auto_draft.outputs.pr_body_path }}
-          CHANGED_FILES: ${{ steps.auto_draft.outputs.changed_files }}
+          TARGET_VERSION: ${{ needs.drift.outputs.cc_version }}
         run: |
           set -euo pipefail
-
-          existing_pr=$(gh pr list \
+          if ! [[ "$TARGET_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Refusing to dispatch live validation without a concrete target version: $TARGET_VERSION"
+            exit 1
+          fi
+          if ! dispatch_error=$(gh workflow run claude-code-live-template-watch.yml \
             --repo "${{ github.repository }}" \
-            --state open \
-            --limit 100 \
-            --json number,headRefName \
-            --jq 'map(select(.headRefName == env.BRANCH or (.headRefName | startswith(env.BRANCH + "-")))) | .[0].number // ""')
-          if [ -n "$existing_pr" ]; then
-            echo "PR #$existing_pr already exists for $BRANCH or its run-scoped fallback; leaving it for manual review."
-            exit 0
+            --ref main \
+            -f target_version="$TARGET_VERSION" \
+            -f source_run_url="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            2>&1); then
+            gh label create claude-code-automation-failure \
+              --repo "${{ github.repository }}" \
+              --color B60205 \
+              --description "Claude Code automatic update pipeline needs intervention" \
+              2>/dev/null || true
+            title="Claude Code automation failed: v${TARGET_VERSION}"
+            body_file=$(mktemp)
+            {
+              echo "## Claude Code live validation dispatch failed"
+              echo ""
+              echo "Static drift classification required exact-version live validation, but GitHub did not accept the dispatch."
+              echo ""
+              echo "- Target: \`${TARGET_VERSION}\`"
+              echo "- Run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+              echo "- Error: \`${dispatch_error}\`"
+            } > "$body_file"
+            existing=$(gh issue list \
+              --repo "${{ github.repository }}" \
+              --label claude-code-automation-failure \
+              --state open \
+              --search "in:title \"${title}\"" \
+              --json number \
+              --jq '.[0].number // ""')
+            if [ -n "$existing" ]; then
+              gh issue edit "$existing" --repo "${{ github.repository }}" --body-file "$body_file"
+            else
+              gh issue create \
+                --repo "${{ github.repository }}" \
+                --title "$title" \
+                --label claude-code-automation-failure \
+                --body-file "$body_file"
+            fi
+            echo "::error::Failed to dispatch exact-version live validation: $dispatch_error"
+            exit 1
           fi
-
-          branch_to_push="$BRANCH"
-          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
-            branch_to_push="${BRANCH}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}"
-            echo "::notice::Remote branch $BRANCH already exists without an open PR; using $branch_to_push instead of force-pushing."
-          fi
-
-          git config user.email "actions@github.com"
-          git config user.name "kyoli-drift-watch[bot]"
-          git checkout -B "$branch_to_push"
-
-          echo "$CHANGED_FILES" \
-            | node -pe "JSON.parse(require('fs').readFileSync(0,'utf8')).join('\n')" \
-            | xargs -I {} git add -- {}
-
-          if git diff --cached --quiet; then
-            echo "No staged changes after auto-draft application; skipping PR."
-            exit 0
-          fi
-
-          git commit -m "$COMMIT_MESSAGE"
-          git push origin "$branch_to_push"
-
-          pr_url=$(gh pr create \
-            --repo "${{ github.repository }}" \
-            --head "$branch_to_push" \
-            --base main \
-            --title "$PR_TITLE" \
-            --body-file "$PR_BODY_PATH" \
-            --label claude-code-drift)
-          echo "Opened $pr_url"
-          echo "Leaving Claude Code drift PR for human template/wire validation."
-
+          echo "Dispatched exact-version live classification for Claude Code v$TARGET_VERSION."
 
   manual_issue:
     needs: drift
@@ -294,6 +240,10 @@ jobs:
             --color FBCA04 \
             --description "Claude Code package drift requires kyoli compatibility review" \
             2>/dev/null || true
+          gh label create claude-code-static-drift \
+            --color D93F0B \
+            --description "Claude Code static OAuth or scanner drift requires manual review" \
+            2>/dev/null || true
 
       - name: Open or update manual drift issue
         env:
@@ -302,7 +252,7 @@ jobs:
           CC_VERSION="${{ needs.drift.outputs.cc_version }}"
           TITLE="Claude Code drift detected: v${CC_VERSION}"
           LEGACY_TITLE="Fingerprint drift detected: Claude Code v${CC_VERSION}"
-          EXISTING=$(gh issue list --label claude-code-drift --state open --search "in:title \"${TITLE}\"" --json number --jq '.[0].number')
+          EXISTING=$(gh issue list --label claude-code-static-drift --state open --search "in:title \"${TITLE}\"" --json number --jq '.[0].number')
           if [ -z "$EXISTING" ]; then
             EXISTING=$(gh issue list --label fingerprint-drift --state open --search "in:title \"${LEGACY_TITLE}\"" --json number --jq '.[0].number' 2>/dev/null || true)
           fi
@@ -311,12 +261,16 @@ jobs:
             gh issue create \
               --title "$TITLE" \
               --label claude-code-drift \
+              --label claude-code-static-drift \
               --body-file issue-body.md
           else
             # Keep one drift issue per Claude Code version. Updating the body preserves
             # the latest run link without adding a duplicate notification comment on
             # the daily fallback schedule.
-            gh issue edit "$EXISTING" --body-file issue-body.md
+            gh issue edit "$EXISTING" \
+              --add-label claude-code-drift \
+              --add-label claude-code-static-drift \
+              --body-file issue-body.md
           fi
 
   close_resolved_issues:
@@ -332,8 +286,13 @@ jobs:
       needs.drift.outputs.cc_version != 'unknown'
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       issues: write
     steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
       - name: Close resolved drift issues
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -343,11 +302,17 @@ jobs:
             echo "::notice::Skipping drift issue closure because no concrete Claude Code version was checked."
             exit 0
           fi
-          {
-            gh issue list --repo "${{ github.repository }}" --label claude-code-drift --state open --search "in:title \"v${CC_VERSION}\"" --json number --jq '.[].number'
-            gh issue list --repo "${{ github.repository }}" --label fingerprint-drift --state open --search "in:title \"v${CC_VERSION}\"" --json number --jq '.[].number' 2>/dev/null || true
-          } | sort -u > drift-issue-numbers.txt
-          COMMENT="Resolved: static Claude Code drift scan is clean for v${CC_VERSION}."
+          gh issue list \
+            --repo "${{ github.repository }}" \
+            --label claude-code-static-drift \
+            --state open \
+            --json number,title \
+            > static-drift-issues.json
+          node packages/anthropic-multi-account/scripts/select-superseded-claude-code-issues.mjs \
+            static-drift-issues.json \
+            "$CC_VERSION" \
+            > drift-issue-numbers.txt
+          COMMENT="Resolved: superseded by clean static Claude Code scan for v${CC_VERSION}."
           while IFS= read -r n; do
             if [ -z "$n" ]; then
               continue

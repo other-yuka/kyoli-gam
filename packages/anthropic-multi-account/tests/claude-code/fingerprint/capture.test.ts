@@ -203,9 +203,11 @@ describe("fingerprint-capture", () => {
   });
 
   test("captureLiveTemplateAsync runs the localhost capture flow and returns extracted template data", async () => {
+    let requestedModel: string | undefined;
     setFingerprintCaptureTestOverridesForTest({
       findClaudeBinary: () => "/mock/claude",
-      runClaudeCapture: async ({ baseUrl }) => {
+      runClaudeCapture: async ({ baseUrl, model }) => {
+        requestedModel = model;
         const response = await fetch(`${baseUrl}/v1/messages`, {
           method: "POST",
           headers: {
@@ -225,9 +227,10 @@ describe("fingerprint-capture", () => {
       },
     });
 
-    const template = await captureLiveTemplateAsync(3_000);
+    const template = await captureLiveTemplateAsync(3_000, { model: "fable" });
 
     expect(template).not.toBeNull();
+    expect(requestedModel).toBe("fable");
     expect(template?._source).toBe("live");
     expect(template?.tool_names).toEqual(["Read", "Bash"]);
   });

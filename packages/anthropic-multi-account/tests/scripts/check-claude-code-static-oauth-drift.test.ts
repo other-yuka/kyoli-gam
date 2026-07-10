@@ -27,6 +27,21 @@ describe("check-claude-code-static-oauth-drift contract", () => {
     ]);
   });
 
+  test("alerts instead of treating an npm rollback as clean", () => {
+    const items = buildStaticDriftItems({
+      ccVersion: "2.1.138",
+      scanned: PINNED_OAUTH,
+      maxTested: "2.1.139",
+    });
+
+    expect(items).toMatchObject([
+      {
+        category: "compat.rollback",
+        severity: "high",
+      },
+    ]);
+  });
+
   test("emits oauth drift categories for changed OAuth config", () => {
     const items = buildStaticDriftItems({
       ccVersion: "2.1.139",

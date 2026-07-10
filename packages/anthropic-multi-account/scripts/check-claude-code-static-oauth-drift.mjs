@@ -12,12 +12,17 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { compareClaudeCodeVersions } from "./claude-code-version-utils.mjs";
 
 const PINNED_OAUTH = {
   clientId: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
   authorizeUrl: "https://claude.ai/oauth/authorize",
   tokenUrl: "https://platform.claude.com/v1/oauth/token",
 };
+const REQUESTED_CC_VERSION = process.env.CLAUDE_CODE_TARGET_VERSION || "";
+const TARGET_CC_VERSION = /^\d+\.\d+\.\d+$/.test(REQUESTED_CC_VERSION)
+  ? REQUESTED_CC_VERSION
+  : "latest";
 const SUPPORTED_CC_RANGE = readSupportedCCRange();
 
 const CONFIG_SCAN_WINDOW_CHARS = 4096;
@@ -30,21 +35,7 @@ const AUTHORIZE_URL_PATTERN = /CLAUDE_AI_AUTHORIZE_URL\s*:\s*"(https?:\/\/[^\"]*
 const TOKEN_URL_PATTERN = /TOKEN_URL\s*:\s*"(https:\/\/[^\"]*\/oauth\/token[^\"]*)"/gi;
 const BASE_API_URL_PATTERN = /BASE_API_URL\s*:\s*"(https?:\/\/[^\"]+)"/gi;
 
-function compareVersions(left, right) {
-  const leftParts = left.split(".").map(Number);
-  const rightParts = right.split(".").map(Number);
-  const maxLength = Math.max(leftParts.length, rightParts.length);
-
-  for (let index = 0; index < maxLength; index += 1) {
-    const leftPart = leftParts[index] ?? 0;
-    const rightPart = rightParts[index] ?? 0;
-    if (leftPart !== rightPart) {
-      return leftPart - rightPart;
-    }
-  }
-
-  return 0;
-}
+const compareVersions = compareClaudeCodeVersions;
 
 function isValidUrl(value) {
   try {
@@ -445,12 +436,21 @@ function buildStaticDriftItems({
     addOAuthDriftItems(items, scanned, pinned);
   }
 
-  if (ccVersion && compareVersions(ccVersion, maxTested) > 0) {
-    items.push(buildReportItem(
-      "compat.range",
-      "medium",
-      `CC v${ccVersion} is newer than maxTested v${maxTested}.`,
-    ));
+  if (ccVersion) {
+    const comparison = compareVersions(ccVersion, maxTested);
+    if (comparison > 0) {
+      items.push(buildReportItem(
+        "compat.range",
+        "medium",
+        `CC v${ccVersion} is newer than maxTested v${maxTested}.`,
+      ));
+    } else if (comparison < 0) {
+      items.push(buildReportItem(
+        "compat.rollback",
+        "high",
+        `npm latest v${ccVersion} is older than bundled maxTested v${maxTested}; refusing automatic downgrade.`,
+      ));
+    }
   }
 
   return items;
@@ -466,12 +466,15 @@ function main() {
   let scanTarget = null;
 
   try {
-    const packageTarball = runPack("@anthropic-ai/claude-code@latest", scratchDir);
+    const packageTarball = runPack(`@anthropic-ai/claude-code@${TARGET_CC_VERSION}`, scratchDir);
     extractTarball(packageTarball, scratchDir);
 
     const packageDir = join(scratchDir, "package");
     const packageJson = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8"));
     ccVersion = typeof packageJson.version === "string" ? packageJson.version : null;
+    if (TARGET_CC_VERSION !== "latest" && ccVersion !== TARGET_CC_VERSION) {
+      throw new Error(`npm pack resolved Claude Code ${ccVersion ?? "unknown"} instead of target ${TARGET_CC_VERSION}`);
+    }
 
     let cliPath = null;
     const wrapperTarget = findWrapperScanTarget(packageDir);
