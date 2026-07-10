@@ -1,5 +1,14 @@
 # opencode-anthropic-multi-account
 
+## 0.2.85
+
+### Patch Changes
+
+- [#196](https://github.com/other-yuka/kyoli-gam/pull/196) [`5d30faf`](https://github.com/other-yuka/kyoli-gam/commit/5d30faf5b20741280520bcffa89b8cb42e20449c) Thanks [@other-yuka](https://github.com/other-yuka)! - Rebake the Claude Code fingerprint for `@anthropic-ai/claude-code@2.1.206`, preserve the Sonnet 5 mid-conversation beta, share prompt scrubbing across drift doctors, and keep generated doctor commands runnable.
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.85
+
 ## 0.2.84
 
 ### Patch Changes
