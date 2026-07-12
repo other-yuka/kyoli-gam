@@ -67,11 +67,27 @@ export interface GatewayOptions {
   stickySessions?: StickySessionRegistry;
   requestLogs?: RequestLogStore;
   adminToken?: string;
+  runnerToken?: string;
+  runnerCredentialRefresh?: (refreshToken: string) => Promise<RunnerCredentialRefreshResult>;
   idleTimeoutSeconds?: number;
   maxConcurrentRequests?: number;
   maxBodyBytes?: number;
   bodyReadTimeoutMs?: number;
   dashboardAssetsDir?: string;
+}
+
+interface RunnerCredentialRefreshResult {
+  accessToken: string;
+  refreshToken?: string;
+  expiresAt: number;
+  accountId?: string;
+  email?: string;
+}
+
+interface RunnerCredentialPayload {
+  accessToken: string;
+  expiresAt: number;
+  subscriptionType: string;
 }
 
 export interface Gateway {
@@ -109,6 +125,8 @@ const routeByPath = new Map<string, GatewayRoute>([
 
 const DEFAULT_MAX_BODY_BYTES = 64 * 1024 * 1024;
 const DEFAULT_BODY_READ_TIMEOUT_MS = 30_000;
+const RUNNER_CREDENTIAL_REFRESH_BUFFER_MS = 10 * 60 * 1000;
+const runnerCredentialRefreshInFlight = new Map<string, Promise<RunnerCredentialPayload>>();
 const PROMPT_CACHE_STICKY_TTL_SECONDS = 30 * 60;
 const OLD_ROUTE_PIN_TTL_SECONDS = 24 * 60 * 60;
 
@@ -133,6 +151,15 @@ export function createGateway(options: GatewayOptions): Gateway {
 
       const dashboardResponse = await handleDashboardRequest(request, url, options.dashboardAssetsDir);
       if (dashboardResponse) return dashboardResponse;
+
+      const runnerCredentialResponse = await handleRunnerCredentialRequest(
+        request,
+        url,
+        accounts,
+        options.runnerToken,
+        options.runnerCredentialRefresh,
+      );
+      if (runnerCredentialResponse) return runnerCredentialResponse;
 
       const adminResponse = await handleAdminRequest(
         request,
@@ -316,6 +343,126 @@ export function createGateway(options: GatewayOptions): Gateway {
         releaseAdmission();
       }
     },
+  };
+}
+
+async function handleRunnerCredentialRequest(
+  request: Request,
+  url: URL,
+  accounts: AccountStore,
+  runnerToken: string | undefined,
+  refreshCredential: GatewayOptions["runnerCredentialRefresh"],
+): Promise<Response | undefined> {
+  if (url.pathname !== "/internal/runner/claude-credential") return undefined;
+  if (request.method !== "POST") {
+    return jsonResponse(
+      { error: { type: "method_not_allowed", message: `${request.method} is not supported for ${url.pathname}.` } },
+      { status: 405 },
+    );
+  }
+  if (!runnerToken || request.headers.get("authorization") !== `Bearer ${runnerToken}`) {
+    return jsonResponse(
+      { error: { type: "unauthorized", message: "Runner credential API requires a valid bearer token." } },
+      { status: 401, headers: { "www-authenticate": "Bearer" } },
+    );
+  }
+  if (!refreshCredential) {
+    return jsonResponse(
+      { error: { type: "credential_refresh_unavailable", message: "Runner credential refresh is not configured." } },
+      { status: 503 },
+    );
+  }
+
+  const candidates = (await accounts.listByProvider("claude-code"))
+    .filter((account) =>
+      account.kind === "oauth"
+      && account.enabled
+      && !account.reauthRequiredReason,
+    )
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  const account = candidates[0];
+  if (!account) {
+    return jsonResponse(
+      { error: { type: "credential_unavailable", message: "No ready Claude Code OAuth account is available." } },
+      { status: 503 },
+    );
+  }
+
+  const currentAccessToken = readString(account.credentials.accessToken);
+  const currentExpiresAt = readTimestampMs(account.credentials.expiresAt);
+  if (
+    currentAccessToken
+    && currentExpiresAt
+    && currentExpiresAt > Date.now() + RUNNER_CREDENTIAL_REFRESH_BUFFER_MS
+  ) {
+    return runnerCredentialResponse(currentAccessToken, currentExpiresAt, account);
+  }
+
+  const refreshToken = readString(account.credentials.refreshToken);
+  if (!refreshToken) {
+    return jsonResponse(
+      { error: { type: "credential_unavailable", message: "Claude Code OAuth account requires reauthentication." } },
+      { status: 503 },
+    );
+  }
+  try {
+    let refresh = runnerCredentialRefreshInFlight.get(account.id);
+    if (!refresh) {
+      refresh = (async () => {
+        const refreshed = await refreshCredential(refreshToken);
+        const updated = await accounts.update(account.id, {
+          credentials: {
+            ...account.credentials,
+            accessToken: refreshed.accessToken,
+            refreshToken: refreshed.refreshToken ?? refreshToken,
+            expiresAt: refreshed.expiresAt,
+            accountId: refreshed.accountId ?? account.credentials.accountId,
+          },
+          metadata: {
+            ...account.metadata,
+            email: refreshed.email ?? account.metadata.email,
+            accountId: refreshed.accountId ?? account.metadata.accountId,
+          },
+        });
+        if (!updated) throw new Error("Claude Code OAuth account disappeared during refresh.");
+        return runnerCredentialPayload(refreshed.accessToken, refreshed.expiresAt, updated);
+      })().finally(() => {
+        runnerCredentialRefreshInFlight.delete(account.id);
+      });
+      runnerCredentialRefreshInFlight.set(account.id, refresh);
+    }
+
+    return jsonResponse(await refresh);
+  } catch (error) {
+    return jsonResponse(
+      {
+        error: {
+          type: "credential_refresh_failed",
+          message: error instanceof Error ? error.message : "Claude Code OAuth refresh failed.",
+        },
+      },
+      { status: 502 },
+    );
+  }
+}
+
+function runnerCredentialResponse(
+  accessToken: string,
+  expiresAt: number,
+  account: AccountRecord,
+): Response {
+  return jsonResponse(runnerCredentialPayload(accessToken, expiresAt, account));
+}
+
+function runnerCredentialPayload(
+  accessToken: string,
+  expiresAt: number,
+  account: AccountRecord,
+): RunnerCredentialPayload {
+  return {
+    accessToken,
+    expiresAt,
+    subscriptionType: readString(account.metadata.planTier) ?? "",
   };
 }
 

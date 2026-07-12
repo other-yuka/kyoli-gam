@@ -158,6 +158,8 @@ if (command === "serve") {
     requestLogs: requestLogStore,
     providers,
     adminToken: cliConfig.adminToken,
+    runnerToken: process.env.KYOLI_RUNNER_TOKEN,
+    runnerCredentialRefresh: refreshClaudeCodeOAuthToken,
     maxConcurrentRequests: cliConfig.maxConcurrentRequests,
     maxBodyBytes: cliConfig.maxBodyBytes,
   });
