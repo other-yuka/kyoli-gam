@@ -107,24 +107,35 @@ export async function startClaudeCodeOAuthLogin(): Promise<{
   };
 }
 
-export async function refreshClaudeCodeOAuthToken(
+const refreshInFlightByToken = new Map<string, Promise<ClaudeCodeTokenRefreshResult>>();
+
+export function refreshClaudeCodeOAuthToken(
   refreshToken: string,
   options: TokenRequestOptions = {},
 ): Promise<ClaudeCodeTokenRefreshResult> {
-  const oauthConfig = options.config ?? await detectClaudeCodeOAuthConfig();
-  const startedAt = Date.now();
-  const payload = await postTokenEndpoint(
-    oauthConfig,
-    "application/x-www-form-urlencoded",
-    new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: refreshToken,
-      client_id: oauthConfig.clientId,
-    }).toString(),
-    options.fetch,
-  );
+  const existing = refreshInFlightByToken.get(refreshToken);
+  if (existing) return existing;
 
-  return normalizeTokenResponse(payload, startedAt);
+  const refresh = (async () => {
+    const oauthConfig = options.config ?? await detectClaudeCodeOAuthConfig();
+    const startedAt = Date.now();
+    const payload = await postTokenEndpoint(
+      oauthConfig,
+      "application/x-www-form-urlencoded",
+      new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+        client_id: oauthConfig.clientId,
+      }).toString(),
+      options.fetch,
+    );
+
+    return normalizeTokenResponse(payload, startedAt);
+  })().finally(() => {
+    refreshInFlightByToken.delete(refreshToken);
+  });
+  refreshInFlightByToken.set(refreshToken, refresh);
+  return refresh;
 }
 
 export async function refreshClaudeCodeAccountMetadata(

@@ -2050,6 +2050,37 @@ await new Promise((resolve) => socket.on("close", resolve));
     expect(requestBody).toContain("grant_type=refresh_token");
     expect(requestBody).toContain("refresh_token=refresh-old");
   });
+
+  it("deduplicates concurrent refreshes for the same rotating token", async () => {
+    let requests = 0;
+    const options = {
+      config: {
+        clientId: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+        authorizeUrl: "https://claude.ai/oauth/authorize",
+        tokenUrl: "https://token.example/oauth/token",
+        scopes: "user:profile user:inference user:sessions:claude_code",
+        baseApiUrl: "https://api.anthropic.com",
+        source: "fallback" as const,
+      },
+      fetch: async () => {
+        requests += 1;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        return Response.json({
+          access_token: "fresh-access",
+          refresh_token: "refresh-new",
+          expires_in: 3600,
+        });
+      },
+    };
+
+    const [first, second] = await Promise.all([
+      refreshClaudeCodeOAuthToken("shared-refresh", options),
+      refreshClaudeCodeOAuthToken("shared-refresh", options),
+    ]);
+
+    expect(requests).toBe(1);
+    expect(first).toEqual(second);
+  });
 });
 
 function createMessagesContext(sessionKey: string, model = "claude-code/claude-sonnet-4-5") {

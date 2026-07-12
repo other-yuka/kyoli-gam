@@ -3,6 +3,107 @@ import { MemoryAccountStore, MemoryRequestLogStore, StickyAccountPool } from "@k
 import { createGateway } from "../src";
 
 describe("admin accounts API", () => {
+  it("refreshes and returns only a runner-safe Claude credential", async () => {
+    const accounts = new MemoryAccountStore();
+    const account = await accounts.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: {
+        accessToken: "expired-access",
+        refreshToken: "refresh-token",
+        expiresAt: Date.now() - 60_000,
+      },
+    });
+    let refreshCalls = 0;
+    const gateway = createGateway({
+      accounts,
+      providers: [],
+      runnerToken: "runner-secret",
+      async runnerCredentialRefresh(refreshToken) {
+        refreshCalls += 1;
+        expect(refreshToken).toBe("refresh-token");
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        return {
+          accessToken: "fresh-access",
+          refreshToken: "rotated-refresh",
+          expiresAt: Date.now() + 60 * 60 * 1000,
+        };
+      },
+    });
+
+    const unauthorized = await gateway.fetch(
+      new Request("http://127.0.0.1:2021/internal/runner/claude-credential", {
+        method: "POST",
+      }),
+    );
+    expect(unauthorized.status).toBe(401);
+
+    const runnerRequest = () => new Request(
+      "http://127.0.0.1:2021/internal/runner/claude-credential",
+      {
+        method: "POST",
+        headers: { authorization: "Bearer runner-secret" },
+      },
+    );
+    const [response, concurrentResponse] = await Promise.all([
+      gateway.fetch(runnerRequest()),
+      gateway.fetch(runnerRequest()),
+    ]);
+    const [body, concurrentBody] = await Promise.all([
+      response.json() as Promise<Record<string, unknown>>,
+      concurrentResponse.json() as Promise<Record<string, unknown>>,
+    ]);
+    const stored = await accounts.get(account.id);
+
+    expect(response.status).toBe(200);
+    expect(concurrentResponse.status).toBe(200);
+    expect(refreshCalls).toBe(1);
+    expect(concurrentBody).toEqual(body);
+    expect(body).toMatchObject({
+      accessToken: "fresh-access",
+      expiresAt: expect.any(Number),
+    });
+    expect(body.refreshToken).toBeUndefined();
+    expect(stored?.credentials).toMatchObject({
+      accessToken: "fresh-access",
+      refreshToken: "rotated-refresh",
+    });
+  });
+
+  it("reuses a runner credential that is not near expiry", async () => {
+    const accounts = new MemoryAccountStore();
+    const expiresAt = Date.now() + 60 * 60 * 1000;
+    await accounts.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: {
+        accessToken: "current-access",
+        expiresAt,
+      },
+    });
+    const gateway = createGateway({
+      accounts,
+      providers: [],
+      runnerToken: "runner-secret",
+      async runnerCredentialRefresh() {
+        throw new Error("refresh should not run");
+      },
+    });
+
+    const response = await gateway.fetch(
+      new Request("http://127.0.0.1:2021/internal/runner/claude-credential", {
+        method: "POST",
+        headers: { authorization: "Bearer runner-secret" },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      accessToken: "current-access",
+      expiresAt,
+    });
+  });
+
   it("redeems one Codex reset credit and refreshes cached usage", async () => {
     const accounts = new MemoryAccountStore();
     const account = await accounts.create({
