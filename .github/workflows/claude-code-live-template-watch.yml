@@ -208,6 +208,7 @@ jobs:
         run: |
           set -euo pipefail
           class_name='${{ steps.check.outputs.class_name }}'
+          capture_path=live-template-capture.json
           if [ "$class_name" = "B" ]; then
             pnpm --dir packages/anthropic-multi-account run bake:fingerprint
 
@@ -220,12 +221,13 @@ jobs:
               echo "::error::Post-rebake live fingerprint is not clean."
               exit 1
             fi
+            capture_path=post-rebake-capture.json
           fi
 
           node packages/anthropic-multi-account/scripts/prepare-live-fingerprint-pr.mjs \
             "$class_name" \
             live-template-drift.json \
-            live-template-capture.json \
+            "$capture_path" \
             live-template-pr.json
           cat live-template-pr.json
 
