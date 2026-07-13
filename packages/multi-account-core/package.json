@@ -45,7 +45,7 @@
   "devDependencies": {
     "@opencode-ai/plugin": "^1.17.18",
     "@types/node": "^26.1.1",
-    "typescript": "^6.0.3"
+    "typescript": "^7.0.2"
   },
   "publishConfig": {
     "registry": "https://registry.npmjs.org",
