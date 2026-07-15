@@ -291,6 +291,51 @@ describe("gateway routing", () => {
     expect(seenRoute).toBe("/backend-api/codex/responses");
   });
 
+  it.each([
+    {
+      path: "/backend-api/codex/images/generations",
+      route: "/v1/images/generations" as GatewayRoute,
+      body: { model: "gpt-image-2", prompt: "a tiny icon" },
+    },
+    {
+      path: "/backend-api/codex/images/edits",
+      route: "/v1/images/edits" as GatewayRoute,
+      body: {
+        model: "gpt-image-2",
+        prompt: "add a red hat",
+        images: [{ image_url: "data:image/png;base64,aGVsbG8=" }],
+      },
+    },
+  ])("routes $path through the existing Images API", async ({ path, route, body }) => {
+    let seenContext: GatewayRequestContext | undefined;
+    const codex = fakeProvider({
+      id: "codex",
+      routes: [route],
+      models: [],
+      handle: async (context) => {
+        seenContext = context;
+        return Response.json({ provider: "codex" });
+      },
+    });
+    const gateway = createGateway({
+      accounts: new MemoryAccountStore(),
+      providers: [codex],
+    });
+
+    const response = await gateway.fetch(
+      new Request(`http://127.0.0.1:2021${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(seenContext?.route).toBe(route);
+    expect(new URL(seenContext?.request.url ?? "").pathname).toBe(path);
+    expect(seenContext?.body).toEqual(body);
+  });
+
   it("uses Codex session headers as sticky routing keys", async () => {
     let seenContext: GatewayRequestContext | undefined;
     const codex = fakeProvider({

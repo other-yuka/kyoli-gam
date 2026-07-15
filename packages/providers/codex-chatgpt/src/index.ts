@@ -49,6 +49,7 @@ const TOKEN_REFRESH_TIMEOUT_MS = 30_000;
 const CODEX_WEBSOCKET_REPLAY_MAX_MESSAGES = 64;
 const DEFAULT_COMPACT_REQUEST_BUDGET_MS = 180_000;
 const MAX_CODEX_FILE_SIZE_BYTES = 512 * 1024 * 1024;
+const MAX_CODEX_IMAGE_EDIT_INPUTS = 16;
 const MAX_CHAT_IMAGE_DATA_URL_BYTES = 8 * 1024 * 1024;
 const STREAM_TEXT_DECODER = new TextDecoder();
 const STREAM_TEXT_ENCODER = new TextEncoder();
@@ -1393,34 +1394,77 @@ async function buildImageResponsesRequest(
     };
   }
 
-  const form = await context.request.clone().formData().catch(() => undefined);
-  const prompt = form?.get("prompt");
-  const promptText = typeof prompt === "string" && prompt.length > 0
-    ? prompt
-    : context.route === "/v1/images/variations"
-    ? "Create a high-quality variation of the attached image."
-    : undefined;
-  if (!promptText) return validationError("prompt is required.");
-  const images = [...(form?.getAll("image") ?? []), ...(form?.getAll("image[]") ?? [])]
-    .filter((value): value is File => value instanceof File);
-  if (images.length === 0) return validationError("At least one image multipart part is required.");
-  const imageModel = typeof form?.get("model") === "string" ? String(form.get("model")) : "gpt-image-1.5";
-  const imageParts = await Promise.all(images.map(async (image) => ({
-    type: "input_image",
-    image_url: await blobToDataUrl(image),
-  })));
-  const mask = form?.get("mask");
-  if (mask instanceof File) {
-    imageParts.push({ type: "input_image", image_url: await blobToDataUrl(mask) });
+  let edit: {
+    prompt: string;
+    imageParts: Array<Record<string, unknown>>;
+    options: Record<string, unknown>;
+    model: string;
+    stream: boolean;
+  };
+
+  if (new URL(context.request.url).pathname === "/backend-api/codex/images/edits") {
+    const body = readRecord(context.body);
+    if (!body) return validationError("Image edit requests require a JSON object body.");
+    const prompt = readString(body.prompt);
+    if (!prompt) return validationError("prompt is required.");
+    const images = readArray(body.images);
+    if (images.length === 0 || images.length > MAX_CODEX_IMAGE_EDIT_INPUTS) {
+      return validationError(
+        `images must contain between 1 and ${MAX_CODEX_IMAGE_EDIT_INPUTS} image data URLs.`,
+      );
+    }
+    const imageParts: Array<Record<string, unknown>> = [];
+    for (const image of images) {
+      const imageUrl = readString(readRecord(image)?.image_url);
+      if (!imageUrl || !hasValidBase64ImageDataUrlSyntax(imageUrl)) {
+        return validationError("images[].image_url must be a base64 image data URL.");
+      }
+      imageParts.push({ type: "input_image", image_url: imageUrl });
+    }
+    edit = {
+      prompt,
+      imageParts,
+      options: body,
+      model: readString(body.model) ?? "gpt-image-1.5",
+      stream: body.stream === true,
+    };
+  } else {
+    const form = await context.request.clone().formData().catch(() => undefined);
+    const prompt = form?.get("prompt");
+    const promptText = typeof prompt === "string" && prompt.length > 0
+      ? prompt
+      : context.route === "/v1/images/variations"
+      ? "Create a high-quality variation of the attached image."
+      : undefined;
+    if (!promptText) return validationError("prompt is required.");
+    const images = [...(form?.getAll("image") ?? []), ...(form?.getAll("image[]") ?? [])]
+      .filter((value): value is File => value instanceof File);
+    if (images.length === 0) return validationError("At least one image multipart part is required.");
+    const imageParts = await Promise.all(images.map(async (image) => ({
+      type: "input_image",
+      image_url: await blobToDataUrl(image),
+    })));
+    const mask = form?.get("mask");
+    if (mask instanceof File) {
+      imageParts.push({ type: "input_image", image_url: await blobToDataUrl(mask) });
+    }
+    edit = {
+      prompt: promptText,
+      imageParts,
+      options: Object.fromEntries(form?.entries() ?? []),
+      model: typeof form?.get("model") === "string" ? String(form.get("model")) : "gpt-image-1.5",
+      stream: form?.get("stream") === "true",
+    };
   }
+
   return {
     ok: true,
     value: {
-    model: DEFAULT_IMAGE_HOST_MODEL,
+      model: DEFAULT_IMAGE_HOST_MODEL,
       instructions:
         "You are an image editor. You MUST call the image_generation tool exactly once and return only that tool call.",
-      input: [{ role: "user", content: [{ type: "input_text", text: promptText }, ...imageParts] }],
-      tools: [buildImageGenerationTool(Object.fromEntries(form?.entries() ?? []), imageModel, form?.get("stream") === "true", true)],
+      input: [{ role: "user", content: [{ type: "input_text", text: edit.prompt }, ...edit.imageParts] }],
+      tools: [buildImageGenerationTool(edit.options, edit.model, edit.stream, true)],
       tool_choice: { type: "image_generation" },
       stream: true,
       store: false,
@@ -1451,6 +1495,13 @@ function buildImageGenerationTool(
 async function blobToDataUrl(blob: Blob): Promise<string> {
   const bytes = Buffer.from(await blob.arrayBuffer());
   return `data:${blob.type || "image/png"};base64,${bytes.toString("base64")}`;
+}
+
+function hasValidBase64ImageDataUrlSyntax(value: string): boolean {
+  const match = /^data:image\/[^;]+;base64,(.+)$/s.exec(value);
+  if (!match) return false;
+  const encoded = match[1];
+  return encoded.length % 4 === 0 && /^[A-Za-z0-9+/]+={0,2}$/.test(encoded);
 }
 
 function convertResponsesPayloadToImageResponse(payload: Record<string, unknown>): Record<string, unknown> {

@@ -116,6 +116,8 @@ const routeByPath = new Map<string, GatewayRoute>([
   ["/v1/messages", "/v1/messages"],
   ["/v1/messages/count_tokens", "/v1/messages/count_tokens"],
   ["/backend-api/codex/models", "/backend-api/codex/models"],
+  ["/backend-api/codex/images/edits", "/v1/images/edits"],
+  ["/backend-api/codex/images/generations", "/v1/images/generations"],
   ["/backend-api/codex/responses", "/backend-api/codex/responses"],
   ["/backend-api/codex/responses/compact", "/backend-api/codex/responses/compact"],
   ["/backend-api/files", "/backend-api/files"],

@@ -9,6 +9,9 @@ import {
 } from "@kyoli-gam/core";
 import { createCodexChatGPTProvider, refreshCodexOAuthToken } from "../src";
 
+const TEST_PNG_DATA_URL =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
 class DelayedUpdateAccountPool extends StickyAccountPool {
   private updateCalls = 0;
   private releaseUpdates!: () => void;
@@ -2601,6 +2604,110 @@ describe("createCodexChatGPTProvider", () => {
     ]);
     expect(await response.json()).toMatchObject({
       data: [{ b64_json: "abc123" }],
+    });
+  });
+
+  it("translates Codex JSON image edits through Responses image_generation", async () => {
+    let upstreamBody: Record<string, unknown> = {};
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+      },
+    });
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      fetch: async (_input, init) => {
+        upstreamBody = JSON.parse(String(init?.body));
+        return new Response([
+          "event: response.completed",
+          'data: {"type":"response.completed","response":{"id":"resp_edit","status":"completed","output":[{"type":"image_generation_call","result":"edited123"}]}}',
+          "",
+        ].join("\n"), { status: 200 });
+      },
+    });
+    const body = {
+      model: "gpt-image-2",
+      prompt: "add a red hat",
+      images: [{ image_url: TEST_PNG_DATA_URL }],
+    };
+
+    const response = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/backend-api/codex/images/edits", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+      route: "/v1/images/edits",
+      sessionKey: "session-a",
+      body,
+      model: "gpt-image-2",
+    });
+
+    expect(response.status).toBe(200);
+    expect(upstreamBody).toMatchObject({
+      model: "gpt-5.5",
+      input: [{
+        role: "user",
+        content: [
+          { type: "input_text", text: "add a red hat" },
+          { type: "input_image", image_url: TEST_PNG_DATA_URL },
+        ],
+      }],
+      tools: [{ type: "image_generation", model: "gpt-image-2", action: "edit" }],
+      tool_choice: { type: "image_generation" },
+      store: false,
+      stream: true,
+    });
+    expect(await response.json()).toMatchObject({
+      data: [{ b64_json: "edited123" }],
+    });
+  });
+
+  it.each([
+    {
+      caseName: "malformed image data URLs",
+      body: {
+        model: "gpt-image-2",
+        prompt: "add a red hat",
+        images: [{ image_url: "data:image/png;base64,abc" }],
+      },
+      message: "images[].image_url must be a base64 image data URL.",
+    },
+    {
+      caseName: "more than 16 images",
+      body: {
+        model: "gpt-image-2",
+        prompt: "make a collage",
+        images: Array.from({ length: 17 }, () => ({ image_url: TEST_PNG_DATA_URL })),
+      },
+      message: "images must contain between 1 and 16 image data URLs.",
+    },
+  ])("rejects Codex JSON edits with $caseName", async ({ body, message }) => {
+    const provider = createCodexChatGPTProvider();
+
+    const response = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/backend-api/codex/images/edits", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+      route: "/v1/images/edits",
+      sessionKey: "session-a",
+      body,
+      model: "gpt-image-2",
+    });
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: {
+        type: "invalid_request",
+        message,
+      },
     });
   });
 
