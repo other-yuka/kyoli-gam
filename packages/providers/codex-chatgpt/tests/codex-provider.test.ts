@@ -9,6 +9,9 @@ import {
 } from "@kyoli-gam/core";
 import { createCodexChatGPTProvider, refreshCodexOAuthToken } from "../src";
 
+const TEST_PNG_DATA_URL =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
 class DelayedUpdateAccountPool extends StickyAccountPool {
   private updateCalls = 0;
   private releaseUpdates!: () => void;
@@ -2627,12 +2630,10 @@ describe("createCodexChatGPTProvider", () => {
         ].join("\n"), { status: 200 });
       },
     });
-    const imageUrl =
-      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
     const body = {
       model: "gpt-image-2",
       prompt: "add a red hat",
-      images: [{ image_url: imageUrl }],
+      images: [{ image_url: TEST_PNG_DATA_URL }],
     };
 
     const response = await provider.handleRequest({
@@ -2654,7 +2655,7 @@ describe("createCodexChatGPTProvider", () => {
         role: "user",
         content: [
           { type: "input_text", text: "add a red hat" },
-          { type: "input_image", image_url: imageUrl },
+          { type: "input_image", image_url: TEST_PNG_DATA_URL },
         ],
       }],
       tools: [{ type: "image_generation", model: "gpt-image-2", action: "edit" }],
@@ -2667,44 +2668,27 @@ describe("createCodexChatGPTProvider", () => {
     });
   });
 
-  it("rejects malformed Codex JSON image data URLs", async () => {
-    const provider = createCodexChatGPTProvider();
-    const body = {
-      model: "gpt-image-2",
-      prompt: "add a red hat",
-      images: [{ image_url: "data:image/png;base64,abc" }],
-    };
-
-    const response = await provider.handleRequest({
-      request: new Request("http://127.0.0.1:2021/backend-api/codex/images/edits", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      }),
-      route: "/v1/images/edits",
-      sessionKey: "session-a",
-      body,
-      model: "gpt-image-2",
-    });
-
-    expect(response.status).toBe(400);
-    expect(await response.json()).toEqual({
-      error: {
-        type: "invalid_request",
-        message: "images[].image_url must be a base64 image data URL.",
+  it.each([
+    {
+      caseName: "malformed image data URLs",
+      body: {
+        model: "gpt-image-2",
+        prompt: "add a red hat",
+        images: [{ image_url: "data:image/png;base64,abc" }],
       },
-    });
-  });
-
-  it("rejects Codex JSON edits with more than 16 images", async () => {
+      message: "images[].image_url must be a base64 image data URL.",
+    },
+    {
+      caseName: "more than 16 images",
+      body: {
+        model: "gpt-image-2",
+        prompt: "make a collage",
+        images: Array.from({ length: 17 }, () => ({ image_url: TEST_PNG_DATA_URL })),
+      },
+      message: "images must contain between 1 and 16 image data URLs.",
+    },
+  ])("rejects Codex JSON edits with $caseName", async ({ body, message }) => {
     const provider = createCodexChatGPTProvider();
-    const imageUrl =
-      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
-    const body = {
-      model: "gpt-image-2",
-      prompt: "make a collage",
-      images: Array.from({ length: 17 }, () => ({ image_url: imageUrl })),
-    };
 
     const response = await provider.handleRequest({
       request: new Request("http://127.0.0.1:2021/backend-api/codex/images/edits", {
@@ -2722,7 +2706,7 @@ describe("createCodexChatGPTProvider", () => {
     expect(await response.json()).toEqual({
       error: {
         type: "invalid_request",
-        message: "images must contain between 1 and 16 image data URLs.",
+        message,
       },
     });
   });
