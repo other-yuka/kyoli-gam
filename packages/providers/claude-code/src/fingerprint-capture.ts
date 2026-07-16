@@ -16,6 +16,7 @@ import { detectCliVersion } from "./cli-version";
 import { findClaudeCodeBinary } from "./oauth-config";
 import { scrubTemplate } from "./scrub-template";
 import { getConfigDir } from "opencode-multi-account-core";
+import { summarizeClaudeCodeCacheControls } from "./opencode-shared";
 
 const CURRENT_SCHEMA_VERSION = 1;
 const LIVE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -528,7 +529,7 @@ export function extractTemplate(captured: CapturedRequest): TemplateData | null 
 
 export async function captureLiveTemplateAsync(
   timeoutMs = DEFAULT_CAPTURE_TIMEOUT_MS,
-  options: { model?: string } = {},
+  options: { cacheControlEvidencePath?: string; model?: string } = {},
 ): Promise<TemplateData | null> {
   const binaryPath = findClaudeBinary();
   if (!binaryPath) {
@@ -576,11 +577,23 @@ export async function captureLiveTemplateAsync(
     const baseUrl = `http://${LOOPBACK_HOST}:${address.port}`;
     await runClaudeCapture({ binaryPath, baseUrl, timeoutMs, model: options.model });
 
-    if (!capturedRequest) {
+    const captured = capturedRequest as CapturedRequest | null;
+    if (!captured) {
       return null;
     }
 
-    return extractTemplate(capturedRequest);
+    const template = extractTemplate(captured);
+    if (template && options.cacheControlEvidencePath) {
+      await writeFile(
+        options.cacheControlEvidencePath,
+        `${JSON.stringify({
+          cc_version: template.cc_version,
+          cache_controls: summarizeClaudeCodeCacheControls(captured.body),
+        }, null, 2)}\n`,
+        "utf8",
+      );
+    }
+    return template;
   } catch {
     return null;
   } finally {

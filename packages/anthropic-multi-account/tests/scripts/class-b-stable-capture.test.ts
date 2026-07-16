@@ -14,6 +14,7 @@ const prepareStep = workflow.slice(
 
 describe("Class B stable capture workflow", () => {
   test("prepares Class B from the clean post-rebake capture", () => {
+    expect(workflow).toContain("KYOLI_LIVE_CACHE_CONTROL_OUTPUT: live-cache-control.json");
     expect(prepareStep).toContain("capture_path=live-template-capture.json");
     expect(prepareStep).toMatch(
       /if \[ "\$class_name" = "B" \]; then[\s\S]*bake:fingerprint[\s\S]*check-live-fingerprint-drift\.mjs[\s\S]*\.classification[\s\S]*clean[\s\S]*capture_path=post-rebake-capture\.json/,

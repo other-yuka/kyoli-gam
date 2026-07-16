@@ -1,7 +1,9 @@
 export async function captureLiveFingerprintSetAsync(timeoutMs, options = {}) {
   const captureLiveTemplateAsync = options.captureLiveTemplateAsync
     ?? (await import("../dist/fingerprint-capture.js")).captureLiveTemplateAsync;
-  const primary = await captureLiveTemplateAsync(timeoutMs);
+  const primary = await captureLiveTemplateAsync(timeoutMs, {
+    cacheControlEvidencePath: options.cacheControlEvidencePath,
+  });
   if (!primary) {
     throw new Error("primary live fingerprint capture failed");
   }

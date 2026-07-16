@@ -128,6 +128,7 @@ jobs:
       - name: Classify live fingerprint
         id: check
         env:
+          KYOLI_LIVE_CACHE_CONTROL_OUTPUT: live-cache-control.json
           KYOLI_LIVE_FINGERPRINT_OUTPUT: live-template-capture.json
         run: |
           set +e
@@ -185,6 +186,7 @@ jobs:
             live-static-plan.json
             live-template-drift.json
             live-template-capture.json
+            live-cache-control.json
             live-template-drift.err
           if-no-files-found: ignore
           retention-days: 30

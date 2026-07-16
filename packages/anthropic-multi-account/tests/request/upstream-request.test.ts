@@ -220,6 +220,26 @@ describe("upstream-request", () => {
     expect(truncated.endsWith(TRUNCATION_SUFFIX)).toBe(true);
   });
 
+  test("buildUpstreamRequest preserves a uniform client one-hour cache TTL", () => {
+    const cacheControl = { type: "ephemeral", ttl: "1h" } as const;
+    const result = buildUpstreamRequest({
+      model: "claude-sonnet-4-5",
+      system: [{ type: "text", text: "client", cache_control: cacheControl }],
+      tools: [{ name: "Read", input_schema: { type: "object" }, cache_control: cacheControl }],
+      messages: [{ role: "user", content: [{ type: "text", text: "hello", cache_control: cacheControl }] }],
+    }, createIdentity(), createTemplate());
+    const system = result.system as Array<{ cache_control?: typeof cacheControl }>;
+    const tools = result.tools as Array<{ cache_control?: typeof cacheControl }>;
+    const messages = result.messages as Array<{ content: Array<{ cache_control?: typeof cacheControl }> }>;
+    expect(system.map((block) => block.cache_control)).toEqual([
+      undefined,
+      cacheControl,
+      cacheControl,
+    ]);
+    expect(tools.map((tool) => tool.cache_control)).toEqual([cacheControl]);
+    expect(messages[0]?.content.map((block) => block.cache_control)).toEqual([cacheControl]);
+  });
+
   test("buildUpstreamRequest removes empty text blocks after sanitization", () => {
     const result = buildUpstreamRequest({
       model: "claude-sonnet-4-6",
