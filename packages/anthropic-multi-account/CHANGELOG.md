@@ -1,5 +1,14 @@
 # opencode-anthropic-multi-account
 
+## 0.2.94
+
+### Patch Changes
+
+- [#246](https://github.com/other-yuka/kyoli-gam/pull/246) [`de6d88b`](https://github.com/other-yuka/kyoli-gam/commit/de6d88bf314632b0fd2ee7d2550c37e5083bdac3) Thanks [@other-yuka](https://github.com/other-yuka)! - Preserve valid one-hour Claude prompt-cache TTL requests while keeping five minutes as the fallback.
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.94
+
 ## 0.2.93
 
 ### Patch Changes
