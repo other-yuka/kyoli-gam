@@ -62,9 +62,15 @@ export interface ClaudeCodeUpstreamIdentity {
   deviceId: string;
 }
 
+export type ClaudeCodeCacheControl = {
+  type: "ephemeral";
+  ttl?: "1h";
+};
+
 export interface ClaudeCodeUpstreamBodyOptions {
   agentIdentity: string;
   bodyFieldOrder?: string[];
+  cacheControl?: ClaudeCodeCacheControl;
   ccVersion: string;
   cch?: string;
   defaultTools?: Array<Record<string, unknown>>;
@@ -195,12 +201,69 @@ function parseSemver(version: string): [number, number, number] | null {
   return [Number(match[1]), Number(match[2]), Number(match[3])];
 }
 
-// Claude Code caches the two system blocks above, plus the tools prefix and
-// one rolling conversation breakpoint. Client-supplied cache_control is stripped
-// before this shared helper runs; these markers are Kyoli-owned outbound hints.
+export function summarizeClaudeCodeCacheControls(
+  body: Record<string, unknown>,
+) {
+  const observations: Array<{ path: string; ttl: string | null; type: string | null }> = [];
+  const observe = (value: unknown, path: string): void => {
+    const record = readRecord(value);
+    if (!record || !Object.hasOwn(record, "cache_control")) {
+      return;
+    }
+
+    const cacheControl = readRecord(record.cache_control);
+    observations.push({
+      path,
+      type: typeof cacheControl?.type === "string" ? cacheControl.type : null,
+      ttl: typeof cacheControl?.ttl === "string" ? cacheControl.ttl : null,
+    });
+  };
+
+  if (Array.isArray(body.system)) {
+    body.system.forEach((block, index) => {
+      observe(block, `system[${index}].cache_control`);
+    });
+  }
+
+  if (Array.isArray(body.tools)) {
+    body.tools.forEach((tool, index) => {
+      observe(tool, `tools[${index}].cache_control`);
+    });
+  }
+
+  if (Array.isArray(body.messages)) {
+    body.messages.forEach((message, messageIndex) => {
+      const content = readRecord(message)?.content;
+      if (!Array.isArray(content)) return;
+      content.forEach((block, contentIndex) => {
+        observe(
+          block,
+          `messages[${messageIndex}].content[${contentIndex}].cache_control`,
+        );
+      });
+    });
+  }
+
+  return observations;
+}
+
+export function resolveClaudeCodeCacheControl(
+  body: Record<string, unknown>,
+): ClaudeCodeCacheControl {
+  const observations = summarizeClaudeCodeCacheControls(body);
+  return observations.length > 0 && observations.every((cacheControl) =>
+    cacheControl.type === "ephemeral" && cacheControl.ttl === "1h"
+  )
+    ? { type: "ephemeral", ttl: "1h" }
+    : { type: "ephemeral" };
+}
+
+// Callers resolve the client TTL before stripping its markers. This helper then
+// stamps Kyoli-owned breakpoints on the two system blocks, tools prefix, and
+// rolling conversation position.
 export function applyClaudeCodePromptCaching(
   body: Record<string, unknown>,
-  cacheControl: { type: "ephemeral" } = { type: "ephemeral" },
+  cacheControl: ClaudeCodeCacheControl = { type: "ephemeral" },
 ): void {
   const tools = body.tools as Array<Record<string, unknown>> | undefined;
   if (Array.isArray(tools) && tools.length > 0) {
@@ -237,6 +300,7 @@ export function applyClaudeCodeUpstreamBodyFields(
   body: Record<string, unknown>,
   input: ClaudeCodeUpstreamBodyOptions,
 ): Record<string, unknown> {
+  const cacheControl = input.cacheControl ?? { type: "ephemeral" };
   const firstUserMessage = input.firstUserMessage ?? extractFirstUserText(body.messages);
   const billingHeader = composeClaudeCodeBillingSystemEntry(
     firstUserMessage,
@@ -258,12 +322,12 @@ export function applyClaudeCodeUpstreamBodyFields(
     {
       type: "text",
       text: input.agentIdentity,
-      cache_control: { type: "ephemeral" },
+      cache_control: cacheControl,
     },
     {
       type: "text",
       text: mergedSystemPrompt,
-      cache_control: { type: "ephemeral" },
+      cache_control: cacheControl,
     },
   ];
   body.metadata = {
@@ -282,7 +346,7 @@ export function applyClaudeCodeUpstreamBodyFields(
     body.tools = input.defaultTools.map((tool) => ({ ...tool }));
   }
 
-  applyClaudeCodePromptCaching(body);
+  applyClaudeCodePromptCaching(body, cacheControl);
 
   return orderClaudeCodeBodyForOutbound(body, input.bodyFieldOrder);
 }

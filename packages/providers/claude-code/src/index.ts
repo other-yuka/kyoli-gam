@@ -25,6 +25,7 @@ import {
   isClaudeCode1mModelLabel,
   isClaudeFableModel,
   isSuspendedClaudeCodeModel,
+  resolveClaudeCodeCacheControl,
   resolveClaudeCodeModelAlias,
   stampClaudeCodeCch,
   toClaudeCodeWireModelId,
@@ -152,9 +153,11 @@ export {
   normalizeClaudeCodeSystemTexts,
   orderClaudeCodeBodyForOutbound,
   orderClaudeCodeHeadersForOutbound,
+  resolveClaudeCodeCacheControl,
   stampClaudeCodeCch,
   xxh64,
   type ClaudeCodeUpstreamBodyOptions,
+  type ClaudeCodeCacheControl,
   type ClaudeCodeUpstreamIdentity,
   type ClaudeCodeSharedRequestProfile,
 } from "./opencode-shared";
@@ -1038,6 +1041,7 @@ function transformRequestBody(
   }
 
   let record = { ...(body as Record<string, unknown>) };
+  const cacheControl = resolveClaudeCodeCacheControl(record);
   const requestModel = readString(record.model) ?? options.model;
   if (typeof record.model === "string") {
     record.model = toClaudeCodeWireModelId(record.model);
@@ -1050,6 +1054,7 @@ function transformRequestBody(
     record = applyClaudeCodeUpstreamBodyFields(record, {
       agentIdentity: CLAUDE_CODE_AGENT_IDENTITY,
       bodyFieldOrder: templateMetadata.bodyFieldOrder,
+      cacheControl,
       ccVersion: CLAUDE_CODE_VERSION,
       cch: randomCch(),
       defaultTools: getClaudeCodeTemplateTools(),

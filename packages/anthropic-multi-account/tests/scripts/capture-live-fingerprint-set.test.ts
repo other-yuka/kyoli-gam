@@ -41,10 +41,16 @@ describe("capture live fingerprint set", () => {
       .mockResolvedValueOnce(template("fable"));
 
     await expect(
-      captureLiveFingerprintSetAsync(10_000, { captureLiveTemplateAsync }),
+      captureLiveFingerprintSetAsync(10_000, {
+        cacheControlEvidencePath: "live-cache-control.json",
+        captureLiveTemplateAsync,
+      }),
     ).resolves.toMatchObject({
       system_prompt: "primary",
       system_prompt_fable: "fable",
+    });
+    expect(captureLiveTemplateAsync).toHaveBeenNthCalledWith(1, 10_000, {
+      cacheControlEvidencePath: "live-cache-control.json",
     });
   });
 });

@@ -20,6 +20,7 @@ import {
   orderClaudeCodeHeadersForOutbound,
   refreshClaudeCodeAccountMetadata,
   refreshClaudeCodeOAuthToken,
+  resolveClaudeCodeCacheControl,
   stampClaudeCodeCch,
 } from "../src";
 
@@ -263,6 +264,7 @@ describe("OpenCode shared Claude Code helpers", () => {
       },
       {
         agentIdentity: "agent identity",
+        cacheControl: { type: "ephemeral", ttl: "1h" },
         ccVersion: "2.1.137",
         identity: { accountUuid: "account-1", deviceId: "device-1" },
         sessionId: "session-1",
@@ -270,13 +272,42 @@ describe("OpenCode shared Claude Code helpers", () => {
       },
     );
 
-    const tools = body.tools as Array<{ cache_control?: { type: string } }>;
-    const messages = body.messages as Array<{ content: Array<{ cache_control?: { type: string } }> }>;
+    const system = body.system as Array<{ cache_control?: { type: string; ttl?: string } }>;
+    const tools = body.tools as Array<{ cache_control?: { type: string; ttl?: string } }>;
+    const messages = body.messages as Array<{ content: Array<{ cache_control?: { type: string; ttl?: string } }> }>;
 
+    expect(system[1]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+    expect(system[2]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
     expect(tools[0]?.cache_control).toBeUndefined();
-    expect(tools[1]?.cache_control).toEqual({ type: "ephemeral" });
+    expect(tools[1]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
     expect(messages[0]?.content[0]?.cache_control).toBeUndefined();
-    expect(messages[1]?.content[0]?.cache_control).toEqual({ type: "ephemeral" });
+    expect(messages[1]?.content[0]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+  });
+
+  it("only preserves a uniform valid one-hour client cache policy", () => {
+    const oneHour = { type: "ephemeral", ttl: "1h" };
+
+    expect(resolveClaudeCodeCacheControl({
+      system: [{ cache_control: oneHour }],
+      tools: [{ cache_control: oneHour }],
+      messages: [{ content: [{ cache_control: oneHour }] }],
+    })).toEqual(oneHour);
+    expect(resolveClaudeCodeCacheControl({
+      system: [{ cache_control: oneHour }],
+      messages: [{ content: [{ cache_control: { type: "ephemeral" } }] }],
+    })).toEqual({ type: "ephemeral" });
+    expect(resolveClaudeCodeCacheControl({
+      system: [{ cache_control: { type: "ephemeral", ttl: "5m" } }],
+    })).toEqual({ type: "ephemeral" });
+    expect(resolveClaudeCodeCacheControl({
+      system: [{ cache_control: { type: "ephemeral", ttl: "2h" } }],
+    })).toEqual({ type: "ephemeral" });
+    expect(resolveClaudeCodeCacheControl({
+      system: [{ cache_control: null }],
+    })).toEqual({ type: "ephemeral" });
+    expect(resolveClaudeCodeCacheControl({
+      messages: [{ content: [{ type: "tool_result", content: { cache_control: oneHour } }] }],
+    })).toEqual({ type: "ephemeral" });
   });
 });
 
@@ -704,6 +735,66 @@ describe("createClaudeCodeProvider", () => {
     expect(response.status).toBe(200);
     expect(userId.device_id).toBe("device-real");
     expect(userId.account_uuid).toBe("metadata-account");
+  });
+
+  it("preserves a uniform client one-hour cache TTL through the server provider", async () => {
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+      },
+    });
+    const cacheControl = { type: "ephemeral", ttl: "1h" } as const;
+    const body = {
+      model: "claude-code/claude-sonnet-4-5",
+      max_tokens: 1024,
+      system: [{ type: "text", text: "client", cache_control: cacheControl }],
+      tools: [{ name: "Read", input_schema: { type: "object" }, cache_control: cacheControl }],
+      messages: [{ role: "user", content: [{ type: "text", text: "hello", cache_control: cacheControl }] }],
+    };
+    const provider = createTestClaudeCodeProvider({
+      accounts: new StickyAccountPool(store),
+      baseUrl: "https://example.test",
+      usageRefresh: async () => ({ cachedUsageAt: Date.now() }),
+      fetch: async (_input, init) => {
+        const upstream = JSON.parse(String(init?.body)) as {
+          system: Array<{ cache_control?: typeof cacheControl }>;
+          tools: Array<{ cache_control?: typeof cacheControl }>;
+          messages: Array<{ content: Array<{ cache_control?: typeof cacheControl }> }>;
+        };
+        expect(upstream.system.map((block) => block.cache_control)).toEqual([
+          undefined,
+          cacheControl,
+          cacheControl,
+        ]);
+        expect(upstream.tools.map((tool) => tool.cache_control)).toEqual([cacheControl]);
+        expect(upstream.messages[0]?.content.map((block) => block.cache_control)).toEqual([
+          cacheControl,
+        ]);
+        return new Response(JSON.stringify({ id: "msg_test", type: "message" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    const response = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+      route: "/v1/messages",
+      sessionKey: "session-cache-ttl",
+      body,
+      model: body.model,
+    });
+
+    expect(response.status).toBe(200);
   });
 
   it("filters caller-supplied Claude Code fingerprint headers by default", async () => {

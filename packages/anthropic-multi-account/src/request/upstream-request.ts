@@ -5,6 +5,7 @@ import {
   computeClaudeCodeBuildTag,
   isClaudeFableModel,
   orderClaudeCodeBodyForOutbound,
+  resolveClaudeCodeCacheControl,
   resolveClaudeCodeModelAlias,
   stampClaudeCodeCch,
   toClaudeCodeWireModelId,
@@ -320,6 +321,7 @@ export function buildUpstreamRequest(
   template: TemplateData,
   options?: { sessionId?: string; outputEffort?: OutputEffortValue },
 ): Record<string, unknown> {
+  const cacheControl = resolveClaudeCodeCacheControl(inputBody);
   const { body, firstUserMessage, systemTexts } = normalizeAnthropicClientRequest(inputBody);
   const activeSessionId = options?.sessionId ?? getActiveSessionId();
   const configuredEffort = getConfiguredOutputEffort() ?? options?.outputEffort;
@@ -349,6 +351,7 @@ export function buildUpstreamRequest(
   return applyClaudeCodeUpstreamBodyFields(body, {
     agentIdentity: template.agent_identity,
     bodyFieldOrder: template.body_field_order,
+    cacheControl,
     ccVersion: getCcVersion(template),
     firstUserMessage,
     identity: {

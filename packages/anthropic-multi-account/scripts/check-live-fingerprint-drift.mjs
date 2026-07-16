@@ -16,10 +16,13 @@ import {
 const captureTimeoutMs = Number(process.env.FINGERPRINT_CAPTURE_TIMEOUT_MS ?? "10000");
 const targetVersion = process.env.CLAUDE_CODE_TARGET_VERSION || null;
 const captureOutputPath = process.env.KYOLI_LIVE_FINGERPRINT_OUTPUT || null;
+const cacheControlEvidencePath = process.env.KYOLI_LIVE_CACHE_CONTROL_OUTPUT || null;
 
 async function main() {
   const bundled = await loadBundledFingerprint();
-  const live = await captureLiveFingerprintSetAsync(captureTimeoutMs);
+  const live = await captureLiveFingerprintSetAsync(captureTimeoutMs, {
+    cacheControlEvidencePath,
+  });
   if (!live) {
     throw new Error("live fingerprint capture failed; verify Claude Code is installed and authenticated");
   }

@@ -203,36 +203,58 @@ describe("fingerprint-capture", () => {
   });
 
   test("captureLiveTemplateAsync runs the localhost capture flow and returns extracted template data", async () => {
+    const { dir, cleanup } = await setupTestEnv();
     let requestedModel: string | undefined;
-    setFingerprintCaptureTestOverridesForTest({
-      findClaudeBinary: () => "/mock/claude",
-      runClaudeCapture: async ({ baseUrl, model }) => {
-        requestedModel = model;
-        const response = await fetch(`${baseUrl}/v1/messages`, {
-          method: "POST",
-          headers: {
-            authorization: "Bearer secret",
-            "anthropic-beta": "oauth-2025-04-20",
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-            "user-agent": createUserAgent(),
-            "x-app": "cli",
-          },
-          body: JSON.stringify(createCapturedRequest().body),
-        });
+    const evidencePath = join(dir, "live-cache-control.json");
 
-        expect(response.status).toBe(200);
-        expect(response.headers.get("content-type")).toContain("text/event-stream");
-        expect(await response.text()).toContain("event: message_stop");
-      },
-    });
+    try {
+      setFingerprintCaptureTestOverridesForTest({
+        findClaudeBinary: () => "/mock/claude",
+        runClaudeCapture: async ({ baseUrl, model }) => {
+          requestedModel = model;
+          const captured = createCapturedRequest();
+          const cacheControl = { type: "ephemeral", ttl: "1h" };
+          (captured.body.system as Array<Record<string, unknown>>)[1]!.cache_control = cacheControl;
+          (captured.body.system as Array<Record<string, unknown>>)[2]!.cache_control = cacheControl;
+          (captured.body.tools as Array<Record<string, unknown>>)[1]!.cache_control = cacheControl;
+          captured.body.messages = [{
+            role: "user",
+            content: [{ type: "text", text: "hello", cache_control: cacheControl }],
+          }];
+          const response = await fetch(`${baseUrl}/v1/messages`, {
+            method: "POST",
+            headers: captured.headers,
+            body: JSON.stringify(captured.body),
+          });
 
-    const template = await captureLiveTemplateAsync(3_000, { model: "fable" });
+          expect(response.status).toBe(200);
+          expect(response.headers.get("content-type")).toContain("text/event-stream");
+          expect(await response.text()).toContain("event: message_stop");
+        },
+      });
 
-    expect(template).not.toBeNull();
-    expect(requestedModel).toBe("fable");
-    expect(template?._source).toBe("live");
-    expect(template?.tool_names).toEqual(["Read", "Bash"]);
+      const template = await captureLiveTemplateAsync(3_000, {
+        cacheControlEvidencePath: evidencePath,
+        model: "fable",
+      });
+      const evidence = JSON.parse(await fs.readFile(evidencePath, "utf8"));
+
+      expect(template).not.toBeNull();
+      expect(requestedModel).toBe("fable");
+      expect(template?._source).toBe("live");
+      expect(template?.tool_names).toEqual(["Read", "Bash"]);
+      expect(evidence).toEqual({
+        cc_version: DEFAULT_CAPTURED_CC_VERSION,
+        cache_controls: [
+          { path: "system[1].cache_control", type: "ephemeral", ttl: "1h" },
+          { path: "system[2].cache_control", type: "ephemeral", ttl: "1h" },
+          { path: "tools[1].cache_control", type: "ephemeral", ttl: "1h" },
+          { path: "messages[0].content[0].cache_control", type: "ephemeral", ttl: "1h" },
+        ],
+      });
+    } finally {
+      await cleanup();
+    }
   });
 
   test("captureLiveTemplateAsync returns null when the Claude binary is unavailable", async () => {
