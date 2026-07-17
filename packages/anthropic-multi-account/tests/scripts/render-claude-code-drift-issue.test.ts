@@ -16,11 +16,20 @@ describe("render-claude-code-drift-issue", () => {
       const bodyPath = join(dir, "issue-body.md");
       await writeFile(reportPath, `${JSON.stringify({
         ccVersion: "2.1.140",
+        pinned: {
+          clientId: "private-report-client-id",
+        },
+        scanned: {
+          authorizeUrl: "https://private-report.example/authorize",
+        },
+        scanTarget: {
+          path: "private/report/path",
+        },
         items: [
           {
             category: "oauth.clientId",
             severity: "high",
-            message: "client id changed",
+            message: "private report detail",
           },
         ],
       }, null, 2)}\n`);
@@ -43,7 +52,13 @@ describe("render-claude-code-drift-issue", () => {
       expect(body).toContain("Claude Code drift");
       expect(body).toContain("@anthropic-ai/claude-code@2.1.140");
       expect(body).toContain("https://github.com/alice/kyoli-gam/actions/runs/12345");
-      expect(body).toContain("oauth.clientId");
+      expect(body).toContain("**oauth.clientId** (high)");
+      expect(body).toContain("claude-code-drift-report");
+      expect(body).not.toContain("private-report-client-id");
+      expect(body).not.toContain("private-report.example");
+      expect(body).not.toContain("private/report/path");
+      expect(body).not.toContain("private report detail");
+      expect(body).not.toContain("```json");
       expect(body).toContain("pnpm --dir packages/cli run doctor claude --wire");
       expect(body).toContain("pnpm --dir packages/cli run doctor claude --obedience");
       expect(body).not.toContain("pnpm --dir packages/cli doctor claude");
