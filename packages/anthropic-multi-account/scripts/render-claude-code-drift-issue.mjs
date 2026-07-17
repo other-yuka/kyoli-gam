@@ -3,8 +3,17 @@ import { pathToFileURL } from "node:url";
 
 const defaultWorkflowPath = ".github/workflows/claude-code-drift-watch.yml";
 
-function formatReport(report) {
-  return JSON.stringify(report, null, 2);
+function formatDriftCategories(report) {
+  const items = Array.isArray(report?.items) ? report.items : [];
+  if (items.length === 0) {
+    return "- (no itemized categories; see workflow artifact)";
+  }
+
+  return items.map((item) => {
+    const category = typeof item?.category === "string" ? item.category : "unknown";
+    const severity = typeof item?.severity === "string" ? item.severity : "unknown";
+    return `- **${category}** (${severity})`;
+  }).join("\n");
 }
 
 function resolveWorkflowRunUrl(env = process.env) {
@@ -31,6 +40,7 @@ function buildClaudeCodeDriftIssueBody({
   const workflowRunSection = workflowRunUrl
     ? `${workflowRunUrl}\n`
     : "Unavailable outside GitHub Actions.\n";
+  const driftCategories = formatDriftCategories(report);
 
   return `## Claude Code drift
 
@@ -52,11 +62,11 @@ Kyoli keeps Claude Code compatibility explicit for both Server Mode and OpenCode
 ### Workflow run
 
 ${workflowRunSection}
-### Drift report
+### Drift categories
 
-\`\`\`json
-${formatReport(report)}
-\`\`\`
+${driftCategories}
+
+Full report: \`claude-code-drift-report\` workflow artifact.
 `;
 }
 

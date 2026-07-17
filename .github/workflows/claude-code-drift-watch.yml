@@ -118,8 +118,6 @@ jobs:
           echo "exit_code=$?" >> "$GITHUB_OUTPUT"
           set -e
           cat drift-log.txt
-          echo "--- drift report ---"
-          cat drift-report.json
 
       - name: Extract Claude Code version
         if: always()
