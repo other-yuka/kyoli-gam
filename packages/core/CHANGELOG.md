@@ -1,5 +1,12 @@
 # @kyoli-gam/core
 
+## 0.0.32
+
+### Patch Changes
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.95
+
 ## 0.0.31
 
 ### Patch Changes
