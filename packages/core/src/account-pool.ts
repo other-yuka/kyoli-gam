@@ -188,6 +188,7 @@ export class StickyAccountPool implements AccountPool {
     const stickySession = this.stickySessionStore.getStickySession(stickyKey);
     const stickyAccount = accounts.find((account) => account.id === stickySession?.accountId);
     if (stickyAccount) {
+      this.setStickySession(stickyKey, stickyAccount.id);
       if (diagnostics) diagnostics.selectedReason = "sticky_existing";
       return stickyAccount;
     }
@@ -238,6 +239,7 @@ export class StickyAccountPool implements AccountPool {
       const stickyScore = scoreAccount(stickyAccount, true, this.options);
       scores.push({ id: stickyAccount.id, score: stickyScore, sticky: true });
       if (bestScore <= stickyScore + this.options.weightedSwitchMargin) {
+        this.setStickySession(stickyKey, stickyAccount.id);
         if (diagnostics) {
           diagnostics.selectedReason = "weighted_sticky";
           diagnostics.weightedScores = scores;

@@ -34,6 +34,70 @@ describe("StickyAccountPool", () => {
     expect(selectedB?.id).toBe(first.id);
   });
 
+  it.each(["sticky", "weighted"] as const)(
+    "refreshes an active prompt-cache binding before stale purge with %s routing",
+    async (strategy) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-07-18T00:00:00.000Z"));
+      try {
+        const store = new MemoryAccountStore();
+        const stickyAccount = await store.create({
+          provider: "codex",
+          kind: "oauth",
+          name: "sticky",
+          metadata: {
+            cachedUsage: {
+              five_hour: { utilization: 50 },
+            },
+          },
+        });
+        if (strategy === "weighted") {
+          await store.create({
+            provider: "codex",
+            kind: "oauth",
+            name: "weighted-best",
+            metadata: {
+              cachedUsage: {
+                five_hour: { utilization: 40 },
+              },
+            },
+          });
+        }
+
+        const stickySessionStore = new MemoryStickySessionStore();
+        const stickyKey = "codex:prompt_cache:prompt_cache:turn-a";
+        stickySessionStore.upsertStickySession({
+          key: stickyKey,
+          provider: "codex",
+          kind: "prompt_cache",
+          sessionKey: "prompt_cache:turn-a",
+          accountId: stickyAccount.id,
+        });
+        const pool = new StickyAccountPool(store, { strategy, stickySessionStore });
+
+        vi.setSystemTime(new Date("2026-07-18T00:31:00.000Z"));
+        const result = await pool.selectWithDiagnostics({
+          provider: "codex",
+          kind: "oauth",
+          sessionKey: "prompt_cache:turn-a",
+        });
+
+        expect(result.account?.id).toBe(stickyAccount.id);
+        expect(result.diagnostics.selectedReason).toBe(
+          strategy === "sticky" ? "sticky_existing" : "weighted_sticky",
+        );
+        expect(stickySessionStore.getStickySession(stickyKey)).toMatchObject({
+          createdAt: "2026-07-18T00:00:00.000Z",
+          updatedAt: "2026-07-18T00:31:00.000Z",
+        });
+        expect(pool.purgeStickySessions({ maxAgeSeconds: 30 * 60, kind: "prompt_cache" })).toBe(0);
+        expect(pool.listStickySessions()).toHaveLength(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it("can share sticky mappings through an external sticky store", async () => {
     const store = new MemoryAccountStore();
     const first = await store.create({
