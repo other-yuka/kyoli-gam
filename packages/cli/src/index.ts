@@ -40,6 +40,8 @@ import {
   refreshClaudeCodeOAuthToken,
   startClaudeCodeOAuthLogin,
 } from "@kyoli-gam/provider-claude-code";
+import { compareVersions } from "@kyoli-gam/provider-claude-code/fingerprint";
+import { summarizeClaudeCodeCacheControls } from "@kyoli-gam/provider-claude-code/opencode";
 import {
   consumeCodexRateLimitResetCredit,
   createCodexChatGPTProvider,
@@ -108,6 +110,7 @@ const CLAUDE_CODE_INTERACTIVE_ONLY_TOOL_NAMES = new Set([
   "EnterPlanMode",
   "ExitPlanMode",
 ]);
+const MIN_VERIFIED_BUN_TLS_VERSION = "1.3.14";
 
 const command = process.argv[2] ?? "help";
 const cliConfig = await loadCliConfig(process.argv, process.env);
@@ -1680,6 +1683,28 @@ async function runClaudeFingerprintDoctor(): Promise<DoctorReport> {
     fetch: fetchProbe,
   });
 
+  const requestBody = {
+    model: "anthropic/claude-sonnet-5",
+    max_tokens: 1024,
+    messages: [
+      {
+        role: "user",
+        content: [{
+          type: "text",
+          text: "doctor ping",
+          cache_control: {
+            type: "ephemeral",
+            ttl: "5m",
+            doctor_caller_marker: true,
+          },
+        }],
+      },
+    ],
+    temperature: 0.2,
+    top_p: 0.9,
+    top_k: 10,
+  };
+
   await provider.handleRequest({
     request: new Request("http://127.0.0.1:2021/v1/messages", {
       method: "POST",
@@ -1693,52 +1718,52 @@ async function runClaudeFingerprintDoctor(): Promise<DoctorReport> {
         "x-stainless-runtime": "browser",
         "x-stainless-timeout": "999",
       },
-      body: JSON.stringify({
-        model: "anthropic/claude-sonnet-5",
-        max_tokens: 1024,
-        messages: [
-          {
-            role: "user",
-            content: [{ type: "text", text: "doctor ping", cache_control: { type: "ephemeral" } }],
-          },
-        ],
-        temperature: 0.2,
-        top_p: 0.9,
-        top_k: 10,
-      }),
+      body: JSON.stringify(requestBody),
     }),
     route: "/v1/messages",
     sessionKey: "doctor-claude-fingerprint",
-    body: {
-      model: "anthropic/claude-sonnet-5",
-      max_tokens: 1024,
-      messages: [
-        {
-          role: "user",
-          content: [{ type: "text", text: "doctor ping", cache_control: { type: "ephemeral" } }],
-        },
-      ],
-      temperature: 0.2,
-      top_p: 0.9,
-      top_k: 10,
-    },
+    body: requestBody,
     model: "anthropic/claude-sonnet-5",
   });
 
   const beta = upstreamHeaders.get("anthropic-beta") ?? "";
+  const cacheControls = summarizeClaudeCodeCacheControls(upstreamBody);
+  const toolCount = Array.isArray(upstreamBody.tools) ? upstreamBody.tools.length : 0;
+  const expectedCacheControlPaths = [
+    "system[1].cache_control",
+    "system[2].cache_control",
+    `tools[${toolCount - 1}].cache_control`,
+    "messages[0].content[0].cache_control",
+  ];
   const checks: DoctorCheck[] = [
     check("route", upstreamUrl === "https://doctor.invalid/v1/messages?beta=true", upstreamUrl),
     check("authorization", upstreamHeaders.get("authorization") === "Bearer doctor-access", "OAuth bearer is injected"),
     check("user-agent", (upstreamHeaders.get("user-agent") ?? "").startsWith("claude-cli/"), upstreamHeaders.get("user-agent") ?? ""),
     check("x-app", upstreamHeaders.get("x-app") === "cli", upstreamHeaders.get("x-app") ?? ""),
-    warnCheck("runtime/tls", isBunRuntime(), describeRuntimeTlsFingerprint()),
+    inspectRuntimeTlsFingerprint(),
     check("x-stainless-timeout", upstreamHeaders.get("x-stainless-timeout") === "600", upstreamHeaders.get("x-stainless-timeout") ?? ""),
     check("caller fingerprint filtered", !beta.includes("caller-beta") && upstreamHeaders.get("x-client-request-id") !== "caller-request-id", "caller fingerprint headers are not forwarded by default"),
     check("billable beta filtered", !beta.includes("extended-cache-ttl-"), beta),
     check("required betas", betaIncludes(beta, ["claude-code-20250219", "oauth-2025-04-20", "interleaved-thinking-2025-05-14"]), beta),
     check("model prefix stripped", upstreamBody.model === "claude-sonnet-5", String(upstreamBody.model)),
     check("sampling fields stripped", !("temperature" in upstreamBody) && !("top_p" in upstreamBody) && !("top_k" in upstreamBody), "temperature/top_p/top_k are removed"),
-    check("incoming cache_control stripped", !hasNestedKey(upstreamBody.messages, "cache_control"), "no cache_control keys remain on incoming messages"),
+    check(
+      "caller cache_control filtered",
+      !hasNestedKey(upstreamBody, "doctor_caller_marker") &&
+        !cacheControls.some((cacheControl) => cacheControl.ttl === "5m"),
+      "caller marker and 5m TTL are not forwarded",
+    ),
+    check(
+      "Kyoli cache_control applied",
+      cacheControls.length === expectedCacheControlPaths.length &&
+        expectedCacheControlPaths.every((path) =>
+          cacheControls.some((cacheControl) => cacheControl.path === path)
+        ) &&
+        cacheControls.every(
+          (cacheControl) => cacheControl.type === "ephemeral" && cacheControl.ttl === null,
+        ),
+      cacheControls.map((cacheControl) => cacheControl.path).join(","),
+    ),
     warnCheck("system template", Array.isArray(upstreamBody.system) && upstreamBody.system.length === 3, "Claude Code 3-block system template is reconstructed"),
     warnCheck("metadata.user_id", hasMetadataUserId(upstreamBody), "Claude Code metadata.user_id is reconstructed"),
     warnCheck("tool template", hasClaudeCodeToolTemplate(upstreamBody), "Claude Code bundled tool template is reconstructed"),
@@ -1813,7 +1838,7 @@ async function runClaudeWireCompareDoctor(options: {
     check("authorization shape", kyoliHeaders.get("authorization") === "Bearer doctor-access", "Kyoli injects OAuth bearer without reusing captured token"),
     compareClientRequestId(capturedHeaders, kyoliHeaders),
     compareBetaHeader(capturedHeaders["anthropic-beta"], kyoliHeaders.get("anthropic-beta")),
-    warnCheck("header order", comparableHeaderOrder(capture.request.rawHeaders).join(",") === comparableKyoliHeaderOrder(kyoli.rawHeaderNames).join(","), `captured=${comparableHeaderOrder(capture.request.rawHeaders).join(",")} kyoli=${comparableKyoliHeaderOrder(kyoli.rawHeaderNames).join(",")}`),
+    warnCheck("pre-transport header order", comparableHeaderOrder(capture.request.rawHeaders).join(",") === comparableKyoliHeaderOrder(kyoli.rawHeaderNames).join(","), `captured-wire=${comparableHeaderOrder(capture.request.rawHeaders).join(",")} kyoli-fetch-intent=${comparableKyoliHeaderOrder(kyoli.rawHeaderNames).join(",")}`),
     check("body field order", Object.keys(capturedBody).join(",") === Object.keys(kyoliBody).join(","), `captured=${Object.keys(capturedBody).join(",")} kyoli=${Object.keys(kyoliBody).join(",")}`),
     check("model", readString(capturedBody.model) === readString(kyoliBody.model), String(kyoliBody.model)),
     check("messages", stableJson(stripCacheControlClone(capturedBody.messages)) === stableJson(stripCacheControlClone(kyoliBody.messages)), "message payload matches after cache_control stripping"),
@@ -2282,14 +2307,28 @@ function readBooleanEnv(name: string): boolean {
   return value === "1" || value === "true" || value === "yes";
 }
 
-function isBunRuntime(): boolean {
-  return typeof (process.versions as Record<string, string | undefined>).bun === "string";
-}
-
-function describeRuntimeTlsFingerprint(): string {
+function inspectRuntimeTlsFingerprint(): DoctorCheck {
   const bunVersion = (process.versions as Record<string, string | undefined>).bun;
-  if (bunVersion) return `bun-match candidate: Bun ${bunVersion}`;
-  return `node-only: Node ${process.version} uses OpenSSL TLS, which differs from Claude Code's Bun/BoringSSL shape`;
+  if (typeof bunVersion !== "string") {
+    return warnCheck(
+      "runtime/tls/node-only",
+      false,
+      `node-only: Node ${process.version} uses OpenSSL TLS, which differs from Claude Code's Bun/BoringSSL shape`,
+    );
+  }
+
+  const comparison = compareVersions(bunVersion, MIN_VERIFIED_BUN_TLS_VERSION);
+  let verified = false;
+  let detail: string;
+  if (comparison === null) {
+    detail = `unverified: Bun ${bunVersion} is not strict semver; verified floor ${MIN_VERIFIED_BUN_TLS_VERSION}`;
+  } else if (comparison < 0) {
+    detail = `unverified: Bun ${bunVersion} is below verified floor ${MIN_VERIFIED_BUN_TLS_VERSION}`;
+  } else {
+    verified = true;
+    detail = `verified: Bun ${bunVersion} meets verified floor ${MIN_VERIFIED_BUN_TLS_VERSION}`;
+  }
+  return warnCheck("runtime/tls", verified, detail);
 }
 
 function summarizeChecks(checks: DoctorCheck[]): DoctorReport["summary"] {
@@ -2420,7 +2459,7 @@ function hasClaudeCodeToolTemplate(body: Record<string, unknown>): boolean {
   const names = body.tools
     .map((tool) => readString(readRecord(tool)?.name))
     .filter((name): name is string => Boolean(name));
-  const required = ["Agent", "AskUserQuestion", "Bash", "Read", "Write", "TodoWrite"];
+  const required = ["Agent", "AskUserQuestion", "Bash", "Read", "Write", "TaskCreate"];
   if (!required.every((name) => names.includes(name))) return false;
 
   return body.tools.every((tool) => readRecord(readRecord(tool)?.input_schema));

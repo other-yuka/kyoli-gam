@@ -3,6 +3,7 @@
     "target": "ESNext",
     "module": "ESNext",
     "moduleResolution": "bundler",
+    "customConditions": ["source"],
     "paths": {
       "@kyoli-gam/core": ["../core/src/index.ts"],
       "opencode-multi-account-core": ["../multi-account-core/src/index.ts"],

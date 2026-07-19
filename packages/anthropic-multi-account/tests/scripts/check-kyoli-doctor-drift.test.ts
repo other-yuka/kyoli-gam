@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -62,5 +63,53 @@ describe("collectActionableDoctorDrift", () => {
         detail: "source=fallback",
       },
     ]);
+  });
+
+  it("ignores the expected Node-only TLS warning", () => {
+    const report = {
+      name: "claude",
+      checks: [
+        {
+          name: "runtime/tls/node-only",
+          status: "warn",
+          detail: "node-only: Node v22.0.0 uses OpenSSL TLS",
+        },
+      ],
+    };
+
+    expect(collectActionableDoctorDrift(report)).toEqual([]);
+  });
+
+  it("keeps an unverified Bun TLS warning actionable", () => {
+    const report = {
+      name: "claude",
+      checks: [
+        {
+          name: "runtime/tls",
+          status: "warn",
+          detail: "unverified: Bun 1.3.8 is below verified floor 1.3.14",
+        },
+      ],
+    };
+
+    expect(collectActionableDoctorDrift(report)).toEqual([
+      {
+        report: "claude",
+        check: "runtime/tls",
+        status: "warn",
+        detail: "unverified: Bun 1.3.8 is below verified floor 1.3.14",
+      },
+    ]);
+  });
+
+  it("schedules the default Claude doctor", () => {
+    const workflow = readFileSync(
+      new URL("../../../../.github/workflows/kyoli-doctor-drift-watch.yml", import.meta.url),
+      "utf8",
+    );
+
+    expect(workflow).toContain(
+      '["pnpm","--dir","packages/cli","run","doctor","claude","--json"]',
+    );
   });
 });
