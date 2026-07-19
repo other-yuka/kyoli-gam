@@ -1266,7 +1266,7 @@
     "Write"
   ],
   "anthropic_beta": "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,advisor-tool-2026-03-01,effort-2025-11-24,extended-cache-ttl-2025-04-11",
-  "cc_version": "2.1.214",
+  "cc_version": "2.1.215",
   "header_order": [
     "Accept",
     "Authorization",
@@ -1296,7 +1296,7 @@
     "anthropic-dangerous-direct-browser-access": "true",
     "anthropic-version": "2023-06-01",
     "content-type": "application/json",
-    "user-agent": "claude-cli/2.1.214 (external, sdk-cli)",
+    "user-agent": "claude-cli/2.1.215 (external, sdk-cli)",
     "x-app": "cli",
     "x-stainless-timeout": "600"
   },
