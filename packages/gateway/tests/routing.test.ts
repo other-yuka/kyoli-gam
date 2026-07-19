@@ -291,6 +291,36 @@ describe("gateway routing", () => {
     expect(seenRoute).toBe("/backend-api/codex/responses");
   });
 
+  it("routes standalone Codex search without changing its request", async () => {
+    const route = "/backend-api/codex/alpha/search";
+    const body = { query: "OpenAI official website" };
+    const codex = fakeProvider({
+      id: "codex",
+      routes: [route],
+      models: [],
+      handle: async (context) => {
+        expect(context.route).toBe(route);
+        expect(new URL(context.request.url).search).toBe("?result_count=10");
+        expect(context.body).toEqual(body);
+        return Response.json({ provider: "codex" });
+      },
+    });
+    const gateway = createGateway({
+      accounts: new MemoryAccountStore(),
+      providers: [codex],
+    });
+
+    const response = await gateway.fetch(
+      new Request("http://127.0.0.1:2021/backend-api/codex/alpha/search?result_count=10", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+  });
+
   it.each([
     {
       path: "/backend-api/codex/images/generations",

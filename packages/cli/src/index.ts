@@ -2747,6 +2747,7 @@ const traceRoutes = new Set<GatewayRoute>([
   "/v1/chat/completions",
   "/v1/messages",
   "/v1/messages/count_tokens",
+  "/backend-api/codex/alpha/search",
   "/backend-api/codex/models",
   "/backend-api/codex/responses",
   "/backend-api/codex/responses/compact",
