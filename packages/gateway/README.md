@@ -14,6 +14,9 @@ admin routes backed by the kyoli SQLite account pool.
 | `GET /backend-api/codex/models` | local registry | Codex CLI model catalog shape |
 | `POST /v1/responses` | Codex OAuth pool | Preferred OpenCode Server Mode path for Codex |
 | `POST /v1/chat/completions` | Codex OAuth pool | Generic OpenAI-compatible bridge |
+| `POST /backend-api/codex/alpha/search` | Codex OAuth pool | Standalone Codex web search |
+| `POST /backend-api/codex/memories/trace_summarize` | Codex OAuth pool | Native Codex memory summarization |
+| `POST /backend-api/codex/realtime/calls` | Codex OAuth pool | Native Codex WebRTC call creation |
 | `POST /backend-api/codex/responses` | Codex OAuth pool | Native Codex backend path |
 | `WS /backend-api/codex/responses` | Codex OAuth pool | Native Codex Responses WebSocket relay |
 | `POST /backend-api/files` | Codex OAuth pool | Codex file upload URL creation |

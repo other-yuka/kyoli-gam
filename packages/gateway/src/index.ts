@@ -116,7 +116,9 @@ const routeByPath = new Map<string, GatewayRoute>([
   ["/v1/messages", "/v1/messages"],
   ["/v1/messages/count_tokens", "/v1/messages/count_tokens"],
   ["/backend-api/codex/alpha/search", "/backend-api/codex/alpha/search"],
+  ["/backend-api/codex/memories/trace_summarize", "/backend-api/codex/memories/trace_summarize"],
   ["/backend-api/codex/models", "/backend-api/codex/models"],
+  ["/backend-api/codex/realtime/calls", "/backend-api/codex/realtime/calls"],
   ["/backend-api/codex/images/edits", "/v1/images/edits"],
   ["/backend-api/codex/images/generations", "/v1/images/generations"],
   ["/backend-api/codex/responses", "/backend-api/codex/responses"],
@@ -1956,7 +1958,9 @@ async function resolveProvider(
   if (
     route === "/v1/responses" ||
     route === "/backend-api/codex/alpha/search" ||
+    route === "/backend-api/codex/memories/trace_summarize" ||
     route === "/backend-api/codex/models" ||
+    route === "/backend-api/codex/realtime/calls" ||
     route === "/backend-api/codex/responses" ||
     route === "/backend-api/codex/responses/compact"
   ) {

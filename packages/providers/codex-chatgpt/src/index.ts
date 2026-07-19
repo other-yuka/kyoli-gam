@@ -32,10 +32,16 @@ import { readCodexWebSocketTurn } from "./websocket/turn-state";
 import { createCodexModelCatalog } from "./model-catalog";
 
 const CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses";
-const CODEX_ALPHA_SEARCH_ENDPOINT = "https://chatgpt.com/backend-api/codex/alpha/search";
 const CODEX_WEBSOCKET_ENDPOINT = "wss://chatgpt.com/backend-api/codex/responses";
 const CODEX_COMPACT_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses/compact";
 const CODEX_BACKEND_API_BASE = "https://chatgpt.com/backend-api";
+const CODEX_CONTROL_ENDPOINTS = {
+  "/backend-api/codex/alpha/search": "https://chatgpt.com/backend-api/codex/alpha/search",
+  "/backend-api/codex/memories/trace_summarize":
+    "https://chatgpt.com/backend-api/codex/memories/trace_summarize",
+  "/backend-api/codex/realtime/calls": "https://chatgpt.com/backend-api/codex/realtime/calls",
+} as const;
+type CodexControlRoute = keyof typeof CODEX_CONTROL_ENDPOINTS;
 const CODEX_USAGE_ENDPOINT = "https://chatgpt.com/backend-api/wham/usage";
 const CODEX_TRANSCRIBE_ENDPOINT = "https://chatgpt.com/backend-api/transcribe";
 const DEFAULT_IMAGE_HOST_MODEL = "gpt-5.5";
@@ -250,6 +256,8 @@ export function createCodexChatGPTProvider(
       "/v1/images/edits",
       "/v1/images/variations",
       "/backend-api/codex/alpha/search",
+      "/backend-api/codex/memories/trace_summarize",
+      "/backend-api/codex/realtime/calls",
       "/backend-api/codex/responses",
       "/backend-api/codex/responses/compact",
       "/backend-api/transcribe",
@@ -276,6 +284,8 @@ export function createCodexChatGPTProvider(
         context.route !== "/v1/images/edits" &&
         context.route !== "/v1/images/variations" &&
         context.route !== "/backend-api/codex/alpha/search" &&
+        context.route !== "/backend-api/codex/memories/trace_summarize" &&
+        context.route !== "/backend-api/codex/realtime/calls" &&
         context.route !== "/backend-api/codex/responses" &&
         context.route !== "/backend-api/codex/responses/compact" &&
         context.route !== "/backend-api/transcribe" &&
@@ -326,24 +336,27 @@ export function createCodexChatGPTProvider(
         });
       }
 
-      const isAlphaSearch = context.route === "/backend-api/codex/alpha/search";
-      if (isAlphaSearch && context.request.method !== "POST") {
+      const controlEndpoint = isCodexControlRoute(context.route)
+        ? CODEX_CONTROL_ENDPOINTS[context.route]
+        : undefined;
+      const isControlRequest = controlEndpoint !== undefined;
+      if (isControlRequest && context.request.method !== "POST") {
         return jsonResponse(
           {
             error: {
               type: "method_not_allowed",
-              message: "Standalone Codex search requires POST.",
+              message: "Codex control requests require POST.",
             },
           },
           { status: 405, headers: { allow: "POST" } },
         );
       }
-      const rawBody = isAlphaSearch
+      const rawBody = isControlRequest
         ? await context.request.arrayBuffer()
         : undefined;
-      const body = isAlphaSearch ? undefined : rewriteBodyModel(context.body);
-      const upstreamUrl = isAlphaSearch
-        ? `${CODEX_ALPHA_SEARCH_ENDPOINT}${new URL(context.request.url).search}`
+      const body = isControlRequest ? undefined : rewriteBodyModel(context.body);
+      const upstreamUrl = isControlRequest
+        ? `${controlEndpoint}${new URL(context.request.url).search}`
         : createUpstreamUrl(context.route);
 
       const response = await executeWithAccountFailover({
@@ -381,7 +394,7 @@ export function createCodexChatGPTProvider(
               ? rawBody.byteLength > 0 ? rawBody : undefined
               : body === undefined ? context.request.body : JSON.stringify(body),
             bridge: context.route.startsWith("/v1/"),
-            normalizeStartupFailure: !isAlphaSearch,
+            normalizeStartupFailure: !isControlRequest,
           }),
         failureMessage: (status) => `Codex upstream returned ${status}`,
         readRateLimitResetAt: readCodexRateLimitResetAt,
@@ -391,7 +404,7 @@ export function createCodexChatGPTProvider(
           ? readString((body as Record<string, unknown>).model)
           : context.model,
       });
-      return isAlphaSearch ? await filterCodexControlResponse(response) : response;
+      return isControlRequest ? await filterCodexControlResponse(response) : response;
     },
     async handleWebSocket(context) {
       if (context.route !== "/backend-api/codex/responses" && context.route !== "/v1/responses") {
@@ -439,6 +452,10 @@ async function filterCodexControlResponse(response: Response): Promise<Response>
     statusText: response.statusText,
     headers,
   });
+}
+
+function isCodexControlRoute(route: string): route is CodexControlRoute {
+  return Object.prototype.hasOwnProperty.call(CODEX_CONTROL_ENDPOINTS, route);
 }
 
 async function handleResponsesWebSocket(input: {
@@ -1160,7 +1177,7 @@ function fetchCodexJsonRequest(
     credential.chatgptAccountId,
     { bridge: input.bridge },
   );
-  if (input.context.route === "/backend-api/codex/alpha/search") {
+  if (isCodexControlRoute(input.context.route)) {
     const contentType = input.context.request.headers.get("content-type");
     if (contentType) headers.set("content-type", contentType);
     else headers.delete("content-type");

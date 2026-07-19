@@ -291,16 +291,30 @@ describe("gateway routing", () => {
     expect(seenRoute).toBe("/backend-api/codex/responses");
   });
 
-  it("routes standalone Codex search without changing its request", async () => {
-    const route = "/backend-api/codex/alpha/search";
-    const body = { query: "OpenAI official website" };
+  it.each([
+    {
+      route: "/backend-api/codex/alpha/search",
+      query: "?result_count=10",
+      body: { query: "OpenAI official website" },
+    },
+    {
+      route: "/backend-api/codex/memories/trace_summarize",
+      query: "?source=memory",
+      body: { model: "gpt-5.6", traces: [] },
+    },
+    {
+      route: "/backend-api/codex/realtime/calls",
+      query: "?intent=quicksilver&architecture=avas",
+      body: { sdp: "v=0", session: { type: "realtime" } },
+    },
+  ] as const)("routes Codex control request $route without changing it", async ({ route, query, body }) => {
     const codex = fakeProvider({
       id: "codex",
       routes: [route],
       models: [],
       handle: async (context) => {
         expect(context.route).toBe(route);
-        expect(new URL(context.request.url).search).toBe("?result_count=10");
+        expect(new URL(context.request.url).search).toBe(query);
         expect(context.body).toEqual(body);
         return Response.json({ provider: "codex" });
       },
@@ -311,7 +325,7 @@ describe("gateway routing", () => {
     });
 
     const response = await gateway.fetch(
-      new Request("http://127.0.0.1:2021/backend-api/codex/alpha/search?result_count=10", {
+      new Request(`http://127.0.0.1:2021${route}${query}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
