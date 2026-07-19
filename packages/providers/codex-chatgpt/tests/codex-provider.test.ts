@@ -574,6 +574,325 @@ describe("createCodexChatGPTProvider", () => {
     });
   });
 
+  it("forwards standalone Codex search as a raw POST control request", async () => {
+    const route = "/backend-api/codex/alpha/search";
+    const rawBody = '{ "query": "OpenAI official website" }';
+    const blockedHeaders = {
+      connection: "keep-alive, , bad name, x-hop-by-hop",
+      cookie: "client-session=must-not-cross-account",
+      "keep-alive": "timeout=5",
+      "proxy-authenticate": "Basic must-not-cross-account",
+      "proxy-authorization": "Basic must-not-cross-account",
+      "proxy-connection": "keep-alive",
+      te: "trailers",
+      trailer: "x-checksum",
+      "transfer-encoding": "chunked",
+      upgrade: "websocket",
+      "x-hop-by-hop": "must-not-cross-hop",
+    };
+    let upstream: { url: string; method: string; body: string; headers: Headers } | undefined;
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+        accountId: "acct_test",
+      },
+    });
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      fetch: async (input, init) => {
+        upstream = {
+          url: String(input),
+          method: init?.method ?? "",
+          body: await new Response(init?.body).text(),
+          headers: new Headers(init?.headers),
+        };
+        return new Response('{"results":[{"title":"OpenAI"}]}', {
+          status: 201,
+          headers: {
+            "content-type": "application/json",
+            "x-request-id": "search-request",
+            "set-cookie": "must-not-leak=1",
+          },
+        });
+      },
+    });
+    const request = new Request(
+      "http://127.0.0.1:2021/backend-api/codex/alpha/search?result_count=10&source=a&source=b",
+      {
+        method: "POST",
+        headers: {
+          authorization: "Bearer client-token",
+          "chatgpt-account-id": "client-account",
+          "content-type": "application/json; charset=utf-8",
+          ...blockedHeaders,
+        },
+        body: rawBody,
+      },
+    );
+
+    const response = await provider.handleRequest({
+      request,
+      route,
+      sessionKey: "session-a",
+      body: JSON.parse(rawBody),
+    });
+
+    expect(response.status).toBe(201);
+    expect(await response.text()).toBe('{"results":[{"title":"OpenAI"}]}');
+    expect(response.headers.get("x-request-id")).toBe("search-request");
+    expect(response.headers.has("set-cookie")).toBe(false);
+    expect(upstream?.url).toBe(
+      "https://chatgpt.com/backend-api/codex/alpha/search?result_count=10&source=a&source=b",
+    );
+    expect(upstream?.method).toBe("POST");
+    expect(upstream?.body).toBe(rawBody);
+    expect(upstream?.headers.get("authorization")).toBe("Bearer access-test");
+    expect(upstream?.headers.get("ChatGPT-Account-ID")).toBe("acct_test");
+    expect(upstream?.headers.get("content-type")).toBe("application/json; charset=utf-8");
+    for (const name of Object.keys(blockedHeaders)) {
+      expect(upstream?.headers.has(name)).toBe(false);
+    }
+
+    const getResponse = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/backend-api/codex/alpha/search"),
+      route,
+      sessionKey: "session-a",
+    });
+    expect(getResponse.status).toBe(405);
+    expect(getResponse.headers.get("allow")).toBe("POST");
+  });
+
+  it.each([
+    {
+      route: "/backend-api/codex/memories/trace_summarize",
+      query: "?source=memory",
+      upstreamUrl: "https://chatgpt.com/backend-api/codex/memories/trace_summarize?source=memory",
+      requestBody: '{ "model": "gpt-5.6", "traces": [] }',
+      responseBody: '{"output":[]}',
+      responseHeaders: { "content-type": "application/json" },
+    },
+    {
+      route: "/backend-api/codex/realtime/calls",
+      query: "?intent=quicksilver&architecture=avas",
+      upstreamUrl: "https://chatgpt.com/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas",
+      requestBody: '{ "sdp": "v=0", "session": { "type": "realtime" } }',
+      responseBody: "v=0\\r\\n",
+      responseHeaders: {
+        "content-type": "application/sdp",
+        location: "/v1/realtime/calls/calls/rtc_test",
+      },
+    },
+  ] as const)("forwards $route as a raw Codex control request", async ({
+    route,
+    query,
+    upstreamUrl,
+    requestBody,
+    responseBody,
+    responseHeaders,
+  }) => {
+    let upstream: { url: string; method: string; body: string; headers: Headers } | undefined;
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+        accountId: "acct_test",
+      },
+    });
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      fetch: async (input, init) => {
+        upstream = {
+          url: String(input),
+          method: init?.method ?? "",
+          body: await new Response(init?.body).text(),
+          headers: new Headers(init?.headers),
+        };
+        return new Response(responseBody, {
+          status: 201,
+          headers: {
+            ...responseHeaders,
+            "x-request-id": "control-request",
+            "set-cookie": "must-not-leak=1",
+          },
+        });
+      },
+    });
+
+    const response = await provider.handleRequest({
+      request: new Request(`http://127.0.0.1:2021${route}${query}`, {
+        method: "POST",
+        headers: { "content-type": "application/json; charset=utf-8" },
+        body: requestBody,
+      }),
+      route,
+      sessionKey: "control-session",
+      body: JSON.parse(requestBody),
+    });
+
+    expect(response.status).toBe(201);
+    expect(await response.text()).toBe(responseBody);
+    expect(response.headers.get("x-request-id")).toBe("control-request");
+    expect(response.headers.get("location")).toBe(responseHeaders.location ?? null);
+    expect(response.headers.has("set-cookie")).toBe(false);
+    expect(upstream?.url).toBe(upstreamUrl);
+    expect(upstream?.method).toBe("POST");
+    expect(upstream?.body).toBe(requestBody);
+    expect(upstream?.headers.get("authorization")).toBe("Bearer access-test");
+    expect(upstream?.headers.get("ChatGPT-Account-ID")).toBe("acct_test");
+    expect(upstream?.headers.get("content-type")).toBe("application/json; charset=utf-8");
+  });
+
+  it("replays standalone Codex search bytes across OAuth refresh and account failover", async () => {
+    const route = "/backend-api/codex/alpha/search";
+    const rawBody = '{ "query": "preserve spacing across retries" }';
+    const calls: Array<{ authorization: string; accountId: string; body: string }> = [];
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "stale-first",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-first",
+        accountId: "acct_first",
+      },
+    });
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "second-access",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-second",
+        accountId: "acct_second",
+      },
+    });
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      tokenRefresh: async () => ({
+        accessToken: "fresh-first",
+        refreshToken: "refresh-first-new",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        accountId: "acct_first_fresh",
+      }),
+      fetch: async (_input, init) => {
+        const headers = new Headers(init?.headers);
+        calls.push({
+          authorization: headers.get("authorization") ?? "",
+          accountId: headers.get("ChatGPT-Account-ID") ?? "",
+          body: await new Response(init?.body).text(),
+        });
+        const status = calls.length === 1 ? 401 : calls.length === 2 ? 429 : 200;
+        return new Response(
+          status === 200 ? '{"results":[]}' : '{"error":{"message":"retry search"}}',
+          { status, headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+
+    const response = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/backend-api/codex/alpha/search", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: rawBody,
+      }),
+      route,
+      sessionKey: "search-retry-session",
+      body: JSON.parse(rawBody),
+    });
+
+    expect(response.status).toBe(200);
+    expect(calls).toEqual([
+      { authorization: "Bearer stale-first", accountId: "acct_first", body: rawBody },
+      { authorization: "Bearer fresh-first", accountId: "acct_first_fresh", body: rawBody },
+      { authorization: "Bearer second-access", accountId: "acct_second", body: rawBody },
+    ]);
+  });
+
+  it("passes through 304 search responses and normalizes final failures", async () => {
+    const route = "/backend-api/codex/alpha/search";
+    let fetchCalls = 0;
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+      },
+    });
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      fetch: async () => {
+        fetchCalls += 1;
+        if (fetchCalls === 1) {
+          return new Response(null, {
+            status: 304,
+            headers: { etag: '"search-v1"' },
+          });
+        }
+        return new Response('{"detail":"invalid search request"}', {
+          status: 400,
+          headers: {
+            "content-type": "application/json",
+            etag: '"discarded-error-v1"',
+            "last-modified": "Sat, 18 Jul 2026 00:00:00 GMT",
+            "x-request-id": "failed-search-request",
+            "set-cookie": "must-not-leak=1",
+          },
+        });
+      },
+    });
+
+    const request = () => new Request(
+      "http://127.0.0.1:2021/backend-api/codex/alpha/search",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      },
+    );
+    const notModified = await provider.handleRequest({
+      request: request(),
+      route,
+      sessionKey: "cached-search-session",
+      body: {},
+    });
+
+    expect(notModified.status).toBe(304);
+    expect(notModified.headers.get("etag")).toBe('"search-v1"');
+
+    const response = await provider.handleRequest({
+      request: request(),
+      route,
+      sessionKey: "failed-search-session",
+      body: {},
+    });
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: {
+        message: "invalid search request",
+        type: "server_error",
+        code: "upstream_error",
+      },
+    });
+    expect(response.headers.get("x-request-id")).toBe("failed-search-request");
+    expect(response.headers.has("etag")).toBe(false);
+    expect(response.headers.has("last-modified")).toBe(false);
+    expect(response.headers.has("set-cookie")).toBe(false);
+  });
+
   it("refreshes OAuth credentials and retries /backend-api/codex/responses 401 on the same account", async () => {
     const upstreamAuths: string[] = [];
     const upstreamAccountIds: string[] = [];

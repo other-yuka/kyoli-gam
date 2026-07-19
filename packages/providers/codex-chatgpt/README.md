@@ -9,6 +9,9 @@ backend protocol, and powers the OpenAI-compatible gateway routes.
 
 | Gateway route | Upstream behavior |
 |---|---|
+| `/backend-api/codex/alpha/search` | Raw standalone Codex search proxy |
+| `/backend-api/codex/memories/trace_summarize` | Raw memory summarization proxy |
+| `/backend-api/codex/realtime/calls` | Raw WebRTC call creation proxy |
 | `/backend-api/codex/responses` | Native Codex Responses proxy |
 | `WS /backend-api/codex/responses` | Native Codex Responses WebSocket relay with `responses_websockets=2026-02-06` |
 | `/backend-api/files` | Codex file upload URL create |

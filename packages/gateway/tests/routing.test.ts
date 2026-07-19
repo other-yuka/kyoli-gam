@@ -293,6 +293,50 @@ describe("gateway routing", () => {
 
   it.each([
     {
+      route: "/backend-api/codex/alpha/search",
+      query: "?result_count=10",
+      body: { query: "OpenAI official website" },
+    },
+    {
+      route: "/backend-api/codex/memories/trace_summarize",
+      query: "?source=memory",
+      body: { model: "gpt-5.6", traces: [] },
+    },
+    {
+      route: "/backend-api/codex/realtime/calls",
+      query: "?intent=quicksilver&architecture=avas",
+      body: { sdp: "v=0", session: { type: "realtime" } },
+    },
+  ] as const)("routes Codex control request $route without changing it", async ({ route, query, body }) => {
+    const codex = fakeProvider({
+      id: "codex",
+      routes: [route],
+      models: [],
+      handle: async (context) => {
+        expect(context.route).toBe(route);
+        expect(new URL(context.request.url).search).toBe(query);
+        expect(context.body).toEqual(body);
+        return Response.json({ provider: "codex" });
+      },
+    });
+    const gateway = createGateway({
+      accounts: new MemoryAccountStore(),
+      providers: [codex],
+    });
+
+    const response = await gateway.fetch(
+      new Request(`http://127.0.0.1:2021${route}${query}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+  });
+
+  it.each([
+    {
       path: "/backend-api/codex/images/generations",
       route: "/v1/images/generations" as GatewayRoute,
       body: { model: "gpt-image-2", prompt: "a tiny icon" },

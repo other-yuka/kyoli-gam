@@ -35,6 +35,13 @@ const CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses";
 const CODEX_WEBSOCKET_ENDPOINT = "wss://chatgpt.com/backend-api/codex/responses";
 const CODEX_COMPACT_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses/compact";
 const CODEX_BACKEND_API_BASE = "https://chatgpt.com/backend-api";
+const CODEX_CONTROL_ENDPOINTS = {
+  "/backend-api/codex/alpha/search": "https://chatgpt.com/backend-api/codex/alpha/search",
+  "/backend-api/codex/memories/trace_summarize":
+    "https://chatgpt.com/backend-api/codex/memories/trace_summarize",
+  "/backend-api/codex/realtime/calls": "https://chatgpt.com/backend-api/codex/realtime/calls",
+} as const;
+type CodexControlRoute = keyof typeof CODEX_CONTROL_ENDPOINTS;
 const CODEX_USAGE_ENDPOINT = "https://chatgpt.com/backend-api/wham/usage";
 const CODEX_TRANSCRIBE_ENDPOINT = "https://chatgpt.com/backend-api/transcribe";
 const DEFAULT_IMAGE_HOST_MODEL = "gpt-5.5";
@@ -77,6 +84,29 @@ const NATIVE_CODEX_ORIGINATORS = new Set([
   "codex_exec",
   "codex_vscode",
 ]);
+const CODEX_CONTROL_RESPONSE_HEADERS = new Set([
+  "cache-control",
+  "content-type",
+  "etag",
+  "last-modified",
+  "location",
+  "openai-processing-ms",
+  "request-id",
+  "retry-after",
+  "x-request-id",
+]);
+const HTTP_HOP_BY_HOP_REQUEST_HEADERS = [
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "proxy-connection",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+] as const;
+const HTTP_FIELD_NAME_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 const NATIVE_CODEX_STREAM_HEADERS = new Set([
   "x-codex-turn-state",
   "x-codex-turn-metadata",
@@ -225,6 +255,9 @@ export function createCodexChatGPTProvider(
       "/v1/images/generations",
       "/v1/images/edits",
       "/v1/images/variations",
+      "/backend-api/codex/alpha/search",
+      "/backend-api/codex/memories/trace_summarize",
+      "/backend-api/codex/realtime/calls",
       "/backend-api/codex/responses",
       "/backend-api/codex/responses/compact",
       "/backend-api/transcribe",
@@ -250,6 +283,9 @@ export function createCodexChatGPTProvider(
         context.route !== "/v1/images/generations" &&
         context.route !== "/v1/images/edits" &&
         context.route !== "/v1/images/variations" &&
+        context.route !== "/backend-api/codex/alpha/search" &&
+        context.route !== "/backend-api/codex/memories/trace_summarize" &&
+        context.route !== "/backend-api/codex/realtime/calls" &&
         context.route !== "/backend-api/codex/responses" &&
         context.route !== "/backend-api/codex/responses/compact" &&
         context.route !== "/backend-api/transcribe" &&
@@ -300,9 +336,30 @@ export function createCodexChatGPTProvider(
         });
       }
 
-      const body = rewriteBodyModel(context.body);
+      const controlEndpoint = isCodexControlRoute(context.route)
+        ? CODEX_CONTROL_ENDPOINTS[context.route]
+        : undefined;
+      const isControlRequest = controlEndpoint !== undefined;
+      if (isControlRequest && context.request.method !== "POST") {
+        return jsonResponse(
+          {
+            error: {
+              type: "method_not_allowed",
+              message: "Codex control requests require POST.",
+            },
+          },
+          { status: 405, headers: { allow: "POST" } },
+        );
+      }
+      const rawBody = isControlRequest
+        ? await context.request.arrayBuffer()
+        : undefined;
+      const body = isControlRequest ? undefined : rewriteBodyModel(context.body);
+      const upstreamUrl = isControlRequest
+        ? `${controlEndpoint}${new URL(context.request.url).search}`
+        : createUpstreamUrl(context.route);
 
-      return executeWithAccountFailover({
+      const response = await executeWithAccountFailover({
         provider: "codex",
         kind: "oauth",
         accounts: options.accounts,
@@ -332,10 +389,12 @@ export function createCodexChatGPTProvider(
             fetchImpl,
             options,
             credential: credential as CodexCredential,
-            url: createUpstreamUrl(context.route),
-            body: body === undefined ? context.request.body : JSON.stringify(body),
+            url: upstreamUrl,
+            body: rawBody
+              ? rawBody.byteLength > 0 ? rawBody : undefined
+              : body === undefined ? context.request.body : JSON.stringify(body),
             bridge: context.route.startsWith("/v1/"),
-            normalizeStartupFailure: true,
+            normalizeStartupFailure: !isControlRequest,
           }),
         failureMessage: (status) => `Codex upstream returned ${status}`,
         readRateLimitResetAt: readCodexRateLimitResetAt,
@@ -345,6 +404,7 @@ export function createCodexChatGPTProvider(
           ? readString((body as Record<string, unknown>).model)
           : context.model,
       });
+      return isControlRequest ? await filterCodexControlResponse(response) : response;
     },
     async handleWebSocket(context) {
       if (context.route !== "/backend-api/codex/responses" && context.route !== "/v1/responses") {
@@ -356,6 +416,46 @@ export function createCodexChatGPTProvider(
       await handleResponsesWebSocket({ context, options, turnRouter: websocketTurnRouter });
     },
   };
+}
+
+async function filterCodexControlResponse(response: Response): Promise<Response> {
+  const headers = new Headers();
+  for (const name of CODEX_CONTROL_RESPONSE_HEADERS) {
+    const value = response.headers.get(name);
+    if (value !== null) headers.set(name, value);
+  }
+  if (response.status >= 400) {
+    const bodyText = await response.text();
+    const payload = readJsonRecordFromString(bodyText);
+    const upstreamError = readRecord(payload?.error);
+    const fallbackMessage = bodyText.trim() ||
+      `Upstream error: HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}`;
+    const message = readString(upstreamError?.message) ??
+      readString(payload?.message) ??
+      readString(payload?.detail) ??
+      readString(payload?.error) ??
+      fallbackMessage;
+    const error = upstreamError && readString(upstreamError.message)
+      ? upstreamError
+      : { message, type: "server_error", code: "upstream_error" };
+    headers.delete("etag");
+    headers.delete("last-modified");
+    headers.set("content-type", "application/json; charset=utf-8");
+    return new Response(JSON.stringify({ error }, null, 2), {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    });
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+function isCodexControlRoute(route: string): route is CodexControlRoute {
+  return Object.prototype.hasOwnProperty.call(CODEX_CONTROL_ENDPOINTS, route);
 }
 
 async function handleResponsesWebSocket(input: {
@@ -1071,14 +1171,20 @@ function fetchCodexJsonRequest(
   },
   credential: CodexCredential,
 ): Promise<Response> {
+  const headers = buildUpstreamHeaders(
+    input.context.request.headers,
+    credential.value,
+    credential.chatgptAccountId,
+    { bridge: input.bridge },
+  );
+  if (isCodexControlRoute(input.context.route)) {
+    const contentType = input.context.request.headers.get("content-type");
+    if (contentType) headers.set("content-type", contentType);
+    else headers.delete("content-type");
+  }
   return input.fetchImpl(input.url, {
     method: input.method ?? input.context.request.method,
-    headers: buildUpstreamHeaders(
-      input.context.request.headers,
-      credential.value,
-      credential.chatgptAccountId,
-      { bridge: input.bridge },
-    ),
+    headers,
     body: input.body,
     duplex: "half",
   } as RequestInit);
@@ -3408,11 +3514,16 @@ function buildBridgeHeaders(headers: Headers): Headers {
 }
 
 function deleteBlockedUpstreamHeaders(headers: Headers): void {
+  for (const name of headers.get("connection")?.split(",") ?? []) {
+    const normalized = name.trim();
+    if (HTTP_FIELD_NAME_PATTERN.test(normalized)) headers.delete(normalized);
+  }
+  for (const name of HTTP_HOP_BY_HOP_REQUEST_HEADERS) headers.delete(name);
   headers.delete("authorization");
+  headers.delete("cookie");
   headers.delete("x-api-key");
   headers.delete("host");
   headers.delete("content-length");
-  headers.delete("connection");
   headers.delete("accept-encoding");
   headers.delete("forwarded");
   headers.delete("x-forwarded-for");
