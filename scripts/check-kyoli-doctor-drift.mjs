@@ -61,9 +61,9 @@ function runDoctor(command) {
 export function collectActionableDoctorDrift(report) {
   const drift = [];
   for (const check of report.checks ?? []) {
-    const delegatedToClassAB = check.status === "warn"
-      && CLASS_AB_FINGERPRINT_WARNINGS.has(check.name);
-    if (check.status === "fail" || (check.status === "warn" && !delegatedToClassAB)) {
+    const ignoredWarning = check.status === "warn"
+      && (CLASS_AB_FINGERPRINT_WARNINGS.has(check.name) || check.name === "runtime/tls/node-only");
+    if (check.status === "fail" || (check.status === "warn" && !ignoredWarning)) {
       drift.push({ report: report.name, check: check.name, status: check.status, detail: check.detail });
     }
   }

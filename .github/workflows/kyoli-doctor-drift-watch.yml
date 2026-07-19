@@ -52,7 +52,7 @@ jobs:
         id: check
         env:
           KYOLI_DOCTOR_COMMANDS_JSON: >-
-            ${{ inputs.doctor_commands_json || vars.KYOLI_DOCTOR_COMMANDS_JSON || '[["pnpm","--dir","packages/cli","run","doctor","claude","--binary","--json"],["pnpm","--dir","packages/cli","run","doctor","claude","--obedience","--json"]]' }}
+            ${{ inputs.doctor_commands_json || vars.KYOLI_DOCTOR_COMMANDS_JSON || '[["pnpm","--dir","packages/cli","run","doctor","claude","--json"],["pnpm","--dir","packages/cli","run","doctor","claude","--binary","--json"],["pnpm","--dir","packages/cli","run","doctor","claude","--obedience","--json"]]' }}
         run: |
           set +e
           node scripts/check-kyoli-doctor-drift.mjs > kyoli-doctor-drift.json 2> kyoli-doctor-drift.err
