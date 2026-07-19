@@ -36,7 +36,7 @@ function runClaudeDoctor(bunVersion?: string): DoctorReport {
   const nodeOptions = [process.env.NODE_OPTIONS, bunShim].filter(Boolean).join(" ");
   const result = spawnSync(
     process.execPath,
-    ["--import", tsxLoaderPath, cliPath, "doctor", "claude", "--json"],
+    ["--conditions=source", "--import", tsxLoaderPath, cliPath, "doctor", "claude", "--json"],
     {
       cwd: repoRoot,
       encoding: "utf8",
