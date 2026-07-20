@@ -46,7 +46,7 @@
     "directory": "packages/anthropic-multi-account"
   },
   "dependencies": {
-    "@opencode-ai/plugin": "^1.17.18",
+    "@opencode-ai/plugin": "^1.18.3",
     "opencode-multi-account-core": "workspace:*",
     "valibot": "^1.4.2"
   },
