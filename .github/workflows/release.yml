@@ -148,7 +148,8 @@ jobs:
         if: steps.snapshot.outputs.process == 'true' && steps.changesets.outputs.published != 'true'
         id: release_policy
         env:
-          GH_TOKEN: ${{ secrets.KYOLI_RELEASE_BOT_PAT || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_BOT_PAT: ${{ secrets.KYOLI_RELEASE_BOT_PAT }}
           AUTO_CHANGESET_PATH: ${{ steps.release_inputs.outputs.auto_changeset_path }}
           HAS_AUTO_CHANGESET: ${{ steps.release_inputs.outputs.has_auto_changeset }}
           POLICY_PATH: ${{ steps.release_inputs.outputs.policy_path }}
@@ -261,6 +262,13 @@ jobs:
             exit 1
           fi
 
+          if [ -z "$RELEASE_BOT_PAT" ]; then
+            echo "failure_reason=release bot PAT is required to trigger the version commit publish run" >> "$GITHUB_OUTPUT"
+            echo "::error::KYOLI_RELEASE_BOT_PAT is required before merging an automated release PR."
+            exit 1
+          fi
+          export GH_TOKEN="$RELEASE_BOT_PAT"
+
           classified_oid=$(jq -r '.headRefOid' release-pr.json)
           gh pr edit "$pr" \
             --repo "${{ github.repository }}" \
@@ -313,55 +321,10 @@ jobs:
             echo "::error::Merged release PR #$pr has no merge commit."
             exit 1
           fi
-          echo "release_merge_oid=$release_merge_oid" >> "$GITHUB_OUTPUT"
           echo "Merged isolated Claude Code release PR #$pr at $release_merge_oid."
 
-      - name: Checkout merged automated release
-        if: steps.release_policy.outputs.release_merge_oid != ''
-        uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-          ref: ${{ steps.release_policy.outputs.release_merge_oid }}
-
-      - name: Prepare isolated inline publish
-        if: steps.release_policy.outputs.release_merge_oid != ''
-        run: |
-          set -euo pipefail
-          pnpm install --frozen-lockfile
-          hold_dir="${RUNNER_TEMP}/pending-changesets"
-          mkdir -p "$hold_dir"
-          find .changeset \
-            -maxdepth 1 \
-            -type f \
-            -name '*.md' \
-            ! -name 'README.md' \
-            -exec mv {} "$hold_dir"/ \;
-          if find .changeset -maxdepth 1 -type f -name '*.md' ! -name 'README.md' -print -quit | grep -q .; then
-            echo "::error::Could not isolate the merged automated release from pending changesets."
-            exit 1
-          fi
-
-      - name: Publish merged automated release inline
-        if: steps.release_policy.outputs.release_merge_oid != ''
-        id: auto_publish
-        uses: changesets/action@v1
-        with:
-          publish: pnpm run release
-          createGithubReleases: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.KYOLI_RELEASE_BOT_PAT || secrets.GITHUB_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_CONFIG_PROVENANCE: "true"
-
-      - name: Require completed inline publish
-        if: steps.release_policy.outputs.release_merge_oid != '' && steps.auto_publish.outputs.published != 'true'
-        run: |
-          echo "::error::Merged automated release did not publish any packages inline."
-          exit 1
-
       - name: Auto-close recovered Claude Code release alert
-        if: steps.changesets.outputs.published == 'true' || steps.auto_publish.outputs.published == 'true'
+        if: steps.changesets.outputs.published == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TRUSTED_LINEAGE: ${{ steps.release_policy.outputs.trusted_lineage }}
