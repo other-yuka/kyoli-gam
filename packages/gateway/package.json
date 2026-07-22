@@ -1,6 +1,6 @@
 {
   "name": "@kyoli-gam/gateway",
-  "version": "0.0.35",
+  "version": "0.0.37",
   "private": true,
   "description": "HTTP gateway for kyoli-gam v1",
   "type": "module",
@@ -39,14 +39,14 @@
     "@kyoli-gam/core": "workspace:*",
     "@kyoli-gam/provider-codex-chatgpt": "workspace:*",
     "developer-icons": "^6.0.5",
-    "lucide-react": "^1.24.0",
+    "lucide-react": "^1.25.0",
     "motion": "^12.42.2",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
-    "ws": "^8.21.0"
+    "ws": "^8.21.1"
   },
   "devDependencies": {
-    "@tailwindcss/vite": "^4.3.2",
+    "@tailwindcss/vite": "^4.3.3",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
     "@types/node": "^26.1.1",
@@ -55,9 +55,9 @@
     "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^6.0.3",
     "jsdom": "^29.1.1",
-    "tailwindcss": "^4.3.2",
+    "tailwindcss": "^4.3.3",
     "typescript": "^6.0.3",
-    "vite": "^8.1.4"
+    "vite": "^8.1.5"
   },
   "files": [
     "dist",

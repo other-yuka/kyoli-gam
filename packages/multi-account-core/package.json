@@ -1,6 +1,6 @@
 {
   "name": "opencode-multi-account-core",
-  "version": "0.2.97",
+  "version": "0.2.99",
   "description": "Shared core for OpenCode Plugin Mode",
   "type": "module",
   "main": "./dist/index.js",
@@ -43,7 +43,7 @@
     "valibot": "^1.4.2"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "^1.17.18",
+    "@opencode-ai/plugin": "^1.18.3",
     "@types/node": "^26.1.1",
     "typescript": "^6.0.3"
   },

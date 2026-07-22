@@ -1,6 +1,6 @@
 {
   "name": "@kyoli-gam/provider-codex-chatgpt",
-  "version": "0.0.34",
+  "version": "0.0.36",
   "private": true,
   "description": "Codex ChatGPT OAuth provider adapter for kyoli-gam v1",
   "type": "module",
@@ -35,7 +35,7 @@
   "license": "MIT",
   "dependencies": {
     "@kyoli-gam/core": "workspace:*",
-    "ws": "^8.21.0"
+    "ws": "^8.21.1"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
