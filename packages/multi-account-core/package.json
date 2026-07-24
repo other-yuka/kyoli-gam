@@ -1,6 +1,6 @@
 {
   "name": "opencode-multi-account-core",
-  "version": "0.2.100",
+  "version": "0.2.101",
   "description": "Shared core for OpenCode Plugin Mode",
   "type": "module",
   "main": "./dist/index.js",
