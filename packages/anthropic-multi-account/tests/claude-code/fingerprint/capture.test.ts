@@ -40,8 +40,8 @@ function createLiveTemplate(overrides?: Partial<TemplateData>): TemplateData {
   const bundled = loadTemplate();
 
   return {
-    _version: 1,
-    _schemaVersion: 1,
+    _version: 2,
+    _schemaVersion: 2,
     _captured: new Date().toISOString(),
     _source: "live",
     agent_identity: bundled.agent_identity,
@@ -108,13 +108,16 @@ describe("fingerprint-capture", () => {
     }
   });
 
-  test("loadTemplate applies bundled Fable prompt to fresh caches that lack it", async () => {
+  test("loadTemplate merges bundled prompt variants into fresh caches", async () => {
     const { dir, cleanup } = await setupTestEnv();
 
     try {
       const bundled = loadTemplate();
       const cached = createLiveTemplate({
         cc_version: "2.1.198",
+        system_prompt_variants: {
+          "opus-5": "live opus prompt",
+        },
       });
       delete cached.system_prompt_fable;
       await fs.writeFile(
@@ -126,8 +129,12 @@ describe("fingerprint-capture", () => {
       const template = loadTemplate();
 
       expect(template._source).toBe("cached");
-      expect(template.system_prompt_fable).toBe(bundled.system_prompt_fable);
-      expect(template.system_prompt_fable).toBeTruthy();
+      expect(template.system_prompt_variants).toMatchObject({
+        ...bundled.system_prompt_variants,
+        "opus-5": "live opus prompt",
+      });
+      expect(template.system_prompt_variants?.fable).toBeTruthy();
+      expect(template.system_prompt_variants?.["sonnet-5"]).toBeTruthy();
     } finally {
       await cleanup();
     }
@@ -164,6 +171,23 @@ describe("fingerprint-capture", () => {
     }
   });
 
+  test("loadTemplate quarantines invalid prompt variant caches", async () => {
+    const { dir, cleanup } = await setupTestEnv();
+
+    try {
+      await fs.writeFile(
+        join(dir, CACHE_FILE_NAME),
+        JSON.stringify({ ...createLiveTemplate(), system_prompt_variants: [""] }),
+        "utf8",
+      );
+
+      expect(loadTemplate()._source).toBe("bundled");
+      expect(await fs.readdir(dir)).not.toContain(CACHE_FILE_NAME);
+    } finally {
+      await cleanup();
+    }
+  });
+
   test("extractTemplate parses the captured request body and headers", () => {
     const template = extractTemplate(createCapturedRequest());
 
@@ -180,7 +204,7 @@ describe("fingerprint-capture", () => {
       "x-app": "cli",
     });
     expect(template?.cc_version).toBe(DEFAULT_CAPTURED_CC_VERSION);
-    expect(template?._schemaVersion).toBe(1);
+    expect(template?._schemaVersion).toBe(2);
   });
 
   test("extractTemplate returns null when the system blocks drift away from the expected three-block shape", () => {
@@ -255,6 +279,20 @@ describe("fingerprint-capture", () => {
     } finally {
       await cleanup();
     }
+  });
+
+  test("captureLiveTemplateAsync pins an unspecified base capture to Opus 4.8", async () => {
+    let requestedModel: string | undefined;
+    setFingerprintCaptureTestOverridesForTest({
+      findClaudeBinary: () => "/mock/claude",
+      runClaudeCapture: async ({ model }) => {
+        requestedModel = model;
+      },
+    });
+
+    await captureLiveTemplateAsync(3_000);
+
+    expect(requestedModel).toBe("claude-opus-4-8");
   });
 
   test("captureLiveTemplateAsync returns null when the Claude binary is unavailable", async () => {
@@ -384,7 +422,7 @@ describe("fingerprint-capture", () => {
     const { dir, cleanup } = await setupTestEnv();
 
     try {
-      const cacheWithOldSchema = createLiveTemplate({ _schemaVersion: 0 });
+      const cacheWithOldSchema = createLiveTemplate({ _schemaVersion: 1 });
 
       await fs.writeFile(
         join(dir, CACHE_FILE_NAME),
@@ -645,7 +683,7 @@ describe("fingerprint-capture", () => {
 
     try {
       const cacheWithIncompleteTools = createLiveTemplate({
-        _schemaVersion: 1,
+        _schemaVersion: 2,
         tools: [{ name: "Bash" }, { name: "Read" }],
       });
 
@@ -698,7 +736,7 @@ describe("fingerprint-capture", () => {
 
       const invalidFreshTemplate = createLiveTemplate({
         _captured: new Date().toISOString(),
-        _schemaVersion: 0,
+        _schemaVersion: 1,
       });
 
       await fs.writeFile(
@@ -783,10 +821,12 @@ describe("fingerprint-capture", () => {
       expect(refreshed?.tools.some((t) => t.name === "mcp__secret__tool")).toBe(true);
       expect(refreshed?.system_prompt).not.toContain("# Environment");
       expect(refreshed?.system_prompt).toContain("# Remaining");
+      expect(refreshed?.system_prompt_variants).toEqual(bundled.system_prompt_variants);
 
       const cachedJson = JSON.parse(await fs.readFile(join(dir, CACHE_FILE_NAME), "utf8")) as Record<string, unknown>;
       const cachedTools = cachedJson.tools as Array<{ name: string }>;
       expect(cachedTools.some((t) => t.name === "mcp__secret__tool")).toBe(true);
+      expect(cachedJson.system_prompt_variants).toBeUndefined();
     } finally {
       await cleanup();
     }

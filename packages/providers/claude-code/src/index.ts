@@ -25,8 +25,10 @@ import {
   isClaudeCode1mModelLabel,
   isClaudeFableModel,
   isSuspendedClaudeCodeModel,
+  promptVariantKeyForClaudeCodeModel,
   resolveClaudeCodeCacheControl,
   resolveClaudeCodeModelAlias,
+  selectClaudeCodeSystemPrompt,
   stampClaudeCodeCch,
   toClaudeCodeWireModelId,
 } from "./opencode-shared";
@@ -78,7 +80,7 @@ const TOKEN_EXPIRY_BUFFER_MS = 60_000;
 const BILLABLE_BETA_PREFIXES = ["extended-cache-ttl-"];
 const CONTEXT_1M_BETA = "context-1m-2025-08-07";
 const CONTEXT_MANAGEMENT_BETA = "context-management-2025-06-27";
-const FABLE_FALLBACK_CREDIT_BETA = "fallback-credit-2026-06-01";
+const FALLBACK_CREDIT_BETA = "fallback-credit-2026-06-01";
 const MID_CONVERSATION_SYSTEM_BETA = "mid-conversation-system-2026-04-07";
 const EFFORT_BETA = "effort-2025-11-24";
 const LONG_CONTEXT_BETAS = [CONTEXT_1M_BETA, CONTEXT_MANAGEMENT_BETA] as const;
@@ -88,15 +90,16 @@ const CLAUDE_CODE_AGENT_IDENTITY =
   templateMetadata.agentIdentity ?? "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
 const CLAUDE_CODE_SYSTEM_PROMPT =
   templateMetadata.systemPrompt ?? "You are an interactive agent that helps users with software engineering tasks. Follow the user's instructions carefully, use available tools when appropriate, and keep responses focused on the task.";
-const CLAUDE_CODE_FABLE_SYSTEM_PROMPT =
-  templateMetadata.systemPromptFable ?? CLAUDE_CODE_SYSTEM_PROMPT;
+const CLAUDE_CODE_SYSTEM_PROMPT_TEMPLATE = {
+  system_prompt: CLAUDE_CODE_SYSTEM_PROMPT,
+  system_prompt_fable: templateMetadata.systemPromptFable,
+  system_prompt_variants: templateMetadata.systemPromptVariants,
+};
 const sessionIdsByKey = new Map<string, ClaudeSessionState>();
 const fallbackDeviceId = randomUUID();
 
 function getSystemPromptForModel(modelId: string | undefined): string {
-  return modelId && isClaudeFableModel(modelId)
-    ? CLAUDE_CODE_FABLE_SYSTEM_PROMPT
-    : CLAUDE_CODE_SYSTEM_PROMPT;
+  return selectClaudeCodeSystemPrompt(CLAUDE_CODE_SYSTEM_PROMPT_TEMPLATE, modelId);
 }
 
 export interface ClaudeCodeProviderOptions {
@@ -1404,6 +1407,7 @@ function getClaudeCodeBetasForModel(
   excludedBetas: Set<string> = new Set(),
 ): string {
   const normalizedModel = model ? resolveClaudeCodeModelAlias(model).toLowerCase() : "";
+  const promptVariantKey = promptVariantKeyForClaudeCodeModel(model);
   const values = splitBetaHeader(defaults);
   const add = (beta: string): void => {
     if (!excludedBetas.has(beta) && !values.includes(beta)) values.push(beta);
@@ -1413,8 +1417,8 @@ function getClaudeCodeBetasForModel(
     if (index !== -1) values.splice(index, 1);
   };
 
-  if (model && isClaudeFableModel(model)) {
-    add(FABLE_FALLBACK_CREDIT_BETA);
+  if (promptVariantKey === "fable" || promptVariantKey === "opus-5") {
+    add(FALLBACK_CREDIT_BETA);
   }
   if (model && isClaudeCode1mModelLabel(model)) {
     add(CONTEXT_1M_BETA);

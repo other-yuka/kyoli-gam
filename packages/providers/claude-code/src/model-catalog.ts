@@ -2,6 +2,7 @@ import { CredentialUnavailableError, type ModelInfo } from "@kyoli-gam/core";
 import {
   aliasesForClaudeCodeModel,
   CLAUDE_FABLE_MODEL_ID,
+  CLAUDE_OPUS_MODEL_ID,
   CLAUDE_SONNET_MODEL_ID,
   compareClaudeCodeBaseModelIds,
   isClaudeCode1mModelLabel,
@@ -20,6 +21,7 @@ const MIN_GENERATION = 4;
 
 export const FALLBACK_CLAUDE_CODE_BASE_MODELS: readonly ClaudeCodeCatalogEntry[] = [
   { id: CLAUDE_FABLE_MODEL_ID, displayName: "Claude Fable 5" },
+  { id: CLAUDE_OPUS_MODEL_ID, displayName: "Claude Opus 5" },
   { id: "claude-opus-4-8", displayName: "Claude Opus 4.8" },
   { id: "claude-opus-4-7", displayName: "Claude Opus 4.7" },
   { id: "claude-opus-4-6", displayName: "Claude Opus 4.6" },

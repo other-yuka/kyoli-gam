@@ -36,7 +36,7 @@ export async function runClaudeBillingClaimDoctor(
   config: CliConfig,
   options: ClaudeBillingClaimDoctorOptions = {},
 ): Promise<DoctorReport> {
-  const model = options.model ?? "anthropic/claude-opus-4-8";
+  const model = options.model ?? "anthropic/claude-opus-5";
   const trace: AccountExecutionTraceEvent[] = [];
   const accounts = await store.listByProvider("claude-code");
   const pool = new StickyAccountPool(store, {

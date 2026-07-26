@@ -35,10 +35,12 @@ describe("capture live fingerprint set", () => {
       .rejects.toThrow("Fable live fingerprint capture failed");
   });
 
-  test("combines matching primary and Fable captures", async () => {
+  test("combines matching base and model-specific captures", async () => {
     captureLiveTemplateAsync
       .mockResolvedValueOnce(template("primary"))
-      .mockResolvedValueOnce(template("fable"));
+      .mockResolvedValueOnce(template("fable"))
+      .mockResolvedValueOnce(template("primary"))
+      .mockResolvedValueOnce(template("sonnet-5"));
 
     await expect(
       captureLiveFingerprintSetAsync(10_000, {
@@ -47,10 +49,23 @@ describe("capture live fingerprint set", () => {
       }),
     ).resolves.toMatchObject({
       system_prompt: "primary",
-      system_prompt_fable: "fable",
+      system_prompt_variants: {
+        fable: "fable",
+        "opus-5": "primary",
+        "sonnet-5": "sonnet-5",
+      },
     });
     expect(captureLiveTemplateAsync).toHaveBeenNthCalledWith(1, 10_000, {
       cacheControlEvidencePath: "live-cache-control.json",
+    });
+    expect(captureLiveTemplateAsync).toHaveBeenNthCalledWith(2, 10_000, {
+      model: "fable",
+    });
+    expect(captureLiveTemplateAsync).toHaveBeenNthCalledWith(3, 10_000, {
+      model: "claude-opus-5",
+    });
+    expect(captureLiveTemplateAsync).toHaveBeenNthCalledWith(4, 10_000, {
+      model: "claude-sonnet-5",
     });
   });
 });

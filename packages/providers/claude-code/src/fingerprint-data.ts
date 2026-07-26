@@ -8,6 +8,7 @@ export interface ClaudeCodeFingerprintData {
   agent_identity: string;
   system_prompt: string;
   system_prompt_fable?: string;
+  system_prompt_variants?: Record<string, string>;
   tools: Array<{ name: string; [key: string]: unknown }>;
   tool_names: string[];
   anthropic_beta?: string;

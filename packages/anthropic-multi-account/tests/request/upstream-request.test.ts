@@ -466,17 +466,26 @@ describe("upstream-request", () => {
     expect(resolveOutputEffort({ output_config: { effort: "ultracode" } }, undefined, "claude-fable-5")).toBe("xhigh");
   });
 
-  test("buildUpstreamRequest selects the Fable system prompt variant when present", () => {
+  test.each([
+    ["fable", "fable prompt"],
+    ["opus", "opus 5 prompt"],
+    ["sonnet", "sonnet 5 prompt"],
+    ["opus48", "base prompt"],
+  ])("buildUpstreamRequest selects the %s system prompt", (model, prompt) => {
     const result = buildUpstreamRequest({
-      model: "fable",
+      model,
       messages: [{ role: "user", content: "hello" }],
     }, createIdentity(), createTemplate({
       system_prompt: "base prompt",
-      system_prompt_fable: "fable prompt",
+      system_prompt_fable: "legacy fable prompt",
+      system_prompt_variants: {
+        fable: "fable prompt",
+        "opus-5": "opus 5 prompt",
+        "sonnet-5": "sonnet 5 prompt",
+      },
     }));
 
-    expect(result.system).toContainEqual(expect.objectContaining({ text: "fable prompt" }));
-    expect(result.system).not.toContainEqual(expect.objectContaining({ text: "base prompt" }));
+    expect(result.system).toContainEqual(expect.objectContaining({ text: prompt }));
   });
 
   test("buildUpstreamRequest maps Fable aliases to CC wire shape", () => {
@@ -509,6 +518,19 @@ describe("upstream-request", () => {
     }, createIdentity(), createTemplate());
 
     expect(result.model).toBe("claude-sonnet-5");
+    expect(result.thinking).toEqual({ type: "adaptive", display: "omitted" });
+    expect(result.context_management).toEqual({});
+    expect(result.output_config).toEqual({ effort: "max" });
+  });
+
+  test("buildUpstreamRequest maps Opus aliases to adaptive Opus 5 wire shape", () => {
+    const result = buildUpstreamRequest({
+      model: "opus",
+      output_config: { effort: "max" },
+      messages: [{ role: "user", content: "hello" }],
+    }, createIdentity(), createTemplate());
+
+    expect(result.model).toBe("claude-opus-5");
     expect(result.thinking).toEqual({ type: "adaptive", display: "omitted" });
     expect(result.context_management).toEqual({});
     expect(result.output_config).toEqual({ effort: "max" });
@@ -596,16 +618,20 @@ describe("upstream-request", () => {
   });
 
   test("buildUpstreamRequest filters already-injected upstream system entries before rebuilding blocks", () => {
-    const template = createTemplate();
+    const template = createTemplate({
+      system_prompt_variants: {
+        "opus-5": "Opus 5 prompt",
+      },
+    });
     const firstUserMessage = "hello reviewer";
     const billingHeader = `x-anthropic-billing-header: cc_version=${template.cc_version}.${computeBuildTag(firstUserMessage, template.cc_version!)}; cc_entrypoint=sdk-cli;`;
 
     const result = buildUpstreamRequest({
-      model: "claude-sonnet-4-6",
+      model: "opus",
       system: [
         billingHeader,
         template.agent_identity,
-        template.system_prompt,
+        template.system_prompt_variants?.["opus-5"],
         "Local reminder",
       ],
       messages: [{ role: "user", content: firstUserMessage }],
@@ -615,7 +641,7 @@ describe("upstream-request", () => {
 
     expect(systemBlocks[0]?.text).toBe(billingHeader);
     expect(systemBlocks[1]?.text).toBe(template.agent_identity);
-    expect(systemBlocks[2]?.text).toBe(`${template.system_prompt}${CLIENT_SYSTEM_PREFACE}Local reminder`);
+    expect(systemBlocks[2]?.text).toBe(`Opus 5 prompt${CLIENT_SYSTEM_PREFACE}Local reminder`);
     expect(systemBlocks[2]?.text.includes(billingHeader)).toBe(false);
     expect(systemBlocks[2]?.text.includes(template.agent_identity)).toBe(false);
   });

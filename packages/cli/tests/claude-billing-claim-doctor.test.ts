@@ -112,7 +112,7 @@ describe("runClaudeBillingClaimDoctor", () => {
     const servedModel = report.checks.find((check) => check.name === "served model");
     expect(servedModel).toMatchObject({
       status: "fail",
-      detail: "requested=claude-opus-4-8 served=claude-haiku-4-5",
+      detail: "requested=claude-opus-5 served=claude-haiku-4-5",
     });
   });
 });
@@ -161,7 +161,7 @@ function createSequencedClaudeFetch(
     return new Response(JSON.stringify({
       id: "msg_test",
       type: "message",
-      model: options.servedModel ?? "claude-opus-4-8",
+      model: options.servedModel ?? "claude-opus-5",
     }), {
       status: 200,
       headers: {

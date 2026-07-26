@@ -117,6 +117,22 @@ describe("buildRequestHeaders", () => {
     expect(fableBetas).toContain("fallback-credit-2026-06-01");
     expect(fableBetas).toContain("context-1m-2025-08-07");
 
+    const opus5Headers = new Headers(buildRequestHeaders(
+      "https://api.anthropic.com/v1/messages",
+      { headers: {} },
+      "token-123",
+      "claude-opus-5",
+    ));
+    expect(splitBetas(opus5Headers.get("anthropic-beta"))).toContain("fallback-credit-2026-06-01");
+
+    const opus48Headers = new Headers(buildRequestHeaders(
+      "https://api.anthropic.com/v1/messages",
+      { headers: {} },
+      "token-123",
+      "claude-opus-4-8",
+    ));
+    expect(splitBetas(opus48Headers.get("anthropic-beta"))).not.toContain("fallback-credit-2026-06-01");
+
     const sonnetHeaders = new Headers(buildRequestHeaders(
       "https://api.anthropic.com/v1/messages",
       { headers: {} },

@@ -11,6 +11,7 @@ interface TemplateLike {
   agent_identity: string;
   system_prompt: string;
   system_prompt_fable?: string;
+  system_prompt_variants?: Record<string, string>;
   tools: TemplateToolLike[];
   tool_names: string[];
   header_order?: string[];
@@ -242,6 +243,14 @@ export function scrubTemplate<T extends TemplateLike>(data: T, options?: ScrubTe
     system_prompt: systemPrompt,
     ...(typeof data.system_prompt_fable === "string"
       ? { system_prompt_fable: scrubSystemPrompt(data.system_prompt_fable) }
+      : {}),
+    ...(data.system_prompt_variants
+      ? {
+          system_prompt_variants: Object.fromEntries(
+            Object.entries(data.system_prompt_variants)
+              .map(([key, prompt]) => [key, scrubSystemPrompt(prompt)]),
+          ),
+        }
       : {}),
     tools,
     tool_names: tools.map((tool) => tool.name),

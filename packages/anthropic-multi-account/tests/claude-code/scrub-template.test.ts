@@ -39,6 +39,14 @@ function createTemplate(overrides: Partial<TemplateData> = {}): TemplateData {
       "# Remaining",
       `Use ${RAW_MAC_HOME}/fable for examples.`,
     ].join("\n"),
+    system_prompt_variants: {
+      "opus-5": [
+        "# CurrentDate",
+        "2026-04-18",
+        "# Remaining",
+        `Use ${RAW_MAC_HOME}/opus for examples.`,
+      ].join("\n"),
+    },
     tools: [
       {
         name: "Bash",
@@ -185,6 +193,9 @@ describe("scrubTemplate", () => {
 
     expect(scrubbed.system_prompt).toBe(["# Remaining", `Use ${SCRUBBED_MAC_HOME}/project for examples.`].join("\n"));
     expect(scrubbed.system_prompt_fable).toBe(["# Remaining", `Use ${SCRUBBED_MAC_HOME}/fable for examples.`].join("\n"));
+    expect(scrubbed.system_prompt_variants?.["opus-5"]).toBe(
+      ["# Remaining", `Use ${SCRUBBED_MAC_HOME}/opus for examples.`].join("\n"),
+    );
     expect(scrubbed.tools).toHaveLength(1);
     expect(scrubbed.tools[0]?.name).toBe("Bash");
     expect(scrubbed.tool_names).toEqual(["Bash"]);

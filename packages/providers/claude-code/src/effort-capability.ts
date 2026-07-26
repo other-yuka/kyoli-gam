@@ -23,6 +23,10 @@ function normalizeEffortValue(value: string): string {
 }
 
 export function parseEffortCapabilityRejection(body: string): EffortCapabilityRejection | null {
+  if (/does not support the effort parameter/i.test(body)) {
+    return { rejected: "", supported: [] };
+  }
+
   const match = /does not support effort level\s+['"`]?([^'"`.\s]+)['"`]?\.?\s*Supported levels:\s*([a-z,\s_-]+)/i.exec(body);
   if (!match?.[1] || !match[2]) {
     return null;
@@ -70,6 +74,11 @@ export function clampUnsupportedEffortInBody<TBody extends BodyInit | null | und
     if (!supported || supported.includes(effort)) {
       return { body, changed: false, modelId, effort };
     }
+    if (supported.length === 0) {
+      delete outputConfig.effort;
+      if (Object.keys(outputConfig).length === 0) delete record?.output_config;
+      return { body: JSON.stringify(record), changed: true, modelId };
+    }
 
     const clamped = bestSupportedEffort(supported);
     outputConfig.effort = clamped;
@@ -101,6 +110,11 @@ export function clampEffortAfterRejection<TBody extends BodyInit | null | undefi
     supportedEffortsByModel.set(modelId, [...rejection.supported]);
     if (rejection.supported.includes(effort)) {
       return { body, changed: false, modelId, effort };
+    }
+    if (rejection.supported.length === 0) {
+      delete outputConfig.effort;
+      if (Object.keys(outputConfig).length === 0) delete record?.output_config;
+      return { body: JSON.stringify(record), changed: true, modelId };
     }
 
     const clamped = bestSupportedEffort(rejection.supported);

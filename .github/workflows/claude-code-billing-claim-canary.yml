@@ -8,7 +8,7 @@ on:
       model:
         description: Optional Claude Code model id for the canary request
         required: false
-        default: "anthropic/claude-opus-4-8"
+        default: "anthropic/claude-opus-5"
       force_status:
         description: Override verdict for workflow path validation only
         required: false
@@ -56,7 +56,7 @@ jobs:
       - name: Run billing claim doctor
         id: check
         env:
-          KYOLI_CLAUDE_BILLING_CLAIM_MODEL: ${{ github.event.inputs.model || 'anthropic/claude-opus-4-8' }}
+          KYOLI_CLAUDE_BILLING_CLAIM_MODEL: ${{ github.event.inputs.model || 'anthropic/claude-opus-5' }}
           FORCE_STATUS: ${{ github.event.inputs.force_status || 'none' }}
         run: |
           if [ "$FORCE_STATUS" != "none" ]; then

@@ -18,7 +18,11 @@ function template(overrides: Record<string, unknown> = {}) {
   return {
     agent_identity: "Claude Code",
     system_prompt: "system",
-    system_prompt_fable: "fable-system",
+    system_prompt_variants: {
+      fable: "fable-system",
+      "opus-5": "opus-5-system",
+      "sonnet-5": "sonnet-5-system",
+    },
     tools,
     tool_names: tools.map((tool) => tool.name),
     cc_version: "2.1.205",
@@ -82,6 +86,28 @@ describe("live fingerprint drift utils", () => {
     expect(result.classification).toBe("clean");
   });
 
+  test("treats omitted prompt variants as the primary prompt fallback", () => {
+    const expected = template({
+      system_prompt_variants: {
+        ...template().system_prompt_variants,
+        "opus-5": "system",
+      },
+    });
+    const actual = template({
+      system_prompt_variants: {
+        fable: "fable-system",
+        "sonnet-5": "sonnet-5-system",
+      },
+    });
+
+    expect(classifyLiveFingerprintDiff(
+      expected,
+      actual,
+      [],
+      { targetVersion: "2.1.205" },
+    ).classification).toBe("clean");
+  });
+
   test("classifies a tool schema change with the same name as Class B", () => {
     const actual = template({
       tools: [
@@ -103,7 +129,12 @@ describe("live fingerprint drift utils", () => {
 
   test.each([
     ["system prompt", { system_prompt: "changed-system" }],
-    ["Fable system prompt", { system_prompt_fable: "changed-fable-system" }],
+    ["model system prompt", {
+      system_prompt_variants: {
+        ...template().system_prompt_variants,
+        "opus-5": "changed-opus-system",
+      },
+    }],
     ["Anthropic beta", { anthropic_beta: "oauth-2025-04-20,new-beta" }],
     ["non-version header value", {
       header_values: {
