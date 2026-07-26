@@ -1,5 +1,14 @@
 # opencode-anthropic-multi-account
 
+## 0.2.103
+
+### Patch Changes
+
+- [#271](https://github.com/other-yuka/kyoli-gam/pull/271) [`8cbc8cb`](https://github.com/other-yuka/kyoli-gam/commit/8cbc8cb678fec9781dc964f99a2faa35e8e1dea5) Thanks [@other-yuka](https://github.com/other-yuka)! - Align Claude Code Opus 5 model, prompt, beta, and effort-recovery contracts.
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.103
+
 ## 0.2.102
 
 ### Patch Changes
