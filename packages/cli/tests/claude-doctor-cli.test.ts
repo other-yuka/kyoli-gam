@@ -16,6 +16,12 @@ describe("doctor claude CLI", () => {
     expect(findCheck(report, "runtime/tls/node-only")).toMatchObject({ status: "warn" });
   });
 
+  it("orders client instructions after the selected model prompt", () => {
+    const report = runClaudeDoctor(undefined, "--obedience");
+
+    expect(findCheck(report, "client-system order")).toMatchObject({ status: "pass" });
+  });
+
   it.each([
     ["1.3.8", "warn"],
     ["canary", "warn"],
@@ -29,14 +35,14 @@ describe("doctor claude CLI", () => {
   });
 });
 
-function runClaudeDoctor(bunVersion?: string): DoctorReport {
+function runClaudeDoctor(bunVersion?: string, ...claudeArgs: string[]): DoctorReport {
   const bunShim = bunVersion
     ? `--import=data:text/javascript,Object.defineProperty(process.versions,%22bun%22,{value:%22${bunVersion}%22})`
     : undefined;
   const nodeOptions = [process.env.NODE_OPTIONS, bunShim].filter(Boolean).join(" ");
   const result = spawnSync(
     process.execPath,
-    ["--conditions=source", "--import", tsxLoaderPath, cliPath, "doctor", "claude", "--json"],
+    ["--conditions=source", "--import", tsxLoaderPath, cliPath, "doctor", "claude", ...claudeArgs, "--json"],
     {
       cwd: repoRoot,
       encoding: "utf8",

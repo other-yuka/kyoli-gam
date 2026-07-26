@@ -41,7 +41,10 @@ import {
   startClaudeCodeOAuthLogin,
 } from "@kyoli-gam/provider-claude-code";
 import { compareVersions } from "@kyoli-gam/provider-claude-code/fingerprint";
-import { summarizeClaudeCodeCacheControls } from "@kyoli-gam/provider-claude-code/opencode";
+import {
+  selectClaudeCodeSystemPrompt,
+  summarizeClaudeCodeCacheControls,
+} from "@kyoli-gam/provider-claude-code/opencode";
 import {
   consumeCodexRateLimitResetCredit,
   createCodexChatGPTProvider,
@@ -1862,6 +1865,7 @@ async function runClaudeObedienceDoctor(): Promise<DoctorReport> {
   let upstreamUrl = "";
   let upstreamBody: Record<string, unknown> = {};
   const clientSystemText = "Reply with ONLY the word PONG.";
+  const model = "anthropic/claude-sonnet-5";
 
   const store = new MemoryAccountStore();
   await store.create({
@@ -1898,7 +1902,7 @@ async function runClaudeObedienceDoctor(): Promise<DoctorReport> {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        model: "anthropic/claude-sonnet-5",
+        model,
         max_tokens: 16,
         system: clientSystemText,
         messages: [{ role: "user", content: "obedience probe" }],
@@ -1907,17 +1911,22 @@ async function runClaudeObedienceDoctor(): Promise<DoctorReport> {
     route: "/v1/messages",
     sessionKey: "doctor-claude-obedience",
     body: {
-      model: "anthropic/claude-sonnet-5",
+      model,
       max_tokens: 16,
       system: clientSystemText,
       messages: [{ role: "user", content: "obedience probe" }],
     },
-    model: "anthropic/claude-sonnet-5",
+    model,
   });
 
   const systemBlocks = Array.isArray(upstreamBody.system) ? upstreamBody.system : [];
   const systemText = readRecord(systemBlocks[2])?.text;
-  const systemPrompt = getClaudeCodeTemplateMetadata().systemPrompt ?? "";
+  const template = getClaudeCodeTemplateMetadata();
+  const systemPrompt = selectClaudeCodeSystemPrompt({
+    system_prompt: template.systemPrompt ?? "",
+    system_prompt_fable: template.systemPromptFable,
+    system_prompt_variants: template.systemPromptVariants,
+  }, model);
   const checks: DoctorCheck[] = [
     check("route", upstreamUrl === "https://doctor.invalid/v1/messages?beta=true", upstreamUrl),
     check("system blocks", systemBlocks.length === 3, `${systemBlocks.length} outbound system block(s)`),
