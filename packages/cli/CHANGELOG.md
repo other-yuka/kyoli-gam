@@ -1,5 +1,11 @@
 # @kyoli-gam/cli
 
+## 0.0.44
+
+### Patch Changes
+
+- [#276](https://github.com/other-yuka/kyoli-gam/pull/276) [`f478046`](https://github.com/other-yuka/kyoli-gam/commit/f478046b3b8d2ff2e3fb3de4203c937a37264016) Thanks [@other-yuka](https://github.com/other-yuka)! - Keep Claude obedience doctor prompt-order checks aligned with the selected model prompt.
+
 ## 0.0.43
 
 ### Patch Changes
