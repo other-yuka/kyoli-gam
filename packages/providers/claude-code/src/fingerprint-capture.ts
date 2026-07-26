@@ -17,8 +17,12 @@ import { findClaudeCodeBinary } from "./oauth-config";
 import { scrubTemplate } from "./scrub-template";
 import { getConfigDir } from "opencode-multi-account-core";
 import { summarizeClaudeCodeCacheControls } from "./opencode-shared";
+import {
+  CLAUDE_CODE_BASE_CAPTURE_MODEL_ID,
+  getClaudeCodeSystemPromptVariants,
+} from "./model-aliases";
 
-const CURRENT_SCHEMA_VERSION = 1;
+const CURRENT_SCHEMA_VERSION = 2;
 const LIVE_TTL_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_CAPTURE_TIMEOUT_MS = 10_000;
 const CACHE_FILE_NAME = "fingerprint-cache.json";
@@ -60,6 +64,7 @@ export interface TemplateData {
   agent_identity: string;
   system_prompt: string;
   system_prompt_fable?: string;
+  system_prompt_variants?: Record<string, string>;
   tools: TemplateTool[];
   tool_names: string[];
   anthropic_beta?: string;
@@ -132,6 +137,13 @@ function isTemplateData(value: unknown): value is TemplateData {
     && typeof value._source === "string"
     && typeof value.agent_identity === "string"
     && typeof value.system_prompt === "string"
+    && (value.system_prompt_variants === undefined || (
+      !Array.isArray(value.system_prompt_variants)
+      && isRecord(value.system_prompt_variants)
+      && Object.values(value.system_prompt_variants).every(
+        (prompt) => typeof prompt === "string" && prompt.length > 0,
+      )
+    ))
     && Array.isArray(value.tools)
     && value.tools.every(isTemplateTool)
     && Array.isArray(value.tool_names)
@@ -157,18 +169,24 @@ function cloneTemplate(template: TemplateData, sourceOverride?: TemplateSource):
     header_order: template.header_order ? [...template.header_order] : undefined,
     header_values: template.header_values ? { ...template.header_values } : undefined,
     body_field_order: template.body_field_order ? [...template.body_field_order] : undefined,
+    system_prompt_variants: template.system_prompt_variants
+      ? { ...template.system_prompt_variants }
+      : undefined,
   };
 }
 
 function applyBundledTemplateFallbacks(template: TemplateData): TemplateData {
-  const bundledFablePrompt = bundledTemplate.system_prompt_fable;
-  if (template.system_prompt_fable || typeof bundledFablePrompt !== "string" || bundledFablePrompt.length === 0) {
+  const variants = {
+    ...getClaudeCodeSystemPromptVariants(bundledTemplate),
+    ...getClaudeCodeSystemPromptVariants(template),
+  };
+  if (Object.keys(variants).length === 0) {
     return template;
   }
 
   return {
     ...template,
-    system_prompt_fable: bundledFablePrompt,
+    system_prompt_variants: variants,
   };
 }
 
@@ -575,7 +593,12 @@ export async function captureLiveTemplateAsync(
     });
 
     const baseUrl = `http://${LOOPBACK_HOST}:${address.port}`;
-    await runClaudeCapture({ binaryPath, baseUrl, timeoutMs, model: options.model });
+    await runClaudeCapture({
+      binaryPath,
+      baseUrl,
+      timeoutMs,
+      model: options.model ?? CLAUDE_CODE_BASE_CAPTURE_MODEL_ID,
+    });
 
     const captured = capturedRequest as CapturedRequest | null;
     if (!captured) {
@@ -631,9 +654,8 @@ export async function refreshLiveFingerprintAsync(options?: {
       return null;
     }
 
-    const liveTemplate = applyBundledTemplateFallbacks(scrubbed);
-    await writeLiveCache(liveTemplate);
-    return liveTemplate;
+    await writeLiveCache(scrubbed);
+    return applyBundledTemplateFallbacks(scrubbed);
   } catch {
     return null;
   }

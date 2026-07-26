@@ -3,10 +3,12 @@ import {
   applyClaudeCodeUpstreamBodyFields,
   composeClaudeCodeBillingSystemEntry,
   computeClaudeCodeBuildTag,
+  getClaudeCodeSystemPromptVariants,
   isClaudeFableModel,
   orderClaudeCodeBodyForOutbound,
   resolveClaudeCodeCacheControl,
   resolveClaudeCodeModelAlias,
+  selectClaudeCodeSystemPrompt,
   stampClaudeCodeCch,
   toClaudeCodeWireModelId,
 } from "@kyoli-gam/provider-claude-code/opencode";
@@ -144,12 +146,6 @@ function isHaikuModel(modelId: string): boolean {
   return resolveClaudeCodeModelAlias(modelId).toLowerCase().includes("haiku");
 }
 
-function getSystemPromptForModel(template: TemplateData, modelId: string): string {
-  return modelId.toLowerCase().includes("fable") && template.system_prompt_fable
-    ? template.system_prompt_fable
-    : template.system_prompt;
-}
-
 function collectToolUseIds(message: Message): string[] {
   if (!Array.isArray(message.content)) {
     return [];
@@ -204,6 +200,7 @@ const ADAPTIVE_THINKING_MODEL_MATCHERS = [
   (modelId: string) => modelId.includes("claude-sonnet-4-6") || modelId.includes("claude-sonnet-4.6"),
   (modelId: string) => modelId.includes("claude-opus-4-6") || modelId.includes("claude-opus-4.6"),
   (modelId: string) => /claude-opus-4[-._]([7-9]|\d{2,})/.test(modelId),
+  (modelId: string) => /claude-opus-(?:[5-9]|\d{2,})(?:[-._]\d+)?(?:\[1m\])?$/.test(modelId),
   (modelId: string) => /claude-fable-(?:[5-9]|\d{2,})(?:[-._]\d+)?(?:\[1m\])?$/.test(modelId),
 ];
 const DEFAULT_MAX_OUTPUT_TOKENS = 32_000;
@@ -240,10 +237,12 @@ function filterInjectedSystemTexts(
   template: TemplateData,
   billingHeader: string,
 ): string[] {
+  const promptVariants = new Set(Object.values(getClaudeCodeSystemPromptVariants(template)));
   return systemTexts.filter((entry) => (
     entry !== billingHeader
     && entry !== template.agent_identity
     && entry !== template.system_prompt
+    && !promptVariants.has(entry)
     && !entry.startsWith("x-anthropic-billing-header:")
   ));
 }
@@ -359,7 +358,7 @@ export function buildUpstreamRequest(
       deviceId: identity.deviceId,
     },
     sessionId: activeSessionId,
-    systemPrompt: getSystemPromptForModel(template, modelId),
+    systemPrompt: selectClaudeCodeSystemPrompt(template, modelId),
     systemTexts: filterInjectedSystemTexts(
       systemTexts,
       template,

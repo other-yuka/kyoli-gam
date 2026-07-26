@@ -1,7 +1,7 @@
 import { claudeCodeIntegration } from "../claude-code";
 import { ANTHROPIC_OAUTH_ADAPTER } from "../shared/constants";
 
-export const FABLE_FALLBACK_CREDIT_BETA = "fallback-credit-2026-06-01";
+export const FALLBACK_CREDIT_BETA = "fallback-credit-2026-06-01";
 export const MID_CONVERSATION_SYSTEM_BETA = "mid-conversation-system-2026-04-07";
 export const EFFORT_BETA = "effort-2025-11-24";
 
@@ -28,7 +28,10 @@ export const config: ModelConfig = {
   longContextBetas: ["context-1m-2025-08-07", "context-management-2025-06-27"],
   modelOverrides: {
     fable: {
-      add: [FABLE_FALLBACK_CREDIT_BETA],
+      add: [FALLBACK_CREDIT_BETA],
+    },
+    "opus-5": {
+      add: [FALLBACK_CREDIT_BETA],
     },
     "sonnet-5": {
       add: [EFFORT_BETA],

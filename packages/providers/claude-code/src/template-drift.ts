@@ -10,6 +10,7 @@ import {
   getClaudeCodeTemplateTools,
 } from "./fingerprint-template";
 import { scrubSystemPrompt, scrubText } from "./scrub-template";
+import { CLAUDE_CODE_BASE_CAPTURE_MODEL_ID } from "./model-aliases";
 
 export interface ClaudeCodeTemplateDriftReport {
   binaryPath?: string;
@@ -217,8 +218,8 @@ async function runClaudeCapture(
   const isNodeScript = /\.(?:cjs|mjs|js)$/.test(binaryPath);
   const command = isNodeScript ? process.execPath : binaryPath;
   const args = isNodeScript
-    ? [binaryPath, "--print", "-p", "hi"]
-    : ["--print", "-p", "hi"];
+    ? [binaryPath, "--print", "-p", "hi", "--model", CLAUDE_CODE_BASE_CAPTURE_MODEL_ID]
+    : ["--print", "-p", "hi", "--model", CLAUDE_CODE_BASE_CAPTURE_MODEL_ID];
 
   await new Promise<void>((resolve, reject) => {
     const child = spawn(command, args, {

@@ -3,12 +3,15 @@ const FAMILY_RANK: Record<string, number> = { fable: 0, opus: 1, sonnet: 2, haik
 
 export const CLAUDE_FABLE_MODEL_ID = "claude-fable-5";
 export const CLAUDE_FABLE_1M_MODEL_ID = `${CLAUDE_FABLE_MODEL_ID}[1m]`;
+export const CLAUDE_OPUS_MODEL_ID = "claude-opus-5";
 export const CLAUDE_SONNET_MODEL_ID = "claude-sonnet-5";
 export const CLAUDE_SONNET_1M_MODEL_ID = `${CLAUDE_SONNET_MODEL_ID}[1m]`;
+export const CLAUDE_CODE_BASE_CAPTURE_MODEL_ID = "claude-opus-4-8";
 
 export const FALLBACK_CLAUDE_CODE_BASE_MODEL_IDS = [
   CLAUDE_FABLE_MODEL_ID,
-  "claude-opus-4-8",
+  CLAUDE_OPUS_MODEL_ID,
+  CLAUDE_CODE_BASE_CAPTURE_MODEL_ID,
   "claude-opus-4-7",
   "claude-opus-4-6",
   CLAUDE_SONNET_MODEL_ID,
@@ -17,6 +20,7 @@ export const FALLBACK_CLAUDE_CODE_BASE_MODEL_IDS = [
 ] as const;
 
 const STATIC_MODEL_ALIASES: Record<string, string> = {
+  opus48: CLAUDE_CODE_BASE_CAPTURE_MODEL_ID,
   opus47: "claude-opus-4-7",
   opus46: "claude-opus-4-6",
   sonnet46: "claude-sonnet-4-6",
@@ -38,6 +42,11 @@ export function resetCachedClaudeCodeBaseModelsForTest(): void {
 
 export function aliasesForClaudeCodeModel(id: string, baseIds: readonly string[]): string[] {
   const aliases = [id, `claude-code/${id}`];
+  for (const [alias, target] of Object.entries(STATIC_MODEL_ALIASES)) {
+    if (target === id) {
+      aliases.push(alias, `claude-code/${alias}`, `anthropic/${alias}`);
+    }
+  }
   const stripped = stripClaudeCodeContext1mTag(id);
   const family = modelFamily(stripped);
   if (!family || resolveFamilyBase(family, baseIds) !== stripped) return aliases;
@@ -79,6 +88,39 @@ export function isClaudeCode1mModelLabel(modelId: string): boolean {
 
 export function isClaudeFableModel(modelId: string): boolean {
   return resolveClaudeCodeModelAlias(modelId).toLowerCase().includes("fable");
+}
+
+export interface ClaudeCodeSystemPromptTemplate {
+  system_prompt: string;
+  system_prompt_fable?: string;
+  system_prompt_variants?: Record<string, string>;
+}
+
+export function getClaudeCodeSystemPromptVariants(
+  template: ClaudeCodeSystemPromptTemplate,
+): Record<string, string> {
+  const variants = { ...(template.system_prompt_variants ?? {}) };
+  if (!variants.fable && template.system_prompt_fable) {
+    variants.fable = template.system_prompt_fable;
+  }
+  return variants;
+}
+
+export function promptVariantKeyForClaudeCodeModel(modelId: string | undefined): string | undefined {
+  const normalized = modelId ? resolveClaudeCodeModelAlias(modelId).toLowerCase() : "";
+  if (normalized.includes("fable")) return "fable";
+  if (/opus-5(?!\d)/.test(normalized)) return "opus-5";
+  if (/sonnet-5(?!\d)/.test(normalized)) return "sonnet-5";
+  return undefined;
+}
+
+export function selectClaudeCodeSystemPrompt(
+  template: ClaudeCodeSystemPromptTemplate,
+  modelId: string | undefined,
+): string {
+  const key = promptVariantKeyForClaudeCodeModel(modelId);
+  return (key ? getClaudeCodeSystemPromptVariants(template)[key] : undefined)
+    ?? template.system_prompt;
 }
 
 export function isSuspendedClaudeCodeModel(

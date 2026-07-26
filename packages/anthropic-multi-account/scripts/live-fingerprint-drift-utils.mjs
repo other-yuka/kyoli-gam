@@ -10,6 +10,7 @@ const INTERACTIVE_ONLY_TOOL_NAMES = new Set([
 ]);
 
 const USER_AGENT_VERSION_PATTERN = /^(claude-cli\/)\d+\.\d+\.\d+/;
+const SYSTEM_PROMPT_VARIANT_KEYS = ["fable", "opus-5", "sonnet-5"];
 
 function comparableHeadlessTools(template) {
   const tools = Array.isArray(template.tools)
@@ -33,6 +34,19 @@ function userAgentVersion(template) {
     : null;
 }
 
+function comparablePromptVariants(template) {
+  const variants = { ...(template.system_prompt_variants ?? {}) };
+  if (!variants.fable && typeof template.system_prompt_fable === "string") {
+    variants.fable = template.system_prompt_fable;
+  }
+  const keys = new Set([...SYSTEM_PROMPT_VARIANT_KEYS, ...Object.keys(variants)]);
+  return Object.fromEntries(
+    [...keys]
+      .sort((left, right) => left.localeCompare(right))
+      .map((key) => [key, variants[key] ?? template.system_prompt]),
+  );
+}
+
 export function summarizeLiveFingerprintDiff(expected, actual) {
   const expectedTools = expected.tool_names ?? [];
   const actualTools = actual.tool_names ?? [];
@@ -41,7 +55,8 @@ export function summarizeLiveFingerprintDiff(expected, actual) {
   return {
     agentIdentityMatches: expected.agent_identity === actual.agent_identity,
     systemPromptMatches: expected.system_prompt === actual.system_prompt,
-    systemPromptFableMatches: (expected.system_prompt_fable ?? null) === (actual.system_prompt_fable ?? null),
+    systemPromptVariantsMatch: JSON.stringify(comparablePromptVariants(expected))
+      === JSON.stringify(comparablePromptVariants(actual)),
     toolDefinitionsMatch: JSON.stringify(comparableExpectedTools) === JSON.stringify(comparableActualTools),
     ccVersionMatches: (expected.cc_version ?? null) === (actual.cc_version ?? null),
     anthropicBetaMatches: (expected.anthropic_beta ?? null) === (actual.anthropic_beta ?? null),
@@ -91,7 +106,7 @@ export function classifyLiveFingerprintDiff(expected, actual, residualHits = [],
   }
 
   const shapeMatches = summary.systemPromptMatches
-    && summary.systemPromptFableMatches
+    && summary.systemPromptVariantsMatch
     && summary.toolDefinitionsMatch
     && summary.anthropicBetaMatches
     && summary.headerOrderMatches

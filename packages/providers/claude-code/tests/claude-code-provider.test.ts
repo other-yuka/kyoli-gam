@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { MemoryAccountStore, StickyAccountPool } from "@kyoli-gam/core";
+import { MemoryAccountStore, ModelRegistry, StickyAccountPool } from "@kyoli-gam/core";
 import {
   applyClaudeCodeUpstreamBodyFields,
   checkClaudeCodeTemplateDrift,
@@ -320,18 +320,34 @@ describe("createClaudeCodeProvider", () => {
     );
   });
 
+  it("routes the Opus family to Opus 5 while preserving the Opus 4.8 pin", async () => {
+    const registry = new ModelRegistry([createTestClaudeCodeProvider()]);
+    await expect(registry.resolve("opus")).resolves.toMatchObject({
+      upstreamId: "claude-opus-5",
+    });
+    await expect(registry.resolve("opus48")).resolves.toMatchObject({
+      upstreamId: "claude-opus-4-8",
+    });
+    await expect(registry.resolve("anthropic/opus48")).resolves.toMatchObject({
+      upstreamId: "claude-opus-4-8",
+    });
+  });
+
   it("derives Claude Code family and 1m aliases from the advertised base catalog", async () => {
     const provider = createTestClaudeCodeProvider();
     const models = await provider.listModels();
 
     expect(models).toContainEqual(expect.objectContaining({
-      upstreamId: "claude-opus-4-8",
+      upstreamId: "claude-opus-5",
       aliases: expect.arrayContaining(["opus", "claude-code/opus"]),
     }));
     expect(models).toContainEqual(expect.objectContaining({
-      upstreamId: "claude-opus-4-8[1m]",
+      upstreamId: "claude-opus-5[1m]",
       aliases: expect.arrayContaining(["opus1m", "claude-code/opus1m"]),
       metadata: expect.objectContaining({ max_context_window: 1_000_000 }),
+    }));
+    expect(models).toContainEqual(expect.objectContaining({
+      upstreamId: "claude-opus-4-8",
     }));
     expect(models).toContainEqual(expect.objectContaining({
       upstreamId: "claude-sonnet-5",
@@ -557,7 +573,7 @@ describe("createClaudeCodeProvider", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          model: "claude-code/claude-sonnet-5",
+          model: "claude-code/opus",
           max_tokens: 1024,
           messages: [{ role: "user", content: "hello" }],
         }),
@@ -565,11 +581,11 @@ describe("createClaudeCodeProvider", () => {
       route: "/v1/messages",
       sessionKey: "session-a",
       body: {
-        model: "claude-code/claude-sonnet-5",
+        model: "claude-code/opus",
         max_tokens: 1024,
         messages: [{ role: "user", content: "hello" }],
       },
-      model: "claude-code/claude-sonnet-5",
+      model: "claude-code/opus",
     });
 
     expect(response.status).toBe(200);
@@ -583,6 +599,7 @@ describe("createClaudeCodeProvider", () => {
     expect(upstreamBeta).toContain("claude-code-20250219");
     expect(upstreamBeta).toContain("oauth-2025-04-20");
     expect(upstreamBeta).toContain("mid-conversation-system-2026-04-07");
+    expect(upstreamBeta).toContain("fallback-credit-2026-06-01");
     expect(upstreamSessionId).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
     );
@@ -591,7 +608,7 @@ describe("createClaudeCodeProvider", () => {
     );
     expect(upstreamTimeout).toBe("600");
     expect(upstreamBody).toMatchObject({
-      model: "claude-sonnet-5",
+      model: "claude-opus-5",
       max_tokens: 1024,
       messages: [{ role: "user", content: "hello" }],
     });
@@ -605,7 +622,7 @@ describe("createClaudeCodeProvider", () => {
     ]);
     expect((upstreamBody as { system: unknown[] }).system).toHaveLength(3);
     const systemText = (upstreamBody as { system: Array<{ text: string }> }).system[2]?.text ?? "";
-    expect(systemText).toBe(getClaudeCodeTemplateMetadata().systemPrompt);
+    expect(systemText).toBe(getClaudeCodeTemplateMetadata().systemPromptVariants?.["opus-5"]);
     expect(systemText.length).toBeGreaterThan(5_000);
     expect((upstreamBody as { tools: Array<{ name: string; input_schema?: unknown }> }).tools).toHaveLength(
       getClaudeCodeTemplateMetadata().toolNames.length,
@@ -1769,7 +1786,7 @@ describe("createClaudeCodeProvider", () => {
     expect(retryCounts).toEqual(["0", "1", "0"]);
   });
 
-  it("retries hard effort-capability 400s and caches the supported level", async () => {
+  it("retries without effort after a hard parameter rejection and caches it", async () => {
     const efforts: string[] = [];
     const retryCounts: string[] = [];
     const store = new MemoryAccountStore();
@@ -1797,7 +1814,7 @@ describe("createClaudeCodeProvider", () => {
           return new Response(
             JSON.stringify({
               error: {
-                message: "This model does not support effort level 'max'. Supported levels: high, low, medium.",
+                message: "This model does not support the effort parameter.",
               },
             }),
             { status: 400, headers: { "content-type": "application/json" } },
@@ -1813,21 +1830,21 @@ describe("createClaudeCodeProvider", () => {
 
     const firstContext = createMessagesContext(
       "session-effort",
-      "anthropic/claude-opus-4-5-20251101",
+      "anthropic/claude-opus-4-1-20250805",
     ) as ReturnType<typeof createMessagesContext> & { body: Record<string, unknown> };
     firstContext.body.output_config = { effort: "max" };
     const first = await provider.handleRequest(firstContext);
 
     const secondContext = createMessagesContext(
       "session-effort-2",
-      "anthropic/claude-opus-4-5-20251101",
+      "anthropic/claude-opus-4-1-20250805",
     ) as ReturnType<typeof createMessagesContext> & { body: Record<string, unknown> };
     secondContext.body.output_config = { effort: "max" };
     const second = await provider.handleRequest(secondContext);
 
     expect(first.status).toBe(200);
     expect(second.status).toBe(200);
-    expect(efforts).toEqual(["max", "high", "high"]);
+    expect(efforts).toEqual(["max", "", ""]);
     expect(retryCounts).toEqual(["0", "1", "0"]);
   });
 

@@ -14,6 +14,7 @@ interface FingerprintTemplate {
   header_values?: Record<string, string>;
   system_prompt?: string;
   system_prompt_fable?: string;
+  system_prompt_variants?: Record<string, string>;
   tool_names?: string[];
   tools: TemplateTool[];
 }
@@ -38,6 +39,7 @@ export function getClaudeCodeTemplateMetadata(): {
   headerOrder?: string[];
   systemPrompt?: string;
   systemPromptFable?: string;
+  systemPromptVariants?: Record<string, string>;
   toolNames: string[];
 } {
   return {
@@ -49,6 +51,9 @@ export function getClaudeCodeTemplateMetadata(): {
     headerOrder: template.header_order ? [...template.header_order] : undefined,
     systemPrompt: template.system_prompt,
     systemPromptFable: template.system_prompt_fable,
+    systemPromptVariants: template.system_prompt_variants
+      ? { ...template.system_prompt_variants }
+      : undefined,
     toolNames: template.tool_names ? [...template.tool_names] : template.tools.map((tool) => tool.name),
   };
 }

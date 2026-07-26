@@ -13,18 +13,24 @@ export {
   parseEffortCapabilityRejection,
 } from "./effort-capability";
 export {
+  CLAUDE_CODE_BASE_CAPTURE_MODEL_ID,
   CLAUDE_FABLE_1M_MODEL_ID,
   CLAUDE_FABLE_MODEL_ID,
+  CLAUDE_OPUS_MODEL_ID,
   CLAUDE_SONNET_1M_MODEL_ID,
   CLAUDE_SONNET_MODEL_ID,
   describeSuspendedClaudeCodeModel,
+  getClaudeCodeSystemPromptVariants,
   isClaudeCode1mModelLabel,
   isClaudeFableModel,
   isSuspendedClaudeCodeModel,
+  promptVariantKeyForClaudeCodeModel,
   resolveClaudeCodeModelAlias,
+  selectClaudeCodeSystemPrompt,
   stripClaudeCodeContext1mTag,
   stripClaudeCodeProviderPrefix,
   toClaudeCodeWireModelId,
+  type ClaudeCodeSystemPromptTemplate,
 } from "./model-aliases";
 
 const CLAUDE_CODE_API_BASE_URL = "https://api.anthropic.com";
