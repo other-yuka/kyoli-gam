@@ -2040,6 +2040,19 @@ describe("createClaudeCodeProvider", () => {
 import net from "node:net";
 
 const baseUrl = new URL(process.env.ANTHROPIC_BASE_URL);
+const rejectForeignCapture = async (path, method = "POST") => {
+  const response = await fetch(new URL(path, baseUrl), {
+    method,
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ foreign: true }),
+  });
+  if (response.status !== 404) process.exit(2);
+};
+await rejectForeignCapture("/v1/messages");
+await rejectForeignCapture("/wrong-nonce/v1/messages");
+await rejectForeignCapture(baseUrl.pathname + "/v1/messages/extra");
+await rejectForeignCapture(baseUrl.pathname + "/v1/messages", "PUT");
+
 const body = {
   model: "claude-sonnet-4-5",
   messages: [{ role: "user", content: "hi" }],
@@ -2081,7 +2094,7 @@ const headers = [
   ["Content-Length", String(Buffer.byteLength(bodyText))]
 ];
 const request = [
-  "POST /v1/messages HTTP/1.1",
+  "POST " + baseUrl.pathname + "/v1/messages?beta=true HTTP/1.1",
   ...headers.map(([key, value]) => key + ": " + value),
   "",
   bodyText
@@ -2089,6 +2102,7 @@ const request = [
 const socket = net.connect(Number(baseUrl.port), baseUrl.hostname, () => socket.end(request));
 socket.resume();
 await new Promise((resolve) => socket.on("close", resolve));
+await rejectForeignCapture("/v1/messages");
 `,
       "utf8",
     );

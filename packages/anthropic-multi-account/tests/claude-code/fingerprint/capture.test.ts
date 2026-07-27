@@ -245,15 +245,29 @@ describe("fingerprint-capture", () => {
             role: "user",
             content: [{ type: "text", text: "hello", cache_control: cacheControl }],
           }];
-          const response = await fetch(`${baseUrl}/v1/messages`, {
-            method: "POST",
+          const captureOrigin = new URL(baseUrl).origin;
+          const send = (
+            url: string,
+            method = "POST",
+            body: Record<string, unknown> = captured.body,
+          ) => fetch(url, {
+            method,
             headers: captured.headers,
-            body: JSON.stringify(captured.body),
+            body: JSON.stringify(body),
           });
+
+          expect((await send(`${captureOrigin}/v1/messages`)).status).toBe(404);
+          expect((await send(`${captureOrigin}/wrong-nonce/v1/messages`)).status).toBe(404);
+          expect((await send(`${baseUrl}/v1/messages/extra`)).status).toBe(404);
+          expect((await send(`${baseUrl}/v1/messages`, "PUT")).status).toBe(404);
+
+          const response = await send(`${baseUrl}/v1/messages?beta=true`);
 
           expect(response.status).toBe(200);
           expect(response.headers.get("content-type")).toContain("text/event-stream");
           expect(await response.text()).toContain("event: message_stop");
+          expect((await send(`${captureOrigin}/v1/messages`, "POST", { foreign: true })).status)
+            .toBe(404);
         },
       });
 

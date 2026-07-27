@@ -11,6 +11,10 @@ import {
 } from "./fingerprint-template";
 import { scrubSystemPrompt, scrubText } from "./scrub-template";
 import { CLAUDE_CODE_BASE_CAPTURE_MODEL_ID } from "./model-aliases";
+import {
+  createClaudeCodeCaptureNonce,
+  isClaudeCodeCaptureRequest,
+} from "./capture-provenance";
 
 export interface ClaudeCodeTemplateDriftReport {
   binaryPath?: string;
@@ -162,7 +166,14 @@ async function captureClaudeCodeRequest(
   timeoutMs: number,
 ): Promise<ClaudeCodeCapturedRequest | undefined> {
   let capturedRequest: ClaudeCodeCapturedRequest | undefined;
+  const captureNonce = createClaudeCodeCaptureNonce();
   const server = createServer(async (request, response) => {
+    if (!isClaudeCodeCaptureRequest(request, captureNonce)) {
+      response.writeHead(404, { "content-type": "application/json" });
+      response.end('{"error":"not_found"}');
+      return;
+    }
+
     try {
       const bodyText = await readRequestBody(request);
       capturedRequest = {
@@ -185,7 +196,11 @@ async function captureClaudeCodeRequest(
 
   try {
     const port = await listen(server);
-    await runClaudeCapture(binaryPath, `http://${LOOPBACK_HOST}:${port}`, timeoutMs);
+    await runClaudeCapture(
+      binaryPath,
+      `http://${LOOPBACK_HOST}:${port}/${captureNonce}`,
+      timeoutMs,
+    );
     return capturedRequest;
   } catch {
     return undefined;
