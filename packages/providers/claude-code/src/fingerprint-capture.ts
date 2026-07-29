@@ -21,6 +21,10 @@ import {
   CLAUDE_CODE_BASE_CAPTURE_MODEL_ID,
   getClaudeCodeSystemPromptVariants,
 } from "./model-aliases";
+import {
+  createClaudeCodeCaptureNonce,
+  isClaudeCodeCaptureRequest,
+} from "./capture-provenance";
 
 const CURRENT_SCHEMA_VERSION = 2;
 const LIVE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -555,8 +559,15 @@ export async function captureLiveTemplateAsync(
   }
 
   let capturedRequest: CapturedRequest | null = null;
+  const captureNonce = createClaudeCodeCaptureNonce();
   const responseBody = createSseResponseBody();
   const server = createServer(async (req, res) => {
+    if (!isClaudeCodeCaptureRequest(req, captureNonce)) {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end('{"error":"not_found"}');
+      return;
+    }
+
     try {
       const bodyText = await captureRequestBody(req);
       const parsedBody = JSON.parse(bodyText) as Record<string, unknown>;
@@ -592,7 +603,7 @@ export async function captureLiveTemplateAsync(
       });
     });
 
-    const baseUrl = `http://${LOOPBACK_HOST}:${address.port}`;
+    const baseUrl = `http://${LOOPBACK_HOST}:${address.port}/${captureNonce}`;
     await runClaudeCapture({
       binaryPath,
       baseUrl,
