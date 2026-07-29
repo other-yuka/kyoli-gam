@@ -324,7 +324,11 @@ describe("fingerprint-capture", () => {
       const bundled = loadTemplate();
 
       const freshTemplate = createLiveTemplate({ _captured: new Date().toISOString() });
-      await fs.writeFile(join(dir, CACHE_FILE_NAME), `${JSON.stringify(freshTemplate, null, 2)}\n`, "utf8");
+      await fs.writeFile(
+        join(dir, CACHE_FILE_NAME),
+        `${JSON.stringify(freshTemplate, null, 2)}\n`,
+        { encoding: "utf8", mode: 0o644 },
+      );
 
       setFingerprintCaptureTestOverridesForTest({
         findClaudeBinary: () => "/mock/claude",
@@ -335,6 +339,10 @@ describe("fingerprint-capture", () => {
 
       const cached = await refreshLiveFingerprintAsync();
       expect(cached?._source).toBe("cached");
+      if (process.platform !== "win32") {
+        const mode = (await fs.stat(join(dir, CACHE_FILE_NAME))).mode & 0o777;
+        expect(mode).toBe(0o600);
+      }
 
       const staleTemplate = createLiveTemplate({
         _captured: new Date(Date.now() - (26 * 60 * 60 * 1000)).toISOString(),
@@ -373,6 +381,11 @@ describe("fingerprint-capture", () => {
       const loaded = loadTemplate();
       expect(loaded._source).toBe("cached");
       expect(loaded.cc_version).toBe(bundled.cc_version);
+
+      if (process.platform !== "win32") {
+        const mode = (await fs.stat(join(dir, CACHE_FILE_NAME))).mode & 0o777;
+        expect(mode).toBe(0o600);
+      }
     } finally {
       await cleanup();
     }
