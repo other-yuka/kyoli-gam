@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { createServer, type IncomingMessage } from "node:http";
 import { basename, dirname, join } from "node:path";
 import {
+  chmodSync,
   existsSync,
   readFileSync,
   renameSync,
@@ -251,6 +252,14 @@ function quarantineCorruptCache(cachePath: string): void {
 function readLiveCacheSync(sourceOverride: TemplateSource = "cached"): TemplateData | null {
   const cachePath = getCachePath();
 
+  if (process.platform !== "win32") {
+    try {
+      chmodSync(cachePath, 0o600);
+    } catch {
+      return null;
+    }
+  }
+
   try {
     const parsed = JSON.parse(readFileSync(cachePath, "utf8")) as unknown;
     if (!isTemplateData(parsed)) {
@@ -300,7 +309,7 @@ async function atomicWriteJson(targetPath: string, payload: unknown): Promise<vo
   );
 
   await mkdir(dirname(targetPath), { recursive: true });
-  await writeFile(tmpPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  await writeFile(tmpPath, `${JSON.stringify(payload, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   await rename(tmpPath, targetPath);
 }
 
