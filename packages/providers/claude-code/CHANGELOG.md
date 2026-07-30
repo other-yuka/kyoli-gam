@@ -1,5 +1,13 @@
 # @kyoli-gam/provider-claude-code
 
+## 0.0.44
+
+### Patch Changes
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.105
+  - @kyoli-gam/core@0.0.42
+
 ## 0.0.43
 
 ### Patch Changes
