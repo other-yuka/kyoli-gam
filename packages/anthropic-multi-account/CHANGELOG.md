@@ -1,5 +1,14 @@
 # opencode-anthropic-multi-account
 
+## 0.2.105
+
+### Patch Changes
+
+- [#284](https://github.com/other-yuka/kyoli-gam/pull/284) [`c4087ef`](https://github.com/other-yuka/kyoli-gam/commit/c4087efd3d24d36270040dc2979e42bf5f84584c) Thanks [@other-yuka](https://github.com/other-yuka)! - Bind Claude Code captures to their spawned requests and restrict live fingerprint caches to owner access.
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.105
+
 ## 0.2.104
 
 ### Patch Changes
