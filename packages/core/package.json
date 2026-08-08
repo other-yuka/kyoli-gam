@@ -1,6 +1,6 @@
 {
   "name": "@kyoli-gam/core",
-  "version": "0.0.49",
+  "version": "0.0.50",
   "private": true,
   "description": "Core gateway contracts for kyoli-gam v1",
   "type": "module",
