@@ -2468,7 +2468,7 @@ function hasClaudeCodeToolTemplate(body: Record<string, unknown>): boolean {
   const names = body.tools
     .map((tool) => readString(readRecord(tool)?.name))
     .filter((name): name is string => Boolean(name));
-  const required = ["Agent", "AskUserQuestion", "Bash", "Read", "Write", "TaskCreate"];
+  const required = ["Agent", "AskUserQuestion", "Bash", "Read", "Write"];
   if (!required.every((name) => names.includes(name))) return false;
 
   return body.tools.every((tool) => readRecord(readRecord(tool)?.input_schema));
