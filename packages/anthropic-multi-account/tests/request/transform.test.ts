@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
+  applyRequestToolMasking,
   buildRequestHeaders,
   createResponseStreamTransform,
   extractModelIdFromBody,
@@ -324,6 +325,28 @@ describe("transformRequestBody", () => {
     } finally {
       await cleanup();
     }
+  });
+
+  test("preserves config-scoped Claude Code tool names", () => {
+    const toolNames = ["TaskCreate", "TaskGet", "TaskList", "TaskUpdate"];
+    const { body, reverseLookup } = applyRequestToolMasking({
+      tools: toolNames.map((name) => ({ name, input_schema: { type: "object" } })),
+      messages: [{
+        role: "assistant",
+        content: toolNames.map((name) => ({ type: "tool_use", name })),
+      }],
+      tool_choice: { type: "tool", name: "TaskCreate" },
+    }, []);
+    const parsed = JSON.parse(body) as {
+      tools: Array<{ name?: string }>;
+      messages: Array<{ content?: Array<{ name?: string }> }>;
+      tool_choice?: { name?: string };
+    };
+
+    expect(parsed.tools.map((tool) => tool.name)).toEqual(toolNames);
+    expect(parsed.messages[0]?.content?.map((tool) => tool.name)).toEqual(toolNames);
+    expect(parsed.tool_choice?.name).toBe("TaskCreate");
+    expect(toolNames.map((name) => reverseLookup.get(name))).toEqual(toolNames);
   });
 
   test("masks the same tool name identically across different first user prompts", async () => {

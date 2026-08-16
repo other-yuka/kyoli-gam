@@ -23,6 +23,7 @@ import {
   resolveClaudeCodeCacheControl,
   stampClaudeCodeCch,
 } from "../src";
+import { applyClaudeToolFlow } from "../src/tool-flow";
 
 function createTestClaudeCodeProvider(
   options: Parameters<typeof createClaudeCodeProvider>[0] = {},
@@ -308,6 +309,25 @@ describe("OpenCode shared Claude Code helpers", () => {
     expect(resolveClaudeCodeCacheControl({
       messages: [{ content: [{ type: "tool_result", content: { cache_control: oneHour } }] }],
     })).toEqual({ type: "ephemeral" });
+  });
+});
+
+describe("Claude tool name flow", () => {
+  it("preserves config-scoped Claude Code tool names", () => {
+    const toolNames = ["TaskCreate", "TaskGet", "TaskList", "TaskUpdate"];
+    const { payload, reverseLookup } = applyClaudeToolFlow({
+      tools: toolNames.map((name) => ({ name, input_schema: { type: "object" } })),
+      messages: [{
+        role: "assistant",
+        content: toolNames.map((name) => ({ type: "tool_use", name })),
+      }],
+      tool_choice: { type: "tool", name: "TaskCreate" },
+    });
+
+    expect(payload.tools?.map((tool) => tool.name)).toEqual(toolNames);
+    expect((payload.messages?.[0]?.content as Array<{ name?: string }>).map((tool) => tool.name)).toEqual(toolNames);
+    expect(payload.tool_choice?.name).toBe("TaskCreate");
+    expect(toolNames.map((name) => reverseLookup.get(name))).toEqual(toolNames);
   });
 });
 

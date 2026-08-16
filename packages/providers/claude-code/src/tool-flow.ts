@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { isClaudeCodeTemplateToolName } from "./fingerprint-template";
+import { CLAUDE_CODE_CONFIG_SCOPED_TOOL_NAMES } from "./opencode-shared";
 
 type JsonRecord = Record<string, unknown>;
 type ToolEntry = { name?: string; [key: string]: unknown };
@@ -24,7 +25,8 @@ function shouldMaskToolName(name: string | undefined): name is string {
     name &&
       !name.startsWith("mcp__") &&
       !name.startsWith(TOOL_MASK_PREFIX) &&
-      !isClaudeCodeTemplateToolName(name),
+      !isClaudeCodeTemplateToolName(name) &&
+      !CLAUDE_CODE_CONFIG_SCOPED_TOOL_NAMES.has(name),
   );
 }
 

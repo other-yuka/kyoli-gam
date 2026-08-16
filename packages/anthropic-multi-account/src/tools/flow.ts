@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { CLAUDE_CODE_CONFIG_SCOPED_TOOL_NAMES } from "@kyoli-gam/provider-claude-code/opencode";
 
 type JsonRecord = Record<string, unknown>;
 type ToolEntry = { name?: string; [key: string]: unknown };
@@ -112,7 +113,10 @@ function collectReferencedToolNames(parsed: RequestPayload): string[] {
 }
 
 function buildClaudeToolNameSet(claudeToolNames: readonly string[]): ReadonlySet<string> {
-  return new Set(claudeToolNames.filter((name) => typeof name === "string" && name.length > 0));
+  return new Set([
+    ...claudeToolNames.filter((name) => typeof name === "string" && name.length > 0),
+    ...CLAUDE_CODE_CONFIG_SCOPED_TOOL_NAMES,
+  ]);
 }
 
 export function buildRequestScopedToolLookup(

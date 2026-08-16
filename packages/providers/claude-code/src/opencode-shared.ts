@@ -38,6 +38,14 @@ const STAINLESS_PACKAGE_VERSION = "0.81.0";
 const DEFAULT_OPENCODE_TIMEOUT_SECONDS = "300";
 const BILLING_SEED = "59cf53e54c78";
 
+// Headless capture can omit these even while Claude Code clients still declare them.
+export const CLAUDE_CODE_CONFIG_SCOPED_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "TaskCreate",
+  "TaskGet",
+  "TaskList",
+  "TaskUpdate",
+]);
+
 const templateMetadata = getClaudeCodeTemplateMetadata();
 const templateHeaders = templateMetadata.headerValues;
 const CLAUDE_CODE_VERSION = templateMetadata.ccVersion ?? "2.1.137";
