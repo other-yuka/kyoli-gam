@@ -1,5 +1,14 @@
 # opencode-anthropic-multi-account
 
+## 0.2.122
+
+### Patch Changes
+
+- [#338](https://github.com/other-yuka/kyoli-gam/pull/338) [`66d3da0`](https://github.com/other-yuka/kyoli-gam/commit/66d3da04dbfb2ea2e90469e64945760cf8ebfe4f) Thanks [@other-yuka](https://github.com/other-yuka)! - Preserve config-scoped Claude Code task tool names when headless fingerprint capture omits them.
+
+- Updated dependencies []:
+  - opencode-multi-account-core@0.2.122
+
 ## 0.2.121
 
 ### Patch Changes
