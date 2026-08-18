@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import type {
   AccountRecord,
   AccountStore,
@@ -150,10 +151,11 @@ export class UsageRefreshService {
         ? { ...account.metadata, ...refreshed.metadata }
         : account.metadata;
       const nextCredentials = refreshed.credentials
+        && !isDeepStrictEqual(refreshed.credentials, account.credentials)
         ? { ...account.credentials, ...refreshed.credentials }
-        : account.credentials;
+        : undefined;
       const updated = await this.options.accounts.update(account.id, {
-        credentials: nextCredentials,
+        ...(nextCredentials ? { credentials: nextCredentials } : {}),
         metadata: nextMetadata,
       });
 
