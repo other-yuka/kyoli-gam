@@ -92,6 +92,50 @@ describe("UsageRefreshService", () => {
       .toBe(10);
   });
 
+  it("does not overwrite credentials that changed during a usage refresh", async () => {
+    const store = new MemoryAccountStore();
+    const account = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: { accessToken: "stale-access", refreshToken: "stale-refresh" },
+    });
+    let signalUsageStarted: (() => void) | undefined;
+    let finishUsage: (() => void) | undefined;
+    const usageStarted = new Promise<void>((resolve) => {
+      signalUsageStarted = resolve;
+    });
+    const usageFinished = new Promise<void>((resolve) => {
+      finishUsage = resolve;
+    });
+    const provider = createUsageProvider(async ({ account: staleAccount }) => {
+      signalUsageStarted?.();
+      await usageFinished;
+      return {
+        ok: true,
+        credentials: staleAccount.credentials,
+        metadata: { cachedUsageAt: Date.now() },
+      };
+    });
+    const service = new UsageRefreshService({
+      accounts: store,
+      providers: [provider],
+      intervalMs: 0,
+    });
+
+    const refresh = service.refreshOnce();
+    await usageStarted;
+    await store.update(account.id, {
+      credentials: { accessToken: "fresh-access", refreshToken: "rotated-refresh" },
+    });
+    finishUsage?.();
+    await refresh;
+
+    expect((await store.get(account.id))?.credentials).toEqual({
+      accessToken: "fresh-access",
+      refreshToken: "rotated-refresh",
+    });
+  });
+
   it("only recovers blocked accounts when every visible usage window has capacity", async () => {
     const store = new MemoryAccountStore();
     const exhausted = await store.create({
