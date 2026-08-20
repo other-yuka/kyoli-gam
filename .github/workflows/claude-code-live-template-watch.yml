@@ -191,16 +191,6 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
-      - name: Require drift bot PAT
-        if: steps.check.outputs.should_update == 'true'
-        env:
-          KYOLI_DRIFT_BOT_PAT: ${{ secrets.KYOLI_DRIFT_BOT_PAT }}
-        run: |
-          if [ -z "$KYOLI_DRIFT_BOT_PAT" ]; then
-            echo "::error::KYOLI_DRIFT_BOT_PAT is required for Claude Code auto-update PRs."
-            exit 1
-          fi
-
       - name: Prepare Class A or B update
         if: steps.check.outputs.should_update == 'true'
         id: prepare
@@ -211,7 +201,10 @@ jobs:
           set -euo pipefail
           class_name='${{ steps.check.outputs.class_name }}'
           capture_path=live-template-capture.json
+          committed_path=""
           if [ "$class_name" = "B" ]; then
+            committed_path=pre-rebake-fingerprint.json
+            cp packages/providers/claude-code/src/fingerprint/data.json "$committed_path"
             pnpm --dir packages/anthropic-multi-account run bake:fingerprint
 
             node packages/anthropic-multi-account/scripts/check-live-fingerprint-drift.mjs \
@@ -230,11 +223,22 @@ jobs:
             "$class_name" \
             live-template-drift.json \
             "$capture_path" \
-            live-template-pr.json
+            live-template-pr.json \
+            "$committed_path"
           cat live-template-pr.json
 
+      - name: Require drift bot PAT
+        if: steps.prepare.outputs.should_update == 'true'
+        env:
+          KYOLI_DRIFT_BOT_PAT: ${{ secrets.KYOLI_DRIFT_BOT_PAT }}
+        run: |
+          if [ -z "$KYOLI_DRIFT_BOT_PAT" ]; then
+            echo "::error::KYOLI_DRIFT_BOT_PAT is required for Claude Code auto-update PRs."
+            exit 1
+          fi
+
       - name: Run stable Server and OpenCode contracts
-        if: steps.check.outputs.should_update == 'true'
+        if: steps.prepare.outputs.should_update == 'true'
         run: |
           pnpm --filter @kyoli-gam/provider-claude-code test
           pnpm --filter opencode-anthropic-multi-account test:contract:native
@@ -253,7 +257,7 @@ jobs:
           retention-days: 30
 
       - name: Open or reuse trusted update PR
-        if: steps.check.outputs.should_update == 'true'
+        if: steps.prepare.outputs.should_update == 'true'
         id: update_pr
         env:
           GH_TOKEN: ${{ secrets.KYOLI_DRIFT_BOT_PAT }}
@@ -377,7 +381,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Wait for required checks and merge update PR
-        if: steps.check.outputs.should_update == 'true' && steps.update_pr.outputs.deferred != 'true'
+        if: steps.prepare.outputs.should_update == 'true' && steps.update_pr.outputs.deferred != 'true'
         id: merge_pr
         env:
           GH_TOKEN: ${{ secrets.KYOLI_DRIFT_BOT_PAT }}
@@ -439,7 +443,7 @@ jobs:
           echo "Merged trusted Class ${{ steps.prepare.outputs.class_name }} update at $EXPECTED_HEAD_OID."
 
       - name: Auto-close recovered automation failure
-        if: success() && steps.check.outputs.deferred != 'true' && steps.update_pr.outputs.deferred != 'true' && steps.merge_pr.outputs.deferred != 'true'
+        if: success() && steps.check.outputs.deferred != 'true' && steps.prepare.outputs.deferred != 'true' && steps.update_pr.outputs.deferred != 'true' && steps.merge_pr.outputs.deferred != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TARGET_VERSION: ${{ steps.target.outputs.version }}

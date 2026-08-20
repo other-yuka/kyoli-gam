@@ -29,6 +29,9 @@ function writeGithubOutputs(result) {
 
   const outputs = {
     class_name: result.className,
+    classification: result.classification,
+    should_update: result.shouldUpdate,
+    deferred: result.deferred,
     branch_name: result.branchName,
     commit_message: result.commitMessage,
     pr_title: result.prTitle,
@@ -46,6 +49,7 @@ export function prepareLiveFingerprintPullRequest({
   className,
   report,
   capturedFingerprint,
+  committedFingerprint,
   repoRoot = defaultRepoRoot(),
   bundledPath = defaultBundledPath(repoRoot),
   runId = process.env.GITHUB_RUN_ID
@@ -66,6 +70,7 @@ export function prepareLiveFingerprintPullRequest({
     throw new Error("Live fingerprint report is missing a concrete actualCcVersion");
   }
   const expectedClassification = className === "A" ? "label-only" : "shape";
+  let updateClassification = expectedClassification;
   if (report?.classification !== expectedClassification) {
     throw new Error(`Class ${className} requires a ${expectedClassification} live report`);
   }
@@ -83,6 +88,33 @@ export function prepareLiveFingerprintPullRequest({
     });
     if (postRebake.classification !== "clean") {
       throw new Error(`Class B rebake does not match the classified live fingerprint: ${postRebake.reason}`);
+    }
+
+    if (!committedFingerprint) {
+      throw new Error("Class B requires the committed fingerprint baseline");
+    }
+    const meaningful = classifyLiveFingerprintDiff(committedFingerprint, bundled, [], {
+      targetVersion,
+    });
+    updateClassification = meaningful.classification;
+    if (meaningful.classification === "clean" || meaningful.classification === "label-only") {
+      writeFileSync(bundledPath, `${JSON.stringify(committedFingerprint, null, 2)}\n`);
+      return {
+        className: meaningful.classification === "label-only" ? "A" : className,
+        targetVersion,
+        classification: meaningful.classification,
+        shouldUpdate: false,
+        deferred: meaningful.classification === "label-only",
+        branchName: "",
+        commitMessage: "",
+        prTitle: "",
+        prBodyPath: "",
+        changesetPath: "",
+        changedFiles: [],
+      };
+    }
+    if (meaningful.classification === "unsafe") {
+      throw new Error(`Class B rebake is unsafe: ${meaningful.reason}`);
     }
   }
 
@@ -113,6 +145,9 @@ export function prepareLiveFingerprintPullRequest({
   const result = {
     className,
     targetVersion,
+    classification: updateClassification,
+    shouldUpdate: true,
+    deferred: false,
     branchName,
     commitMessage: prTitle,
     prTitle,
@@ -131,10 +166,14 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const reportPath = process.argv[3] ?? "live-template-drift.json";
   const capturePath = process.argv[4] ?? "live-template-capture.json";
   const resultPath = process.argv[5] ?? "live-template-pr.json";
+  const committedPath = process.argv[6];
   const result = prepareLiveFingerprintPullRequest({
     className,
     report: JSON.parse(readFileSync(reportPath, "utf8")),
     capturedFingerprint: JSON.parse(readFileSync(capturePath, "utf8")),
+    committedFingerprint: committedPath
+      ? JSON.parse(readFileSync(committedPath, "utf8"))
+      : undefined,
   });
   writeFileSync(resultPath, `${JSON.stringify(result, null, 2)}\n`);
   writeGithubOutputs(result);
