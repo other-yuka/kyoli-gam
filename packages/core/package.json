@@ -43,7 +43,7 @@
     "README.md"
   ],
   "dependencies": {
-    "better-sqlite3": "^12.11.1",
+    "better-sqlite3": "^13.0.3",
     "opencode-multi-account-core": "workspace:*"
   }
 }
