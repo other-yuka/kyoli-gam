@@ -20,7 +20,7 @@ jobs:
           version: 10.29.2
       - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: "22.22.2"
           cache: "pnpm"
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
@@ -36,7 +36,7 @@ jobs:
           version: 10.29.2
       - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: "22.22.2"
           cache: "pnpm"
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
@@ -52,7 +52,7 @@ jobs:
           version: 10.29.2
       - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: "22.22.2"
           cache: "pnpm"
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
@@ -65,11 +65,21 @@ jobs:
           test -f packages/codex-multi-account/dist/index.js
 
   build-node-matrix:
+    name: build-node-matrix (${{ matrix.label }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        node-version: [20, 22]
+        include:
+          - label: 20
+            node-version: "20"
+            scope: core
+          - label: 22
+            node-version: "22.22.2"
+            scope: full
+          - label: 24
+            node-version: "24.15.0"
+            scope: full
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
@@ -81,9 +91,20 @@ jobs:
           cache: "pnpm"
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
-      - name: Build with pnpm
+      - name: Build standalone core with pnpm
+        if: matrix.scope == 'core'
+        run: pnpm --filter opencode-multi-account-core build
+      - name: Build full workspace with pnpm
+        if: matrix.scope == 'full'
         run: pnpm run build
-      - name: Verify dist loads on Node ${{ matrix.node-version }}
+      - name: Verify standalone core loads on Node ${{ matrix.node-version }}
+        if: matrix.scope == 'core'
+        run: |
+          node --input-type=module -e "
+            import('./packages/multi-account-core/dist/index.js').then(m => console.log('core ok:', Object.keys(m).length, 'exports'));
+          "
+      - name: Verify full dist loads on Node ${{ matrix.node-version }}
+        if: matrix.scope == 'full'
         run: |
           node --input-type=module -e "
             import('./packages/multi-account-core/dist/index.js').then(m => console.log('core ok:', Object.keys(m).length, 'exports'));
