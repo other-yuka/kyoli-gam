@@ -31,6 +31,7 @@ export const CredentialRefreshPatchSchema = v.object({
 
 export const StoredAccountSchema = v.object({
   uuid: v.optional(v.string()),
+  credentialOwnerId: v.optional(v.string()),
   accountId: v.optional(v.string()),
   label: v.optional(v.string()),
   email: v.optional(v.string()),

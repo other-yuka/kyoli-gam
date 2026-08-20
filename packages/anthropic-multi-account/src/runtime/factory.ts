@@ -390,41 +390,34 @@ export class AccountRuntimeFactory {
       return { accessToken: latestAccessToken, expiresAt: accountToRefresh.expiresAt };
     }
 
-    const refreshed = await refreshToken(accountToRefresh.refreshToken, uuid, this.client);
-    if (!refreshed.ok) {
+    const { result, account: refreshedAccount } = await this.store.refreshAccountCredentials(
+      uuid,
+      accountToRefresh,
+      (refreshTokenValue) => refreshToken(refreshTokenValue, uuid, this.client),
+    );
+    if (!result.ok) {
       throw new TokenRefreshError(
-        refreshed.permanent,
-        refreshed.permanent ? TOKEN_REFRESH_PERMANENT_FAILURE_STATUS : undefined,
+        result.permanent,
+        result.permanent ? TOKEN_REFRESH_PERMANENT_FAILURE_STATUS : undefined,
       );
     }
-
-    await this.store.mutateAccount(uuid, (account) => {
-      account.accessToken = refreshed.patch.accessToken;
-      account.expiresAt = refreshed.patch.expiresAt;
-      if (refreshed.patch.refreshToken) account.refreshToken = refreshed.patch.refreshToken;
-      if (refreshed.patch.uuid) account.uuid = refreshed.patch.uuid;
-      if (refreshed.patch.accountId) account.accountId = refreshed.patch.accountId;
-      if (refreshed.patch.accountUuid && !account.accountUuid) account.accountUuid = refreshed.patch.accountUuid;
-      if (refreshed.patch.deviceId && !account.deviceId) account.deviceId = refreshed.patch.deviceId;
-      if (refreshed.patch.email) account.email = refreshed.patch.email;
-      account.consecutiveAuthFailures = 0;
-      account.isAuthDisabled = false;
-      account.authDisabledReason = undefined;
-    });
+    if (!refreshedAccount?.accessToken || !refreshedAccount.expiresAt) {
+      throw new TokenRefreshError(false);
+    }
 
     this.client.auth
       .set({
         path: { id: ANTHROPIC_OAUTH_ADAPTER.authProviderId },
         body: {
           type: "oauth",
-          refresh: refreshed.patch.refreshToken ?? accountToRefresh.refreshToken,
-          access: refreshed.patch.accessToken,
-          expires: refreshed.patch.expiresAt,
+          refresh: refreshedAccount.refreshToken,
+          access: refreshedAccount.accessToken,
+          expires: refreshedAccount.expiresAt,
         },
       })
       .catch(() => {});
 
-    return { accessToken: refreshed.patch.accessToken, expiresAt: refreshed.patch.expiresAt };
+    return { accessToken: refreshedAccount.accessToken, expiresAt: refreshedAccount.expiresAt };
   }
 
   private buildOutboundHeaders(

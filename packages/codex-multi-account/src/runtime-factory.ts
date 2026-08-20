@@ -60,25 +60,21 @@ export class AccountRuntimeFactory {
       let accountId = storedAccount.accountId;
 
       if (!accessToken || !expiresAt || isTokenExpired({ accessToken, expiresAt })) {
-        const refreshed = await refreshToken(storedAccount.refreshToken, uuid, this.client);
-        if (!refreshed.ok) {
-          throw new TokenRefreshError(refreshed.permanent, refreshed.status);
+        const { result, account: refreshedAccount } = await this.store.refreshAccountCredentials(
+          uuid,
+          storedAccount,
+          (refreshTokenValue) => refreshToken(refreshTokenValue, uuid, this.client),
+        );
+        if (!result.ok) {
+          throw new TokenRefreshError(result.permanent, result.status);
+        }
+        if (!refreshedAccount?.accessToken || !refreshedAccount.expiresAt) {
+          throw new TokenRefreshError(false);
         }
 
-        accessToken = refreshed.patch.accessToken;
-        expiresAt = refreshed.patch.expiresAt;
-        accountId = refreshed.patch.accountId ?? accountId;
-
-        await this.store.mutateAccount(uuid, (account) => {
-          account.accessToken = refreshed.patch.accessToken;
-          account.expiresAt = refreshed.patch.expiresAt;
-          if (refreshed.patch.refreshToken) account.refreshToken = refreshed.patch.refreshToken;
-          if (refreshed.patch.accountId) account.accountId = refreshed.patch.accountId;
-          if (refreshed.patch.email) account.email = refreshed.patch.email;
-          account.consecutiveAuthFailures = 0;
-          account.isAuthDisabled = false;
-          account.authDisabledReason = undefined;
-        });
+        accessToken = refreshedAccount.accessToken;
+        expiresAt = refreshedAccount.expiresAt;
+        accountId = refreshedAccount.accountId;
       }
 
       if (!accessToken) {

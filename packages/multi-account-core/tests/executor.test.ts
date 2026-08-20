@@ -567,6 +567,7 @@ describe("core/executor", () => {
     expect(manager.markAuthFailure).toHaveBeenCalledWith(
       "acct-1",
       expect.objectContaining({ ok: false, permanent: true }),
+      acct1,
     );
     expect(manager.markSuccess).toHaveBeenCalledTimes(1);
     expect(manager.markSuccess).toHaveBeenCalledWith("acct-2");

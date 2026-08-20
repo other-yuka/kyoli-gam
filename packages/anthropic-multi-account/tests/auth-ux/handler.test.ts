@@ -173,7 +173,11 @@ describe("auth-handler", () => {
     const flow = await handleAuthorize(manager as never, {}, createMockClient());
 
     expect(manager.ensureValidToken).toHaveBeenCalledWith("dead-uuid", expect.anything());
-    expect(manager.markAuthFailure).toHaveBeenCalledWith("dead-uuid", { ok: false, permanent: true });
+    expect(manager.markAuthFailure).toHaveBeenCalledWith(
+      "dead-uuid",
+      { ok: false, permanent: true },
+      account,
+    );
     expect(printQuotaErrorSpy).toHaveBeenCalledWith(
       expect.objectContaining({ authDisabledReason: "refresh failed permanently" }),
       "refresh failed permanently (refresh failed)",
@@ -215,7 +219,11 @@ describe("auth-handler", () => {
 
     await handleAuthorize(manager as never, {}, createMockClient());
 
-    expect(manager.markAuthFailure).toHaveBeenCalledWith("disabled-uuid", { ok: false, permanent: false });
+    expect(manager.markAuthFailure).toHaveBeenCalledWith(
+      "disabled-uuid",
+      { ok: false, permanent: false },
+      updatedAccount,
+    );
     expect(printQuotaErrorSpy).toHaveBeenCalledWith(updatedAccount, "3 consecutive auth failures (refresh failed)");
 
   });

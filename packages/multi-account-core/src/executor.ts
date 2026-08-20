@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { DiskCredentials } from "./account-store";
 import {
   isTokenRefreshError,
   type ManagedAccount,
@@ -18,7 +19,7 @@ export interface ExecutorAccountManager {
   refresh(): Promise<void>;
   selectAccount(stickyKey?: string): Promise<ManagedAccount | null>;
   markSuccess(uuid: string): Promise<void>;
-  markAuthFailure(uuid: string, result: TokenRefreshResult): Promise<void>;
+  markAuthFailure(uuid: string, result: TokenRefreshResult, expected?: DiskCredentials): Promise<void>;
   markRevoked(uuid: string): Promise<void>;
   hasAnyUsableAccount(): boolean;
   getMinWaitTime(): number;
@@ -282,7 +283,7 @@ export function createExecutorForProvider(
           }
         }
 
-        await manager.markAuthFailure(accountUuid, { ok: false, permanent: false });
+        await manager.markAuthFailure(accountUuid, { ok: false, permanent: false }, account);
         await manager.refresh();
 
         if (!manager.hasAnyUsableAccount()) {
@@ -393,7 +394,7 @@ export function createExecutorForProvider(
     await manager.markAuthFailure(accountUuid, {
       ok: false,
       permanent: error.permanent,
-    });
+    }, account);
     await manager.refresh();
 
     if (!manager.hasAnyUsableAccount()) {

@@ -228,6 +228,38 @@ describe("core/account-manager", () => {
     expect(authSetSpy).not.toHaveBeenCalled();
   });
 
+  test("does not persist a late refresh failure over winner credentials", async () => {
+    const AccountManager = createAccountManagerForProvider({
+      providerAuthId: "anthropic",
+      isTokenExpired: () => false,
+      refreshToken: async () => ({ ok: false, permanent: true }),
+    });
+
+    const store = new AccountStore();
+    const manager = await AccountManager.create(store, createAuth("seed"));
+    const initial = manager.getActiveAccount();
+    const activeUuid = getUuid(initial?.uuid);
+    if (!initial) throw new Error("Expected active account");
+
+    await store.mutateAccount(activeUuid, (account) => {
+      account.refreshToken = "refresh-winner";
+      account.accessToken = "access-winner";
+      account.expiresAt = Date.now() + 120_000;
+      account.consecutiveAuthFailures = 0;
+      account.isAuthDisabled = false;
+      account.authDisabledReason = undefined;
+    });
+    await manager.markAuthFailure(activeUuid, { ok: false, permanent: true }, initial);
+
+    const persisted = (await store.load()).accounts.find((account) => account.uuid === activeUuid);
+    expect(persisted).toMatchObject({
+      refreshToken: "refresh-winner",
+      accessToken: "access-winner",
+      consecutiveAuthFailures: 0,
+      isAuthDisabled: false,
+    });
+  });
+
   test("markRevoked removes account and clears provider auth when last", async () => {
     const AccountManager = createAccountManagerForProvider({
       providerAuthId: "anthropic",
