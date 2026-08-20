@@ -1,6 +1,6 @@
 {
   "name": "@kyoli-gam/cli",
-  "version": "0.0.66",
+  "version": "0.0.67",
   "private": true,
   "description": "CLI for kyoli-gam v1",
   "type": "module",
