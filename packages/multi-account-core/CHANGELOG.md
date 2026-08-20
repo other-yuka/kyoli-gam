@@ -1,5 +1,11 @@
 # opencode-multi-account-core
 
+## 0.3.0
+
+### Patch Changes
+
+- [#361](https://github.com/other-yuka/kyoli-gam/pull/361) [`d07f85f`](https://github.com/other-yuka/kyoli-gam/commit/d07f85f5068b8e8403c44931d7221c4ee8335566) Thanks [@other-yuka](https://github.com/other-yuka)! - Deduplicate OAuth refreshes across plugin processes and persist the winning rotated credentials for every caller.
+
 ## 0.2.127
 
 ## 0.2.126

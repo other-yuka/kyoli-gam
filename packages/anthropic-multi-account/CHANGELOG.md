@@ -1,5 +1,17 @@
 # opencode-anthropic-multi-account
 
+## 0.3.0
+
+### Minor Changes
+
+- [#363](https://github.com/other-yuka/kyoli-gam/pull/363) [`9bd0fba`](https://github.com/other-yuka/kyoli-gam/commit/9bd0fba5ed5af4390b974fa7f6960031cd4af93f) Thanks [@other-yuka](https://github.com/other-yuka)! - Align the OpenCode plugin Node.js runtime range with their existing dependency graph.
+
+### Patch Changes
+
+- [#361](https://github.com/other-yuka/kyoli-gam/pull/361) [`d07f85f`](https://github.com/other-yuka/kyoli-gam/commit/d07f85f5068b8e8403c44931d7221c4ee8335566) Thanks [@other-yuka](https://github.com/other-yuka)! - Deduplicate OAuth refreshes across plugin processes and persist the winning rotated credentials for every caller.
+- Updated dependencies [[`d07f85f`](https://github.com/other-yuka/kyoli-gam/commit/d07f85f5068b8e8403c44931d7221c4ee8335566)]:
+  - opencode-multi-account-core@0.3.0
+
 ## 0.2.127
 
 ### Patch Changes
