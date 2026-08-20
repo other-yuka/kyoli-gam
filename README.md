@@ -12,7 +12,7 @@
 </p>
 
 [![CI](https://img.shields.io/github/actions/workflow/status/other-yuka/kyoli-gam/ci.yml?style=flat-square&label=CI)](https://github.com/other-yuka/kyoli-gam/actions)
-![Node](https://img.shields.io/badge/Node.js->=20-3c873a?style=flat-square)
+![Node](https://img.shields.io/badge/Node.js-22.22.2_%7C_24.15.0_%7C_%3E%3D26-3c873a?style=flat-square)
 [![TypeScript](https://img.shields.io/badge/TypeScript-blue?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org)
 [![License](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](LICENSE)
 
@@ -24,6 +24,10 @@
 > already have provider subscription accounts and want one local account pool for agent
 > traffic. It is independent, unofficial, and not affiliated with OpenAI, Anthropic, or
 > OpenCode.
+
+Repository development, Server Mode, and the two OpenCode plugins support Node.js
+`^22.22.2 || ^24.15.0 || >=26.0.0`. The standalone `opencode-multi-account-core`
+package retains its Node.js 20 runtime contract.
 
 ---
 
