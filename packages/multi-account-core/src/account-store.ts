@@ -1,5 +1,5 @@
 import { promises as fs } from "node:fs";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import * as v from "valibot";
 import { loadAccounts, readStorageFromDisk } from "./storage";
@@ -7,9 +7,18 @@ import { ACCOUNTS_FILENAME } from "./constants";
 import { withDirectoryLock } from "./file-lock";
 import { AccountStorageSchema } from "./types";
 import { getConfigDir, getErrorCode } from "./utils";
-import type { AccountStorage, StoredAccount } from "./types";
+import type {
+  AccountStorage,
+  CredentialRefreshPatch,
+  StoredAccount,
+  TokenRefreshResult,
+} from "./types";
 
 const FILE_MODE = 0o600;
+// Provider refresh calls time out at 30 seconds; keep the local lease above that ceiling.
+const REFRESH_LOCK_STALE_MS = 45_000;
+const REFRESH_LOCK_RETRY_DELAY_MS = 100;
+const REFRESH_LOCK_RETRIES = 31;
 
 function resolveStoragePath(filename: string): string {
   return join(getConfigDir(), filename);
@@ -61,9 +70,76 @@ export interface DiskCredentials {
   refreshToken: string;
   accessToken?: string;
   expiresAt?: number;
+  credentialOwnerId?: string;
   accountId?: string;
   accountUuid?: string;
   deviceId?: string;
+}
+
+export interface AccountCredentialRefreshResult {
+  result: TokenRefreshResult;
+  account: StoredAccount | null;
+}
+
+function sameCredentialSnapshot(account: StoredAccount, expected: DiskCredentials): boolean {
+  return account.refreshToken === expected.refreshToken
+    && account.accessToken === expected.accessToken
+    && account.expiresAt === expected.expiresAt;
+}
+
+function findCredentialAccount(
+  accounts: StoredAccount[],
+  uuid: string,
+  expected: DiskCredentials,
+): StoredAccount | undefined {
+  const exact = accounts.find((account) => account.uuid === uuid);
+  if (exact) return exact;
+
+  const ownerId = expected.credentialOwnerId ?? uuid;
+  const ownerMatches = accounts.filter((account) => account.credentialOwnerId === ownerId);
+  return ownerMatches.length === 1 ? ownerMatches[0] : undefined;
+}
+
+function refreshedCredentialPatch(
+  account: StoredAccount,
+  previous: DiskCredentials,
+): CredentialRefreshPatch | null {
+  if (!account.accessToken || !account.expiresAt) return null;
+  const rotatedGrant = account.refreshToken !== previous.refreshToken;
+  const newerExpiry = account.expiresAt > (previous.expiresAt ?? 0);
+  const changedAccess = account.accessToken !== previous.accessToken;
+  if (account.expiresAt <= Date.now() || (!rotatedGrant && !newerExpiry && !changedAccess)) return null;
+  return {
+    accessToken: account.accessToken,
+    expiresAt: account.expiresAt,
+    refreshToken: account.refreshToken,
+    uuid: account.uuid,
+    accountId: account.accountId,
+    accountUuid: account.accountUuid,
+    deviceId: account.deviceId,
+    email: account.email,
+  };
+}
+
+function applyCredentialPatch(
+  account: StoredAccount,
+  patch: CredentialRefreshPatch,
+  credentialOwnerId: string,
+): void {
+  account.accessToken = patch.accessToken;
+  account.expiresAt = patch.expiresAt;
+  if (patch.refreshToken) account.refreshToken = patch.refreshToken;
+  if (patch.uuid && patch.uuid !== account.uuid) {
+    account.credentialOwnerId ??= credentialOwnerId;
+    account.uuid = patch.uuid;
+  }
+  if (patch.accountId) account.accountId = patch.accountId;
+  if (patch.accountUuid && !account.accountUuid) account.accountUuid = patch.accountUuid;
+  if (patch.deviceId && !account.deviceId) account.deviceId = patch.deviceId;
+  if (patch.email) account.email = patch.email;
+  account.consecutiveAuthFailures = 0;
+  account.isAuthDisabled = false;
+  account.authDisabledReason = undefined;
 }
 
 export class AccountStore {
@@ -76,6 +152,13 @@ export class AccountStore {
   private async withLock<T>(fn: (storagePath: string) => Promise<T>): Promise<T> {
     await ensureStorageFileExists(this.storagePath);
     return await withDirectoryLock(this.storagePath, () => fn(this.storagePath));
+  }
+
+  private refreshLockPath(uuid: string, credentials: DiskCredentials): string {
+    const accountKey = createHash("sha256")
+      .update(credentials.credentialOwnerId ?? uuid)
+      .digest("hex");
+    return `${this.storagePath}.refresh-${accountKey}`;
   }
 
   async load(): Promise<AccountStorage> {
@@ -94,10 +177,55 @@ export class AccountStore {
       refreshToken: account.refreshToken,
       accessToken: account.accessToken,
       expiresAt: account.expiresAt,
+      credentialOwnerId: account.credentialOwnerId,
       accountId: account.accountId,
       accountUuid: account.accountUuid,
       deviceId: account.deviceId,
     };
+  }
+
+  async refreshAccountCredentials(
+    uuid: string,
+    expected: DiskCredentials,
+    refresh: (refreshToken: string) => Promise<TokenRefreshResult>,
+  ): Promise<AccountCredentialRefreshResult> {
+    // ponytail: Plugin Mode shares a local account file; use a distributed lease only if storage moves off-host.
+    const credentialOwnerId = expected.credentialOwnerId ?? uuid;
+    return await withDirectoryLock(this.refreshLockPath(uuid, expected), async () => {
+      const currentStorage = await readStorageFromDisk(this.storagePath, false);
+      const current = currentStorage
+        ? findCredentialAccount(currentStorage.accounts, uuid, expected)
+        : undefined;
+      if (!current) {
+        return { result: { ok: false, permanent: true }, account: null };
+      }
+
+      let refreshSnapshot = expected;
+      if (!sameCredentialSnapshot(current, expected)) {
+        const patch = refreshedCredentialPatch(current, expected);
+        if (patch) return { result: { ok: true, patch }, account: { ...current } };
+        refreshSnapshot = current;
+      }
+
+      const result = await refresh(current.refreshToken);
+      if (!result.ok) return { result, account: { ...current } };
+
+      let persistedResult: TokenRefreshResult = result;
+      const updated = await this.mutateAccount(current.uuid ?? uuid, (account) => {
+        if (!sameCredentialSnapshot(account, refreshSnapshot)) {
+          const patch = refreshedCredentialPatch(account, refreshSnapshot);
+          persistedResult = patch ? { ok: true, patch } : { ok: false, permanent: false };
+          return;
+        }
+        applyCredentialPatch(account, result.patch, credentialOwnerId);
+      });
+      if (!updated) return { result: { ok: false, permanent: false }, account: null };
+      return { result: persistedResult, account: updated };
+    }, {
+      staleMs: REFRESH_LOCK_STALE_MS,
+      retryDelayMs: REFRESH_LOCK_RETRY_DELAY_MS,
+      retries: REFRESH_LOCK_RETRIES,
+    });
   }
 
   async mutateAccount(
@@ -125,6 +253,24 @@ export class AccountStore {
       const current = await readStorageFromDisk(storagePath, false) ?? createEmptyStorage();
       fn(current);
       await writeStorageAtomic(storagePath, current);
+    });
+  }
+
+  async mutateStorageIfCredentialsMatch(
+    uuid: string,
+    expected: DiskCredentials,
+    fn: (account: StoredAccount, storage: AccountStorage) => void,
+  ): Promise<boolean> {
+    return await this.withLock(async (storagePath) => {
+      const current = await readStorageFromDisk(storagePath, false);
+      if (!current) return false;
+
+      const account = findCredentialAccount(current.accounts, uuid, expected);
+      if (!account || !sameCredentialSnapshot(account, expected)) return false;
+
+      fn(account, current);
+      await writeStorageAtomic(storagePath, current);
+      return true;
     });
   }
 

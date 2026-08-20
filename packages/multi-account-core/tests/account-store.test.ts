@@ -1,9 +1,9 @@
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AccountStore } from "../src/account-store";
 import { ACCOUNTS_FILENAME, setAccountsFilename } from "../src/constants";
-import type { StoredAccount } from "../src/types";
+import type { StoredAccount, TokenRefreshResult } from "../src/types";
 import { setupTestEnv } from "./helpers";
 
 const ACCOUNTS_FILE = "core-accounts.test.json";
@@ -71,6 +71,61 @@ describe("core/account-store", () => {
 
     const persisted = JSON.parse(await fs.readFile(storagePath, "utf-8")) as { accounts: Array<{ accessToken?: string }> };
     expect(persisted.accounts[0]?.accessToken).toBe("updated-token");
+  });
+
+  test("adopts a fresh winner when only the access token changed", async () => {
+    const store = new AccountStore();
+    const expiresAt = Date.now() + 60_000;
+    await store.addAccount(createAccount("winner", { expiresAt }));
+    const expected = await store.readCredentials("winner");
+    if (!expected) throw new Error("Expected stored credentials");
+
+    await store.mutateAccount("winner", (account) => {
+      account.accessToken = "access-from-other-process";
+    });
+    const refresh = vi.fn(async (): Promise<TokenRefreshResult> => ({
+      ok: false,
+      permanent: true,
+    }));
+
+    const { result } = await store.refreshAccountCredentials("winner", expected, refresh);
+
+    expect(refresh).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      ok: true,
+      patch: { accessToken: "access-from-other-process", expiresAt },
+    });
+  });
+
+  test("does not adopt another account with the same added timestamp", async () => {
+    const store = new AccountStore();
+    const addedAt = Date.now();
+    await store.addAccount(createAccount("removed", {
+      addedAt,
+      accessToken: "access-removed",
+      expiresAt: 1,
+    }));
+    await store.addAccount(createAccount("remaining", {
+      addedAt,
+      accessToken: "access-remaining",
+      expiresAt: Date.now() + 60_000,
+    }));
+    const expected = await store.readCredentials("removed");
+    if (!expected) throw new Error("Expected stored credentials");
+    await store.removeAccount("removed");
+    const refresh = vi.fn(async (): Promise<TokenRefreshResult> => ({
+      ok: false,
+      permanent: true,
+    }));
+
+    const { result } = await store.refreshAccountCredentials("removed", expected, refresh);
+
+    expect(refresh).not.toHaveBeenCalled();
+    expect(result).toEqual({ ok: false, permanent: true });
+    expect((await store.load()).accounts).toMatchObject([{
+      uuid: "remaining",
+      accessToken: "access-remaining",
+    }]);
   });
 
   test("removes active account and reassigns active uuid", async () => {

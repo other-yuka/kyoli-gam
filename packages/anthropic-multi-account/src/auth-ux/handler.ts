@@ -271,7 +271,7 @@ async function checkAccountQuota(
 
     const refreshResult = await manager.ensureValidToken(account.uuid, client);
     if (!refreshResult.ok) {
-      await manager.markAuthFailure(account.uuid, refreshResult);
+      await manager.markAuthFailure(account.uuid, refreshResult, account);
       await manager.refresh();
 
       const updatedAccount = manager.getAccounts().find((candidate) => candidate.uuid === account.uuid);

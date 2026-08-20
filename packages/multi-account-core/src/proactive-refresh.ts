@@ -1,4 +1,4 @@
-import { AccountStore } from "./account-store";
+import { AccountStore, type DiskCredentials } from "./account-store";
 import type { PluginClient, PluginConfig, StoredAccount, TokenRefreshResult } from "./types";
 import { getClearedOAuthBody } from "./utils";
 
@@ -117,24 +117,15 @@ export function createProactiveRefreshQueueForProvider(dependencies: ProactiveRe
           const credentials = await this.store.readCredentials(account.uuid!);
           if (!credentials || !this.needsProactiveRefresh(credentials)) continue;
 
-          const result = await refreshToken(credentials.refreshToken, account.uuid!, this.client);
+          const { result } = await this.store.refreshAccountCredentials(
+            account.uuid!,
+            credentials,
+            (refreshTokenValue) => refreshToken(refreshTokenValue, account.uuid!, this.client),
+          );
           if (result.ok) {
-            await this.store.mutateAccount(account.uuid!, (target) => {
-              target.accessToken = result.patch.accessToken;
-              target.expiresAt = result.patch.expiresAt;
-              if (result.patch.refreshToken) target.refreshToken = result.patch.refreshToken;
-              if (result.patch.uuid) target.uuid = result.patch.uuid;
-              if (result.patch.email) target.email = result.patch.email;
-              if (result.patch.accountId) target.accountId = result.patch.accountId;
-              if (result.patch.accountUuid && !target.accountUuid) target.accountUuid = result.patch.accountUuid;
-              if (result.patch.deviceId && !target.deviceId) target.deviceId = result.patch.deviceId;
-              target.consecutiveAuthFailures = 0;
-              target.isAuthDisabled = false;
-              target.authDisabledReason = undefined;
-            });
             this.onInvalidate?.(account.uuid!);
           } else {
-            await this.persistFailure(account, result.permanent);
+            await this.persistFailure(account, result.permanent, credentials);
           }
         }
       } catch (error) {
@@ -147,41 +138,41 @@ export function createProactiveRefreshQueueForProvider(dependencies: ProactiveRe
       }
     }
 
-    private async persistFailure(account: StoredAccount, permanent: boolean): Promise<void> {
+    private async persistFailure(
+      account: StoredAccount,
+      permanent: boolean,
+      expected: DiskCredentials,
+    ): Promise<void> {
       try {
         const accountUuid = account.uuid;
         if (!accountUuid) return;
 
-        if (permanent) {
-          await this.store.mutateStorage((storage) => {
-            const target = storage.accounts.find((entry) => entry.uuid === accountUuid);
-            if (!target) return;
+        await this.store.mutateStorageIfCredentialsMatch(
+          accountUuid,
+          expected,
+          (target, storage) => {
+            if (permanent) {
+              target.consecutiveAuthFailures = Math.max(
+                (target.consecutiveAuthFailures ?? 0) + 1,
+                getConfig().max_consecutive_auth_failures,
+              );
+              target.isAuthDisabled = true;
+              target.authDisabledReason = "refresh failed permanently (proactive refresh)";
+              return;
+            }
 
-            target.consecutiveAuthFailures = Math.max(
-              (target.consecutiveAuthFailures ?? 0) + 1,
-              getConfig().max_consecutive_auth_failures,
-            );
-            target.isAuthDisabled = true;
-            target.authDisabledReason = "refresh failed permanently (proactive refresh)";
-          });
-          return;
-        }
+            target.consecutiveAuthFailures = (target.consecutiveAuthFailures ?? 0) + 1;
+            const maxFailures = getConfig().max_consecutive_auth_failures;
+            const usableCount = storage.accounts.filter(
+              (entry) => entry.enabled && !entry.isAuthDisabled && entry.uuid !== target.uuid,
+            ).length;
 
-        await this.store.mutateStorage((storage) => {
-          const target = storage.accounts.find((entry) => entry.uuid === accountUuid);
-          if (!target) return;
-
-          target.consecutiveAuthFailures = (target.consecutiveAuthFailures ?? 0) + 1;
-          const maxFailures = getConfig().max_consecutive_auth_failures;
-          const usableCount = storage.accounts.filter(
-            (entry) => entry.enabled && !entry.isAuthDisabled && entry.uuid !== accountUuid,
-          ).length;
-
-          if (target.consecutiveAuthFailures >= maxFailures && usableCount > 0) {
-            target.isAuthDisabled = true;
-            target.authDisabledReason = `${maxFailures} consecutive auth failures (proactive refresh)`;
-          }
-        });
+            if (target.consecutiveAuthFailures >= maxFailures && usableCount > 0) {
+              target.isAuthDisabled = true;
+              target.authDisabledReason = `${maxFailures} consecutive auth failures (proactive refresh)`;
+            }
+          },
+        );
       } catch {
         debugLog(this.client, `Failed to persist auth failure for ${account.uuid}`);
       }

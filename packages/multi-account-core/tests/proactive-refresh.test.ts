@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { createProactiveRefreshQueueForProvider } from "../src/proactive-refresh";
-import type { AccountStore } from "../src/account-store";
+import type { AccountStore, DiskCredentials } from "../src/account-store";
 import type { PluginClient, PluginConfig, StoredAccount, TokenRefreshResult } from "../src/types";
 
 function createConfig(overrides: Partial<PluginConfig> = {}): PluginConfig {
@@ -40,7 +40,26 @@ function createStore(accounts: StoredAccount[]): AccountStore {
         refreshToken: account.refreshToken,
         accessToken: account.accessToken,
         expiresAt: account.expiresAt,
+        credentialOwnerId: account.credentialOwnerId,
+        accountId: account.accountId,
+        accountUuid: account.accountUuid,
+        deviceId: account.deviceId,
       };
+    },
+    refreshAccountCredentials: async (
+      uuid: string,
+      _expected: DiskCredentials,
+      refresh: (refreshToken: string) => Promise<TokenRefreshResult>,
+    ) => {
+      const account = storage.accounts.find((entry) => entry.uuid === uuid);
+      if (!account) return { result: { ok: false as const, permanent: true }, account: null };
+      const result = await refresh(account.refreshToken);
+      if (result.ok) {
+        account.accessToken = result.patch.accessToken;
+        account.expiresAt = result.patch.expiresAt;
+        if (result.patch.refreshToken) account.refreshToken = result.patch.refreshToken;
+      }
+      return { result, account: { ...account } };
     },
     mutateAccount: async (uuid: string, fn: (account: StoredAccount) => void) => {
       const account = storage.accounts.find((entry) => entry.uuid === uuid);
@@ -50,6 +69,21 @@ function createStore(accounts: StoredAccount[]): AccountStore {
     },
     mutateStorage: async (fn: (storage: { version: 1; accounts: StoredAccount[] }) => void) => {
       fn(storage);
+    },
+    mutateStorageIfCredentialsMatch: async (
+      uuid: string,
+      expected: DiskCredentials,
+      fn: (account: StoredAccount, current: { version: 1; accounts: StoredAccount[] }) => void,
+    ) => {
+      const account = storage.accounts.find((entry) => entry.uuid === uuid);
+      if (!account
+        || account.refreshToken !== expected.refreshToken
+        || account.accessToken !== expected.accessToken
+        || account.expiresAt !== expected.expiresAt) {
+        return false;
+      }
+      fn(account, storage);
+      return true;
     },
     removeAccount: async (uuid: string) => {
       const initialLength = storage.accounts.length;
@@ -179,5 +213,55 @@ describe("core/proactive-refresh", () => {
       authDisabledReason: "refresh failed permanently (proactive refresh)",
     });
     expect(authSetSpy).not.toHaveBeenCalled();
+  });
+
+  test("does not persist a proactive failure after another process wins", async () => {
+    let scheduledCallback: (() => void) | null = null;
+    globalThis.setTimeout = ((handler: TimerHandler) => {
+      if (typeof handler !== "function") throw new Error("Expected timeout function");
+      scheduledCallback = () => handler();
+      return 1 as unknown as ReturnType<typeof setTimeout>;
+    }) as unknown as typeof setTimeout;
+
+    const account: StoredAccount = {
+      uuid: "acct-race",
+      planTier: "",
+      refreshToken: "refresh-old",
+      accessToken: "access-old",
+      expiresAt: Date.now() + 60_000,
+      addedAt: Date.now(),
+      lastUsed: Date.now(),
+      enabled: true,
+      consecutiveAuthFailures: 0,
+      isAuthDisabled: false,
+    };
+    const store = createStore([account]);
+    vi.spyOn(store, "refreshAccountCredentials").mockImplementation(async () => {
+      account.refreshToken = "refresh-winner";
+      account.accessToken = "access-winner";
+      account.expiresAt = Date.now() + 120_000;
+      return { result: { ok: false, permanent: true }, account: { ...account } };
+    });
+    const ProactiveRefreshQueue = createProactiveRefreshQueueForProvider({
+      providerAuthId: "anthropic",
+      getConfig: () => createConfig({ proactive_refresh: true }),
+      isTokenExpired: () => false,
+      refreshToken: async () => ({ ok: false, permanent: true }),
+      debugLog: () => {},
+    });
+
+    const queue = new ProactiveRefreshQueue(createClient(), store);
+    queue.start();
+    if (!scheduledCallback) throw new Error("Expected scheduled callback");
+    (scheduledCallback as () => void)();
+    const inFlight = (queue as unknown as { inFlight: Promise<void> | null }).inFlight;
+    if (inFlight) await inFlight;
+
+    expect(account).toMatchObject({
+      refreshToken: "refresh-winner",
+      accessToken: "access-winner",
+      consecutiveAuthFailures: 0,
+      isAuthDisabled: false,
+    });
   });
 });

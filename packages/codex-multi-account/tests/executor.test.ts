@@ -225,7 +225,11 @@ describe("executeWithAccountRotation", () => {
       );
 
       expect(response.status).toBe(200);
-      expect(manager.markAuthFailure).toHaveBeenCalledWith("acct-1", { ok: false, permanent: false });
+      expect(manager.markAuthFailure).toHaveBeenCalledWith(
+        "acct-1",
+        { ok: false, permanent: false },
+        acct1,
+      );
     });
 
     test("if all accounts fail auth, throws", async () => {

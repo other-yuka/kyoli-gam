@@ -3,9 +3,10 @@ import { readClaims, writeClaim, isClaimedByOther, type ClaimsMap } from "./clai
 import { getConfig } from "./config";
 import { scoreQuotaResetPace, type QuotaRoutingWindow } from "./routing";
 import { getClearedOAuthBody } from "./utils";
-import type { AccountStore } from "./account-store";
+import type { AccountStore, DiskCredentials } from "./account-store";
 import type {
   AccountMetadataPatch,
+  AccountStorage,
   ManagedAccount,
   OAuthCredentials,
   PluginClient,
@@ -70,7 +71,7 @@ export interface AccountManagerInstance {
   markRateLimited(uuid: string, backoffMs?: number): Promise<void>;
   markRevoked(uuid: string): Promise<void>;
   markSuccess(uuid: string): Promise<void>;
-  markAuthFailure(uuid: string, result: TokenRefreshResult): Promise<void>;
+  markAuthFailure(uuid: string, result: TokenRefreshResult, expected?: DiskCredentials): Promise<void>;
   applyUsageCache(uuid: string, usage: UsageLimits): Promise<void>;
   applyProfileCache(uuid: string, profile: ProfileData): Promise<void>;
   ensureValidToken(uuid: string, client: PluginClient): Promise<TokenRefreshResult>;
@@ -185,12 +186,6 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       if (metadata.email) account.email = metadata.email;
       if (metadata.label) account.label = metadata.label;
       if (metadata.planTier !== undefined) account.planTier = metadata.planTier;
-    }
-
-    private applyRefreshIdentityPatch(account: StoredAccount, result: TokenRefreshResult & { ok: true }): void {
-      if (result.patch.accountId) account.accountId = result.patch.accountId;
-      if (result.patch.accountUuid && !account.accountUuid) account.accountUuid = result.patch.accountUuid;
-      if (result.patch.deviceId && !account.deviceId) account.deviceId = result.patch.deviceId;
     }
 
     private createNewAccount(
@@ -646,36 +641,43 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       await this.clearOpenCodeAuthIfNoAccountsRemain();
     }
 
-    async markAuthFailure(uuid: string, result: TokenRefreshResult): Promise<void> {
-      if (!result.ok && result.permanent) {
-        await this.store.mutateStorage((storage) => {
-          const account = storage.accounts.find((entry) => entry.uuid === uuid);
-          if (!account) return;
-
+    async markAuthFailure(
+      uuid: string,
+      result: TokenRefreshResult,
+      expected?: DiskCredentials,
+    ): Promise<void> {
+      const applyFailure = (account: StoredAccount, storage: AccountStorage): void => {
+        if (!result.ok && result.permanent) {
           account.consecutiveAuthFailures = Math.max(
             (account.consecutiveAuthFailures ?? 0) + 1,
             getProviderConfig().max_consecutive_auth_failures,
           );
           account.isAuthDisabled = true;
           account.authDisabledReason = "refresh failed permanently";
-        });
-        return;
-      }
-
-      await this.store.mutateStorage((storage) => {
-        const account = storage.accounts.find((entry) => entry.uuid === uuid);
-        if (!account) return;
+          return;
+        }
 
         account.consecutiveAuthFailures = (account.consecutiveAuthFailures ?? 0) + 1;
         const maxFailures = getProviderConfig().max_consecutive_auth_failures;
         const usableCount = storage.accounts.filter(
-          (entry) => entry.enabled && !entry.isAuthDisabled && entry.uuid !== uuid,
+          (entry) => entry.enabled && !entry.isAuthDisabled && entry.uuid !== account.uuid,
         ).length;
 
         if (account.consecutiveAuthFailures >= maxFailures && usableCount > 0) {
           account.isAuthDisabled = true;
           account.authDisabledReason = `${maxFailures} consecutive auth failures`;
         }
+      };
+
+      if (expected) {
+        await this.store.mutateStorageIfCredentialsMatch(uuid, expected, applyFailure);
+        return;
+      }
+
+      await this.store.mutateStorage((storage) => {
+        const account = storage.accounts.find((entry) => entry.uuid === uuid);
+        if (!account) return;
+        applyFailure(account, storage);
       });
     }
 
@@ -717,28 +719,21 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
         };
       }
 
-      const result = await refreshToken(credentials.refreshToken, uuid, client);
+      const { result, account: updated } = await this.store.refreshAccountCredentials(
+        uuid,
+        credentials,
+        (refreshTokenValue) => refreshToken(refreshTokenValue, uuid, client),
+      );
       if (!result.ok) return result;
 
-      const updated = await this.store.mutateAccount(uuid, (account) => {
-        account.accessToken = result.patch.accessToken;
-        account.expiresAt = result.patch.expiresAt;
-        if (result.patch.refreshToken) account.refreshToken = result.patch.refreshToken;
-        if (result.patch.uuid && result.patch.uuid !== uuid) account.uuid = result.patch.uuid;
-        this.applyRefreshIdentityPatch(account, result);
-        if (result.patch.email) account.email = result.patch.email;
-        account.consecutiveAuthFailures = 0;
-        account.isAuthDisabled = false;
-        account.authDisabledReason = undefined;
-      });
-
-      if (result.patch.uuid && result.patch.uuid !== uuid && this.activeAccountUuid === uuid) {
-        this.activeAccountUuid = result.patch.uuid;
-        this.store.setActiveUuid(result.patch.uuid).catch(() => {});
+      const nextUuid = updated?.uuid ?? uuid;
+      if (nextUuid !== uuid && this.activeAccountUuid === uuid) {
+        this.activeAccountUuid = nextUuid;
+        this.store.setActiveUuid(nextUuid).catch(() => {});
       }
 
-      if (result.patch.uuid && result.patch.uuid !== uuid) {
-        this.replaceStickyBindingAccountUuid(uuid, result.patch.uuid);
+      if (nextUuid !== uuid) {
+        this.replaceStickyBindingAccountUuid(uuid, nextUuid);
       }
 
       if (updated && (uuid === this.activeAccountUuid || updated.uuid === this.activeAccountUuid)) {
@@ -764,7 +759,7 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
 
             const result = await this.ensureValidToken(account.uuid, client);
             if (!result.ok) {
-              await this.markAuthFailure(account.uuid, result);
+              await this.markAuthFailure(account.uuid, result, account);
             }
           }),
         );
@@ -860,31 +855,29 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       const credentials = await this.store.readCredentials(uuid);
       if (!credentials) return { ok: false, permanent: true };
 
-      const result = await refreshToken(credentials.refreshToken, uuid, client);
+      const { result, account: refreshedAccount } = await this.store.refreshAccountCredentials(
+        uuid,
+        credentials,
+        (refreshTokenValue) => refreshToken(refreshTokenValue, uuid, client),
+      );
       if (result.ok) {
-        const updated = await this.store.mutateAccount(uuid, (account) => {
-          account.accessToken = result.patch.accessToken;
-          account.expiresAt = result.patch.expiresAt;
-          if (result.patch.refreshToken) account.refreshToken = result.patch.refreshToken;
-          if (result.patch.uuid) account.uuid = result.patch.uuid;
-          this.applyRefreshIdentityPatch(account, result);
-          if (result.patch.email) account.email = result.patch.email;
+        const nextUuid = refreshedAccount?.uuid ?? uuid;
+        const updated = await this.store.mutateAccount(nextUuid, (account) => {
           account.enabled = true;
           account.consecutiveAuthFailures = 0;
         });
         this.runtimeFactory?.invalidate(uuid);
-        if (result.patch.uuid) {
-          this.runtimeFactory?.invalidate(result.patch.uuid);
+        if (nextUuid !== uuid) {
+          this.runtimeFactory?.invalidate(nextUuid);
         }
 
-        const nextUuid = result.patch.uuid ?? uuid;
-        if (this.activeAccountUuid === uuid && result.patch.uuid && result.patch.uuid !== uuid) {
-          this.activeAccountUuid = result.patch.uuid;
-          await this.store.setActiveUuid(result.patch.uuid);
+        if (this.activeAccountUuid === uuid && nextUuid !== uuid) {
+          this.activeAccountUuid = nextUuid;
+          await this.store.setActiveUuid(nextUuid);
         }
 
-        if (result.patch.uuid && result.patch.uuid !== uuid) {
-          this.replaceStickyBindingAccountUuid(uuid, result.patch.uuid);
+        if (nextUuid !== uuid) {
+          this.replaceStickyBindingAccountUuid(uuid, nextUuid);
         }
 
         if (updated && (uuid === this.activeAccountUuid || nextUuid === this.activeAccountUuid)) {
@@ -898,7 +891,7 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
           }
         }
       } else {
-        await this.markAuthFailure(uuid, result);
+        await this.markAuthFailure(uuid, result, credentials);
         this.runtimeFactory?.invalidate(uuid);
       }
 
