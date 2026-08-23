@@ -457,6 +457,7 @@ jobs:
           node packages/anthropic-multi-account/scripts/select-superseded-claude-code-issues.mjs \
             automation-failures.json \
             "$TARGET_VERSION" \
+            "Claude Code automation failed: vunknown" \
             > resolved-automation-failures.txt
           while read -r n; do
                 [ -z "$n" ] && continue

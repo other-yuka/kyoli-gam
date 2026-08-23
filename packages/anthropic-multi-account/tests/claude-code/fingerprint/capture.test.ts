@@ -88,21 +88,28 @@ function createCapturedRequest(): CapturedRequest {
 }
 
 describe("fingerprint-capture", () => {
-  test("loadTemplate returns cached template from config dir when present", async () => {
+  test("loadTemplate restores bundled interactive tools in a cached headless capture", async () => {
     const { dir, cleanup } = await setupTestEnv();
 
     try {
+      const interactiveToolNames = ["AskUserQuestion", "EnterPlanMode", "ExitPlanMode"];
+      const cached = createLiveTemplate();
+      const bundledInteractiveTools = loadTemplate().tools.filter(
+        (tool) => interactiveToolNames.includes(tool.name),
+      );
       await fs.writeFile(
         join(dir, CACHE_FILE_NAME),
-        `${JSON.stringify(createLiveTemplate(), null, 2)}\n`,
+        `${JSON.stringify(cached, null, 2)}\n`,
         "utf8",
       );
 
       const template = loadTemplate();
 
       expect(template._source).toBe("cached");
-      expect(template.cc_version).toBe(createLiveTemplate().cc_version);
-      expect(template.tools).toHaveLength(2);
+      expect(template.cc_version).toBe(cached.cc_version);
+      expect(template.tools.filter((tool) => interactiveToolNames.includes(tool.name)))
+        .toEqual(bundledInteractiveTools);
+      expect(template.tool_names).toEqual(template.tools.map((tool) => tool.name));
     } finally {
       await cleanup();
     }

@@ -172,4 +172,22 @@ describe("client-adapter", () => {
       },
     ]);
   });
+
+  test("normalizeAnthropicClientRequest preserves a metadata-only trailing user boundary", () => {
+    const adapted = normalizeAnthropicClientRequest({
+      messages: [
+        { role: "user", content: [{ type: "text", text: "run the sub-agent" }] },
+        { role: "assistant", content: [{ type: "text", text: "sub-agent complete" }] },
+        {
+          role: "user",
+          content: [{ type: "text", text: "<task_metadata>subagent=explore</task_metadata>" }],
+        },
+      ],
+    });
+
+    expect(adapted.messages.at(-1)).toEqual({
+      role: "user",
+      content: [{ type: "text", text: "<task_metadata>subagent=explore</task_metadata>" }],
+    });
+  });
 });
