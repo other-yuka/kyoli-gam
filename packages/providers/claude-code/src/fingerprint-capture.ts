@@ -181,17 +181,23 @@ function cloneTemplate(template: TemplateData, sourceOverride?: TemplateSource):
 }
 
 function applyBundledTemplateFallbacks(template: TemplateData): TemplateData {
+  const existingToolNames = new Set(template.tools.map((tool) => tool.name));
+  const preservedTools = bundledTemplate.tools
+    .filter((tool) => INTERACTIVE_ONLY_TOOL_NAMES.has(tool.name) && !existingToolNames.has(tool.name))
+    .map((tool) => ({ ...tool }));
+  const tools = preservedTools.length === 0
+    ? template.tools
+    : [...template.tools, ...preservedTools].sort((left, right) => left.name.localeCompare(right.name));
   const variants = {
     ...getClaudeCodeSystemPromptVariants(bundledTemplate),
     ...getClaudeCodeSystemPromptVariants(template),
   };
-  if (Object.keys(variants).length === 0) {
-    return template;
-  }
 
   return {
     ...template,
-    system_prompt_variants: variants,
+    tools,
+    tool_names: tools.map((tool) => tool.name),
+    ...(Object.keys(variants).length > 0 ? { system_prompt_variants: variants } : {}),
   };
 }
 

@@ -71,7 +71,14 @@ export function normalizeAnthropicClientRequest(inputBody: JsonRecord): AdaptedC
   const systemTexts = normalizeSystemTexts(body.system);
 
   stripCacheControl(body);
+  const trailingMessage = messages.at(-1);
+  const trailingUserBoundary = trailingMessage?.role === "user"
+    && hasMeaningfulContent(trailingMessage.content)
+    ? structuredClone(trailingMessage)
+    : undefined;
   sanitizeMessages(body);
+  const trailingUserBoundaryWasScrubbed = trailingUserBoundary !== undefined
+    && !hasMeaningfulContent(trailingMessage?.content);
   stripAssistantThinkingBlocks(messages);
 
   for (const message of messages) {
@@ -92,6 +99,13 @@ export function normalizeAnthropicClientRequest(inputBody: JsonRecord): AdaptedC
   compactMessageContent(messages);
   removeEmptyTurns(messages);
   trimTrailingEmptyTurns(messages);
+  if (
+    trailingUserBoundary
+    && trailingUserBoundaryWasScrubbed
+    && messages.at(-1)?.role === "assistant"
+  ) {
+    messages.push(trailingUserBoundary);
+  }
   body.messages = messages;
   stripUnsupportedSamplingFields(body);
   stripThinkingControlFields(body);

@@ -78,7 +78,11 @@ export async function runClaudeBillingClaimDoctor(
   const billingClaimStatus = classifyBillingClaim(claim);
   const requestedModel = stripProviderPrefix(model);
   const servedModel = typeof payload?.model === "string" ? payload.model : "";
-  const modelCheck = checkServedModel(requestedModel, servedModel);
+  const modelCheck = checkServedModel(
+    requestedModel,
+    servedModel,
+    billingClaimStatus === "pass" && billingClaimFailures.length === 0,
+  );
   const billingClaimClassification = billingClaimFailures.length > 0 || billingClaimStatus === "fail"
     ? "non_subscription"
     : billingClaimStatus === "pass"
@@ -133,11 +137,15 @@ function summarizeChecks(checks: DoctorCheck[]): DoctorReport["summary"] {
   };
 }
 
-function checkServedModel(requestedModel: string, servedModel: string): DoctorCheck {
+function checkServedModel(
+  requestedModel: string,
+  servedModel: string,
+  subscriptionClaimPassed: boolean,
+): DoctorCheck {
   if (!servedModel) {
     return {
       name: "served model",
-      status: "warn",
+      status: subscriptionClaimPassed ? "pass" : "warn",
       detail: `requested=${requestedModel} served=unknown`,
     };
   }

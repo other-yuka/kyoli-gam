@@ -114,6 +114,22 @@ describe("runClaudeBillingClaimDoctor", () => {
       status: "fail",
       detail: "requested=claude-opus-5 served=claude-haiku-4-5",
     });
+    expect(getClaudeBillingClaimDoctorExitCode(report)).toBe(1);
+  });
+
+  it("does not escalate a subscription claim when the served model is unreadable", async () => {
+    const store = await createClaudeStore();
+    const fetchImpl = createClaudeFetch("five_hour", { responseBody: "not-json" });
+
+    const report = await runClaudeBillingClaimDoctor(store, config, { fetch: fetchImpl });
+
+    expect(report.checks.find((check) => check.name === "billing claim"))
+      .toMatchObject({ status: "pass" });
+    expect(report.checks.find((check) => check.name === "served model")).toMatchObject({
+      status: "pass",
+      detail: "requested=claude-opus-5 served=unknown",
+    });
+    expect(getClaudeBillingClaimDoctorExitCode(report)).toBe(0);
   });
 });
 
@@ -139,14 +155,14 @@ async function createClaudeStore(count = 1): Promise<MemoryAccountStore> {
 
 function createClaudeFetch(
   claim: string,
-  options: { captures?: Headers[]; servedModel?: string } = {},
+  options: { captures?: Headers[]; servedModel?: string; responseBody?: string } = {},
 ): typeof fetch {
   return createSequencedClaudeFetch([claim], options);
 }
 
 function createSequencedClaudeFetch(
   claims: string[],
-  options: { captures?: Headers[]; servedModel?: string } = {},
+  options: { captures?: Headers[]; servedModel?: string; responseBody?: string } = {},
 ): typeof fetch {
   let requestCount = 0;
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -158,7 +174,7 @@ function createSequencedClaudeFetch(
     options.captures?.push(new Headers(init?.headers));
     const claim = claims[Math.min(requestCount, claims.length - 1)] ?? "five_hour";
     requestCount += 1;
-    return new Response(JSON.stringify({
+    return new Response(options.responseBody ?? JSON.stringify({
       id: "msg_test",
       type: "message",
       model: options.servedModel ?? "claude-opus-5",
