@@ -1,5 +1,13 @@
 # opencode-anthropic-multi-account
 
+## 0.3.4
+
+### Patch Changes
+
+- [#373](https://github.com/other-yuka/kyoli-gam/pull/373) [`b77e6fe`](https://github.com/other-yuka/kyoli-gam/commit/b77e6fe7fae1d477e73315b2f74c29dc4ff74c4c) Thanks [@other-yuka](https://github.com/other-yuka)! - Refresh Claude Code version labels for `@anthropic-ai/claude-code@2.1.241` after exact-version live capture proved the wire shape unchanged.
+- Updated dependencies []:
+  - opencode-multi-account-core@0.3.4
+
 ## 0.3.3
 
 ### Patch Changes
