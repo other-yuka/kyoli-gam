@@ -1,5 +1,13 @@
 # opencode-anthropic-multi-account
 
+## 0.3.6
+
+### Patch Changes
+
+- [#378](https://github.com/other-yuka/kyoli-gam/pull/378) [`b04968d`](https://github.com/other-yuka/kyoli-gam/commit/b04968db80f75baa7c44fe609913fe858db20e3f) Thanks [@other-yuka](https://github.com/other-yuka)! - Reject invalid Claude text blocks and prevent automated fingerprint rebakes from silently removing bundled tools.
+- Updated dependencies []:
+  - opencode-multi-account-core@0.3.6
+
 ## 0.3.5
 
 ### Patch Changes
