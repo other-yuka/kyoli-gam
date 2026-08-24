@@ -8,6 +8,7 @@ const scriptPath = join(packageRoot, "scripts/live-fingerprint-drift-utils.mjs")
 const {
   classifyLiveFingerprintDiff,
   createLabelOnlyFingerprintUpdate,
+  findRemovedNoninteractiveToolNames,
 } = await import(scriptPath);
 
 function template(overrides: Record<string, unknown> = {}) {
@@ -84,6 +85,24 @@ describe("live fingerprint drift utils", () => {
     );
 
     expect(result.classification).toBe("clean");
+  });
+
+  test("identifies removed noninteractive tools after interactive-only omissions", () => {
+    const interactiveTool = {
+      name: "AskUserQuestion",
+      description: "Ask the user",
+      input_schema: { type: "object" },
+    };
+    const expected = template({
+      tools: [...template().tools, interactiveTool],
+      tool_names: ["Read", "Bash", "AskUserQuestion"],
+    });
+    const actual = template({
+      tools: [template().tools[0]],
+      tool_names: ["Read"],
+    });
+
+    expect(findRemovedNoninteractiveToolNames(expected, actual)).toEqual(["Bash"]);
   });
 
   test("treats omitted prompt variants as the primary prompt fallback", () => {

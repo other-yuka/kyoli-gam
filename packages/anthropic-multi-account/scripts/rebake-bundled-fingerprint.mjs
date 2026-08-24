@@ -12,6 +12,7 @@ import {
   loadBundledFingerprint,
 } from "./_bundled-fingerprint.mjs";
 import { captureLiveFingerprintSetAsync } from "./capture-live-fingerprint-set.mjs";
+import { findRemovedNoninteractiveToolNames } from "./live-fingerprint-drift-utils.mjs";
 
 const captureTimeoutMs = Number(process.env.FINGERPRINT_CAPTURE_TIMEOUT_MS ?? "10000");
 const INTERACTIVE_ONLY_TOOL_NAMES = new Set([
@@ -93,6 +94,16 @@ async function main() {
   const pinnedBundled = await loadBundledFingerprint();
   const hydrated = preserveInteractiveOnlyTools(live, pinnedBundled);
   const bundled = prepareBundledTemplate(scrubTemplate(hydrated, { dropMcpTools: true }));
+  const removedToolNames = findRemovedNoninteractiveToolNames(pinnedBundled, bundled);
+  if (removedToolNames.length > 0) {
+    const message = `captured fingerprint removed bundled noninteractive Claude Code tool(s): ${removedToolNames.join(", ")}`;
+    if (!process.argv.includes("--allow-tool-drops")) {
+      throw new Error(
+        `${message}; refusing to overwrite the fallback template. Re-run with --allow-tool-drops only after recording capture evidence for a genuine retirement.`,
+      );
+    }
+    console.warn(`${message}; proceeding because --allow-tool-drops was provided.`);
+  }
   assertClaudeCodeFingerprint(bundled, pinnedBundled);
   const residualHits = findUserPathHits(JSON.stringify(bundled));
   if (residualHits.length > 0) {
