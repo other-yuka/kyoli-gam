@@ -19,6 +19,13 @@ function comparableHeadlessTools(template) {
   return tools.filter((tool) => !INTERACTIVE_ONLY_TOOL_NAMES.has(tool?.name));
 }
 
+export function findRemovedNoninteractiveToolNames(expected, actual) {
+  const actualToolNames = new Set(comparableHeadlessTools(actual).map((tool) => tool.name));
+  return comparableHeadlessTools(expected)
+    .map((tool) => tool.name)
+    .filter((name) => !actualToolNames.has(name));
+}
+
 function comparableHeaderValues(template) {
   const values = { ...(template.header_values ?? {}) };
   if (typeof values["user-agent"] === "string") {

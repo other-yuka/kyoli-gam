@@ -173,6 +173,24 @@ describe("client-adapter", () => {
     ]);
   });
 
+  test("normalizeAnthropicClientRequest drops non-string text blocks from mixed content", () => {
+    const adapted = normalizeAnthropicClientRequest({
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "toolu_1", name: "Read", input: { file_path: "README.md" } },
+            { type: "text", text: null },
+          ],
+        },
+      ],
+    });
+
+    expect(adapted.messages[0]?.content).toEqual([
+      { type: "tool_use", id: "toolu_1", name: "Read", input: { file_path: "README.md" } },
+    ]);
+  });
+
   test("normalizeAnthropicClientRequest preserves a metadata-only trailing user boundary", () => {
     const adapted = normalizeAnthropicClientRequest({
       messages: [

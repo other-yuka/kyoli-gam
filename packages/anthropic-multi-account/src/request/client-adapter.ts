@@ -349,7 +349,7 @@ function compactMessageContent(messages: Message[]): void {
       }
 
       if (block.type === "text") {
-        return typeof block.text !== "string" || block.text.trim().length > 0;
+        return typeof block.text === "string" && block.text.trim().length > 0;
       }
 
       return true;
