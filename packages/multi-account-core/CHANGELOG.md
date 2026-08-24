@@ -1,5 +1,11 @@
 # opencode-multi-account-core
 
+## 0.3.5
+
+### Patch Changes
+
+- [#376](https://github.com/other-yuka/kyoli-gam/pull/376) [`18657a4`](https://github.com/other-yuka/kyoli-gam/commit/18657a4629db1bcdf03eedb72c130bb33a7cfcaa) Thanks [@other-yuka](https://github.com/other-yuka)! - Preserve Claude Code fingerprint and message contracts while making shared refresh leases owner-safe.
+
 ## 0.3.4
 
 ## 0.3.3
