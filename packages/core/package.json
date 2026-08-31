@@ -33,7 +33,7 @@
     "directory": "packages/core"
   },
   "devDependencies": {
-    "@types/node": "^26.2.0",
+    "@types/node": "^26.4.0",
     "typescript": "^6.0.3",
     "@types/better-sqlite3": "^7.6.13"
   },
