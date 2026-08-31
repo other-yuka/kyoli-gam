@@ -1,5 +1,15 @@
 # @kyoli-gam/cli
 
+## 0.0.82
+
+### Patch Changes
+
+- Updated dependencies [[`a77312b`](https://github.com/other-yuka/kyoli-gam/commit/a77312b5555dde5d078d27b106d507e5d4ef3692)]:
+  - @kyoli-gam/gateway@0.0.80
+  - @kyoli-gam/core@0.0.79
+  - @kyoli-gam/provider-codex-chatgpt@0.0.79
+  - @kyoli-gam/provider-claude-code@0.0.81
+
 ## 0.0.81
 
 ### Patch Changes
