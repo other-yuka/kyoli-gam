@@ -45,7 +45,9 @@ export interface AccountUpdateInput {
   name?: string;
   enabled?: boolean;
   credentials?: Record<string, unknown>;
+  credentialsPatch?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
+  metadataPatch?: Record<string, unknown>;
 }
 
 export interface AccountResetStateInput {
@@ -231,6 +233,10 @@ export class SQLiteAccountStore implements AccountStore {
   }
 
   async get(id: string): Promise<AccountRecord | undefined> {
+    return this.read(id);
+  }
+
+  private read(id: string): AccountRecord | undefined {
     const row = this.db
       .query("select * from accounts where id = ?")
       .get(id) as AccountRow | null;
@@ -286,7 +292,7 @@ export class SQLiteAccountStore implements AccountStore {
   }
 
   async update(id: string, input: AccountUpdateInput): Promise<AccountRecord | undefined> {
-    const existing = await this.get(id);
+    const existing = this.read(id);
     if (!existing) return undefined;
 
     const updated = updateAccountRecord(existing, input);
@@ -500,12 +506,18 @@ function updateAccountRecord(
   existing: AccountRecord,
   input: AccountUpdateInput,
 ): AccountRecord {
+  const credentials = input.credentials ?? existing.credentials;
+  const metadata = input.metadata ?? existing.metadata;
   return {
     ...existing,
     name: input.name ?? existing.name,
     enabled: input.enabled ?? existing.enabled,
-    credentials: input.credentials ?? existing.credentials,
-    metadata: input.metadata ?? existing.metadata,
+    credentials: input.credentialsPatch
+      ? { ...credentials, ...input.credentialsPatch }
+      : credentials,
+    metadata: input.metadataPatch
+      ? { ...metadata, ...input.metadataPatch }
+      : metadata,
     failureCount: existing.failureCount,
       lastUsedAt: existing.lastUsedAt,
       lastErrorAt: existing.lastErrorAt,

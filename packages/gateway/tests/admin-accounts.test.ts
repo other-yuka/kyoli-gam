@@ -70,6 +70,69 @@ describe("admin accounts API", () => {
     });
   });
 
+  it("preserves account metadata updated while a runner credential refresh is in flight", async () => {
+    const accounts = new MemoryAccountStore();
+    const account = await accounts.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: {
+        accessToken: "expired-access",
+        refreshToken: "refresh-token",
+        expiresAt: Date.now() - 60_000,
+      },
+      metadata: { cachedUsageAt: 100, source: "initial" },
+    });
+    let signalRefreshStarted: (() => void) | undefined;
+    let finishRefresh: (() => void) | undefined;
+    const refreshStarted = new Promise<void>((resolve) => {
+      signalRefreshStarted = resolve;
+    });
+    const refreshFinished = new Promise<void>((resolve) => {
+      finishRefresh = resolve;
+    });
+    const gateway = createGateway({
+      accounts,
+      providers: [],
+      runnerToken: "runner-secret",
+      async runnerCredentialRefresh() {
+        signalRefreshStarted?.();
+        await refreshFinished;
+        return {
+          accessToken: "fresh-access",
+          refreshToken: "rotated-refresh",
+          expiresAt: Date.now() + 60 * 60 * 1000,
+          email: "fresh@example.test",
+        };
+      },
+    });
+
+    const responsePromise = gateway.fetch(
+      new Request("http://127.0.0.1:2021/internal/runner/claude-credential", {
+        method: "POST",
+        headers: { authorization: "Bearer runner-secret" },
+      }),
+    );
+    await refreshStarted;
+    await accounts.update(account.id, {
+      metadata: { cachedUsageAt: 200, source: "usage-refresh" },
+    });
+    finishRefresh?.();
+
+    const response = await responsePromise;
+    const stored = await accounts.get(account.id);
+
+    expect(response.status).toBe(200);
+    expect(stored?.credentials).toMatchObject({
+      accessToken: "fresh-access",
+      refreshToken: "rotated-refresh",
+    });
+    expect(stored?.metadata).toEqual({
+      cachedUsageAt: 200,
+      source: "usage-refresh",
+      email: "fresh@example.test",
+    });
+  });
+
   it("reuses a runner credential that is not near expiry", async () => {
     const accounts = new MemoryAccountStore();
     const expiresAt = Date.now() + 60 * 60 * 1000;
