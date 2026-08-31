@@ -1375,6 +1375,11 @@ describe("createCodexChatGPTProvider", () => {
           reasoningSummary: "auto",
           max_tokens: 128,
           top_p: 0.5,
+          presence_penalty: 0.25,
+          frequency_penalty: 0.5,
+          seed: 1234,
+          metadata: { request_id: "request-123" },
+          top_logprobs: 5,
           truncation: "auto",
           context_management: [{ type: "compaction", compact_threshold: 12000 }],
           user: "client-user",
@@ -1401,6 +1406,11 @@ describe("createCodexChatGPTProvider", () => {
         reasoningSummary: "auto",
         max_tokens: 128,
         top_p: 0.5,
+        presence_penalty: 0.25,
+        frequency_penalty: 0.5,
+        seed: 1234,
+        metadata: { request_id: "request-123" },
+        top_logprobs: 5,
         truncation: "auto",
         context_management: [{ type: "compaction", compact_threshold: 12000 }],
         user: "client-user",
@@ -1440,6 +1450,11 @@ describe("createCodexChatGPTProvider", () => {
     expect(upstreamBody.max_output_tokens).toBeUndefined();
     expect(upstreamBody.max_tokens).toBeUndefined();
     expect(upstreamBody.top_p).toBeUndefined();
+    expect(upstreamBody.presence_penalty).toBeUndefined();
+    expect(upstreamBody.frequency_penalty).toBeUndefined();
+    expect(upstreamBody.seed).toBeUndefined();
+    expect(upstreamBody.metadata).toBeUndefined();
+    expect(upstreamBody.top_logprobs).toBeUndefined();
     expect(upstreamBody.truncation).toBeUndefined();
     expect(upstreamBody.context_management).toBeUndefined();
     expect(upstreamBody.user).toBeUndefined();
@@ -4019,6 +4034,62 @@ describe("createCodexChatGPTProvider", () => {
         },
       ],
       usage: { input_tokens: 5, output_tokens: 3 },
+    });
+  });
+
+  it("preserves a terminal Codex failure for non-streaming chat completions", async () => {
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+      },
+    });
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      fetch: async () =>
+        new Response(
+          [
+            "event: response.output_text.delta",
+            'data: {"type":"response.output_text.delta","delta":"partial"}',
+            "",
+            "event: response.failed",
+            'data: {"type":"response.failed","response":{"status":"failed","error":{"code":"upstream_disconnected","message":"stream disconnected before completion"}}}',
+            "",
+          ].join("\n"),
+          {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          },
+        ),
+    });
+    const body = {
+      model: "codex/gpt-5.3-codex",
+      messages: [{ role: "user", content: "hello" }],
+    };
+
+    const response = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+      route: "/v1/chat/completions",
+      sessionKey: "session-a",
+      body,
+      model: "codex/gpt-5.3-codex",
+    });
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        type: "upstream_disconnected",
+        code: "upstream_disconnected",
+        message: "stream disconnected before completion",
+      },
     });
   });
 

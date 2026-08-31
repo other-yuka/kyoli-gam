@@ -33,6 +33,7 @@ interface AnthropicMessageBody {
 
 interface StreamState {
   contentBlocks: Map<number, AnthropicContentBlockState>;
+  failed: boolean;
   outputItems: Array<Record<string, unknown>>;
   outputText: string;
   response: Record<string, unknown>;
@@ -573,6 +574,7 @@ function convertAnthropicStreamToResponsesStream(upstream: Response, model: stri
   const encoder = new TextEncoder();
   const state: StreamState = {
     contentBlocks: new Map(),
+    failed: false,
     outputItems: [],
     outputText: "",
     response: createResponseShell(model),
@@ -588,10 +590,12 @@ function convertAnthropicStreamToResponsesStream(upstream: Response, model: stri
           buffer += decoder.decode();
           const finalEvents = drainAnthropicFrames(buffer, (frame) => convertAnthropicFrame(frame, state));
           for (const event of finalEvents.frames) controller.enqueue(encoder.encode(event));
-          controller.enqueue(encoder.encode(responsesEvent("response.completed", {
-            type: "response.completed",
-            response: finalizeResponse(state),
-          })));
+          if (!state.failed) {
+            controller.enqueue(encoder.encode(responsesEvent("response.completed", {
+              type: "response.completed",
+              response: finalizeResponse(state),
+            })));
+          }
           controller.close();
           return;
         }
@@ -655,6 +659,7 @@ function convertAnthropicFrame(frame: string, state: StreamState): string[] {
 
   const payload = readRecordFromJson(data);
   if (!payload) return [];
+  if (state.failed) return [];
 
   const type = readString(payload.type);
   if (type === "message_start") {
@@ -678,6 +683,7 @@ function convertAnthropicFrame(frame: string, state: StreamState): string[] {
     return index === undefined ? [] : stopContentBlock(index, state);
   }
   if (type === "error") {
+    state.failed = true;
     const error = readRecord(payload.error);
     return [responsesEvent("response.failed", {
       type: "response.failed",
@@ -809,6 +815,7 @@ function convertAnthropicMessageToResponsePayload(payload: unknown, model: strin
   response.model = readString(message.model) ?? response.model;
   const state: StreamState = {
     contentBlocks: new Map(),
+    failed: false,
     outputItems: [],
     outputText: "",
     response,

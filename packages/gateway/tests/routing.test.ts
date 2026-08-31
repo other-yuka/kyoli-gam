@@ -1041,6 +1041,57 @@ describe("gateway routing", () => {
     expect(text).toContain("response.completed");
   });
 
+  it("does not complete a virtual Claude Codex response after an upstream stream failure", async () => {
+    const claude = fakeProvider({
+      id: "claude-code",
+      routes: ["/v1/messages"],
+      models: [
+        {
+          id: "anthropic/claude-sonnet-4-5",
+          provider: "claude-code",
+          upstreamId: "claude-sonnet-4-5",
+          capabilities: ["messages", "streaming", "claude-code"],
+          aliases: ["claude-code/claude-sonnet-4-5"],
+        },
+      ],
+      handle: async () =>
+        new Response(
+          [
+            "event: message_start",
+            'data: {"type":"message_start","message":{"id":"msg_failed","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[]}}',
+            "",
+            "event: error",
+            'data: {"type":"error","error":{"type":"upstream_error","message":"stream failed"}}',
+            "",
+            "",
+          ].join("\n"),
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    });
+    const gateway = createGateway({
+      accounts: new MemoryAccountStore(),
+      providers: [claude],
+    });
+
+    const response = await gateway.fetch(
+      new Request("http://127.0.0.1:2021/backend-api/codex/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "kyoli-claude/claude-sonnet-4-5",
+          input: [{ role: "user", content: [{ type: "input_text", text: "hi" }] }],
+        }),
+      }),
+    );
+    const text = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(text).toContain("response.created");
+    expect(text).toContain("response.failed");
+    expect(text).toContain('"message":"stream failed"');
+    expect(text).not.toContain("response.completed");
+  });
+
   it("bridges virtual Claude compact requests through a non-streaming Claude Code request", async () => {
     let seenContext: GatewayRequestContext | undefined;
     const claude = fakeProvider({

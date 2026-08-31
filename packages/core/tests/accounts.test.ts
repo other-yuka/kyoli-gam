@@ -2,9 +2,45 @@ import { describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MemoryAccountStore, SQLiteRequestLogStore, SQLiteStickySessionStore } from "../src";
+import {
+  MemoryAccountStore,
+  SQLiteAccountStore,
+  SQLiteRequestLogStore,
+  SQLiteStickySessionStore,
+} from "../src";
 
 describe("AccountStore state reset", () => {
+  it("merges credential and metadata patches into the latest SQLite account", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyoli-account-patch-"));
+
+    try {
+      const store = new SQLiteAccountStore(join(dir, "kyoli.db"));
+      const account = await store.create({
+        provider: "claude-code",
+        kind: "oauth",
+        credentials: { accessToken: "old-access", refreshToken: "keep-refresh" },
+        metadata: { cachedUsageAt: 200, source: "usage-refresh" },
+      });
+
+      const updated = await store.update(account.id, {
+        credentialsPatch: { accessToken: "fresh-access" },
+        metadataPatch: { email: "fresh@example.test" },
+      });
+
+      expect(updated?.credentials).toEqual({
+        accessToken: "fresh-access",
+        refreshToken: "keep-refresh",
+      });
+      expect(updated?.metadata).toEqual({
+        cachedUsageAt: 200,
+        source: "usage-refresh",
+        email: "fresh@example.test",
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("puts transient 401/403 failures into auth cooldown without disabling the account", async () => {
     const store = new MemoryAccountStore();
     const account = await store.create({

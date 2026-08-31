@@ -759,9 +759,10 @@ async function handleResponsesRequest(input: {
   });
 
   if (!upstream.ok || requestBody?.stream === true) return upstream;
-  return jsonResponse(await convertResponsesStreamToResponsePayload(upstream, requestBody ?? {}), {
-    status: upstream.status,
-  });
+  const collapsed = await convertResponsesStreamToResponsePayload(upstream, requestBody ?? {});
+  return collapsed.ok
+    ? jsonResponse(collapsed.payload, { status: upstream.status })
+    : codexTerminalFailureResponse(collapsed.failure);
 }
 
 async function handleChatCompletionsRequest(input: {
@@ -832,10 +833,16 @@ async function handleChatCompletionsRequest(input: {
     return convertResponsesStreamToChatCompletions(upstream, body);
   }
 
-  let payload = upstream.headers.get("content-type")?.includes("text/event-stream")
+  let collapsed = upstream.headers.get("content-type")?.includes("text/event-stream")
     ? await convertResponsesStreamToResponsePayload(upstream, body)
-    : await readJsonRecord(upstream.clone());
-  payload ??= await convertResponsesStreamToResponsePayload(upstream, body);
+    : undefined;
+  if (collapsed && !collapsed.ok) return codexTerminalFailureResponse(collapsed.failure);
+  let payload = collapsed?.payload ?? await readJsonRecord(upstream.clone());
+  if (!payload) {
+    collapsed = await convertResponsesStreamToResponsePayload(upstream, body);
+    if (!collapsed.ok) return codexTerminalFailureResponse(collapsed.failure);
+    payload = collapsed.payload;
+  }
   if (!payload) return upstream;
   return jsonResponse(convertResponsesPayloadToChatCompletion(payload, body), {
     status: upstream.status,
@@ -2569,10 +2576,14 @@ function convertResponsesStreamToChatCompletions(
   });
 }
 
+type CollapsedResponsesResult =
+  | { ok: true; payload: Record<string, unknown> }
+  | { ok: false; failure: AccountFailureSignal };
+
 async function convertResponsesStreamToResponsePayload(
   upstream: Response,
   requestBody: Record<string, unknown>,
-): Promise<Record<string, unknown>> {
+): Promise<CollapsedResponsesResult> {
   const responseText = await upstream.text();
   const outputTextParts: string[] = [];
   const outputItems = new Map<number, Record<string, unknown>>();
@@ -2591,6 +2602,9 @@ async function convertResponsesStreamToResponsePayload(
       continue;
     }
     if (!payload) continue;
+
+    const failure = classifyCodexJsonEventFailure(payload, "terminal");
+    if (failure) return { ok: false, failure };
 
     const delta = readString(payload.delta);
     const payloadType = readString(payload.type) ?? event ??
@@ -2633,15 +2647,28 @@ async function convertResponsesStreamToResponsePayload(
     }];
 
   return {
-    id,
-    object: "response",
-    created_at: readNumber(finalResponse?.created_at) ?? Math.floor(Date.now() / 1000),
-    model: readString(finalResponse?.model) ?? readString(requestBody.model) ?? "unknown",
-    status,
-    output,
-    output_text: outputText,
-    usage: finalResponse?.usage,
+    ok: true,
+    payload: {
+      id,
+      object: "response",
+      created_at: readNumber(finalResponse?.created_at) ?? Math.floor(Date.now() / 1000),
+      model: readString(finalResponse?.model) ?? readString(requestBody.model) ?? "unknown",
+      status,
+      output,
+      output_text: outputText,
+      usage: finalResponse?.usage,
+    },
   };
+}
+
+function codexTerminalFailureResponse(failure: AccountFailureSignal): Response {
+  const headers: Record<string, string> = {};
+  if (failure.retryAfterSeconds) headers["retry-after"] = String(failure.retryAfterSeconds);
+  if (failure.resetAt) headers["x-kyoli-account-reset-at"] = failure.resetAt;
+  return jsonResponse(createChatCompletionError(failure), {
+    status: failure.httpStatus ?? 502,
+    headers,
+  });
 }
 
 function splitSseFrames(value: string): string[] {
@@ -3411,6 +3438,11 @@ function stripCodexUnsupportedFields(record: Record<string, unknown>): void {
   delete record.safety_identifier;
   delete record.temperature;
   delete record.top_p;
+  delete record.presence_penalty;
+  delete record.frequency_penalty;
+  delete record.seed;
+  delete record.metadata;
+  delete record.top_logprobs;
   delete record.truncation;
   delete record.context_management;
   delete record.user;

@@ -416,17 +416,15 @@ async function handleRunnerCredentialRequest(
       refresh = (async () => {
         const refreshed = await refreshCredential(refreshToken);
         const updated = await accounts.update(account.id, {
-          credentials: {
-            ...account.credentials,
+          credentialsPatch: {
             accessToken: refreshed.accessToken,
-            refreshToken: refreshed.refreshToken ?? refreshToken,
             expiresAt: refreshed.expiresAt,
-            accountId: refreshed.accountId ?? account.credentials.accountId,
+            ...(refreshed.refreshToken !== undefined ? { refreshToken: refreshed.refreshToken } : {}),
+            ...(refreshed.accountId !== undefined ? { accountId: refreshed.accountId } : {}),
           },
-          metadata: {
-            ...account.metadata,
-            email: refreshed.email ?? account.metadata.email,
-            accountId: refreshed.accountId ?? account.metadata.accountId,
+          metadataPatch: {
+            ...(refreshed.email !== undefined ? { email: refreshed.email } : {}),
+            ...(refreshed.accountId !== undefined ? { accountId: refreshed.accountId } : {}),
           },
         });
         if (!updated) throw new Error("Claude Code OAuth account disappeared during refresh.");
