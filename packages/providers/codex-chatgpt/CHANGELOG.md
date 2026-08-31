@@ -1,5 +1,14 @@
 # @kyoli-gam/provider-codex-chatgpt
 
+## 0.0.79
+
+### Patch Changes
+
+- [#403](https://github.com/other-yuka/kyoli-gam/pull/403) [`a77312b`](https://github.com/other-yuka/kyoli-gam/commit/a77312b5555dde5d078d27b106d507e5d4ef3692) Thanks [@other-yuka](https://github.com/other-yuka)! - Reject unsupported Codex request fields, preserve terminal stream failures, and
+  keep concurrent account metadata when runner credentials refresh.
+- Updated dependencies [[`a77312b`](https://github.com/other-yuka/kyoli-gam/commit/a77312b5555dde5d078d27b106d507e5d4ef3692)]:
+  - @kyoli-gam/core@0.0.79
+
 ## 0.0.78
 
 ### Patch Changes
