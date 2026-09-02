@@ -1,5 +1,15 @@
 # @kyoli-gam/cli
 
+## 0.0.87
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @kyoli-gam/core@0.0.84
+  - @kyoli-gam/provider-claude-code@0.0.86
+  - @kyoli-gam/gateway@0.0.85
+  - @kyoli-gam/provider-codex-chatgpt@0.0.84
+
 ## 0.0.86
 
 ### Patch Changes
