@@ -1,5 +1,13 @@
 # opencode-anthropic-multi-account
 
+## 0.3.16
+
+### Patch Changes
+
+- [#414](https://github.com/other-yuka/kyoli-gam/pull/414) [`e89c83d`](https://github.com/other-yuka/kyoli-gam/commit/e89c83d0000924c09029fb7c10d053641dd413f1) Thanks [@other-yuka](https://github.com/other-yuka)! - Handle Claude Code Fable live fingerprint captures whose system prompt is split into a reporting-outcomes block and the remaining prompt.
+- Updated dependencies []:
+  - opencode-multi-account-core@0.3.16
+
 ## 0.3.15
 
 ### Patch Changes
