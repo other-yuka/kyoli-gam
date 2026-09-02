@@ -214,7 +214,7 @@ describe("fingerprint-capture", () => {
     expect(template?._schemaVersion).toBe(2);
   });
 
-  test("extractTemplate returns null when the system blocks drift away from the expected three-block shape", () => {
+  test("extractTemplate returns null for unsupported system block shapes", () => {
     const twoBlockRequest = createCapturedRequest();
     twoBlockRequest.body.system = [
       { type: "text", text: createBillingHeader() },
@@ -231,6 +231,58 @@ describe("fingerprint-capture", () => {
 
     expect(extractTemplate(twoBlockRequest)).toBeNull();
     expect(extractTemplate(fourBlockRequest)).toBeNull();
+
+    const unrecognizedFableRequest = createCapturedRequest();
+    unrecognizedFableRequest.body.model = "claude-fable-5-1";
+    unrecognizedFableRequest.body.system = [
+      { type: "text", text: createBillingHeader() },
+      { type: "text", text: "You are Claude Code, an interactive CLI tool." },
+      { type: "text", text: "# Unexpected prompt split" },
+      { type: "text", text: "Inspect the repository before making assumptions." },
+    ];
+
+    const misleadingModelRequest = createCapturedRequest();
+    misleadingModelRequest.body.model = "not-fable-5";
+    misleadingModelRequest.body.system = [
+      { type: "text", text: createBillingHeader() },
+      { type: "text", text: "You are Claude Code, an interactive CLI tool." },
+      { type: "text", text: "# Reporting outcomes" },
+      { type: "text", text: "Inspect the repository before making assumptions." },
+    ];
+
+    expect(extractTemplate(unrecognizedFableRequest)).toBeNull();
+    expect(extractTemplate(misleadingModelRequest)).toBeNull();
+  });
+
+  test("extractTemplate combines the split Fable prompt used by current Claude Code captures", () => {
+    const fableRequest = createCapturedRequest();
+    fableRequest.body.model = "claude-fable-5-1";
+    fableRequest.headers["user-agent"] = createUserAgent("2.1.257");
+    fableRequest.rawHeaders[7] = createUserAgent("2.1.257");
+    fableRequest.body.system = [
+      { type: "text", text: createBillingHeader("2.1.257") },
+      { type: "text", text: "You are Claude Code, an interactive CLI tool." },
+      {
+        type: "text",
+        text: "# Reporting outcomes\nReport the result clearly.",
+        cache_control: { type: "ephemeral", ttl: "1h" },
+      },
+      {
+        type: "text",
+        text: "Inspect the repository before making assumptions.",
+        cache_control: { type: "ephemeral", ttl: "1h" },
+      },
+    ];
+
+    const template = extractTemplate(fableRequest);
+
+    expect(template).not.toBeNull();
+    expect(template?.agent_identity).toBe("You are Claude Code, an interactive CLI tool.");
+    expect(template?.cc_version).toBe("2.1.257");
+    expect(template?.tool_names).toEqual(["Read", "Bash"]);
+    expect(template?.system_prompt).toBe(
+      "# Reporting outcomes\nReport the result clearly.\n\nInspect the repository before making assumptions.",
+    );
   });
 
   test("captureLiveTemplateAsync runs the localhost capture flow and returns extracted template data", async () => {
@@ -300,6 +352,41 @@ describe("fingerprint-capture", () => {
     } finally {
       await cleanup();
     }
+  });
+
+  test("captureLiveTemplateAsync accepts the split Fable prompt shape", async () => {
+    let requestedModel: string | undefined;
+    setFingerprintCaptureTestOverridesForTest({
+      findClaudeBinary: () => "/mock/claude",
+      runClaudeCapture: async ({ baseUrl, model }) => {
+        requestedModel = model;
+        const captured = createCapturedRequest();
+        captured.body.model = "claude-fable-5-1";
+        captured.headers["user-agent"] = createUserAgent("2.1.257");
+        captured.rawHeaders[7] = createUserAgent("2.1.257");
+        captured.body.system = [
+          { type: "text", text: createBillingHeader("2.1.257") },
+          { type: "text", text: "You are Claude Code, an interactive CLI tool." },
+          { type: "text", text: "# Reporting outcomes\nReport the result clearly." },
+          { type: "text", text: "Inspect the repository before making assumptions." },
+        ];
+
+        const response = await fetch(`${baseUrl}/v1/messages`, {
+          method: "POST",
+          headers: captured.headers,
+          body: JSON.stringify(captured.body),
+        });
+        expect(response.status).toBe(200);
+      },
+    });
+
+    const template = await captureLiveTemplateAsync(3_000, { model: "fable" });
+
+    expect(requestedModel).toBe("fable");
+    expect(template?.cc_version).toBe("2.1.257");
+    expect(template?.system_prompt).toBe(
+      "# Reporting outcomes\nReport the result clearly.\n\nInspect the repository before making assumptions.",
+    );
   });
 
   test("captureLiveTemplateAsync pins an unspecified base capture to Opus 4.8", async () => {
