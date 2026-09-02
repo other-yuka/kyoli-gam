@@ -48,6 +48,7 @@ const STATIC_HEADER_NAMES = [
   "x-app",
   "x-stainless-timeout",
 ] as const;
+const FABLE_CAPTURE_MODEL_PATTERN = /^(?:fable(?:1m)?|claude-fable-\d+(?:[-._]\d+)*(?:\[1m\])?)$/i;
 const bundledCcVersion = (bundledTemplateJson as { cc_version?: unknown }).cc_version;
 const SUPPORTED_CC_RANGE = {
   min: "1.0.0",
@@ -353,6 +354,10 @@ function pickTextBlock(value: unknown): string | null {
   return toText(value);
 }
 
+function isFableCaptureModel(value: unknown): value is string {
+  return typeof value === "string" && FABLE_CAPTURE_MODEL_PATTERN.test(value);
+}
+
 function extractCCVersion(...sources: Array<string | undefined>): string | undefined {
   for (const source of sources) {
     if (!source) {
@@ -529,19 +534,32 @@ export function loadTemplate(): TemplateData {
 export function extractTemplate(captured: CapturedRequest): TemplateData | null {
   const systemBlocks = captured.body.system;
   const tools = captured.body.tools;
+  const fableModel = isFableCaptureModel(captured.body.model);
+  const splitFablePrompt = Array.isArray(systemBlocks)
+    && systemBlocks.length === 4
+    && fableModel
+    && pickTextBlock(systemBlocks[2])?.trimStart().startsWith("# Reporting outcomes") === true;
 
-  if (!Array.isArray(systemBlocks) || systemBlocks.length !== 3 || !Array.isArray(tools) || tools.length === 0) {
+  if (!Array.isArray(systemBlocks)
+    || (systemBlocks.length !== 3 && !splitFablePrompt)
+    || !Array.isArray(tools)
+    || tools.length === 0) {
     return null;
   }
 
   const billingHeader = pickTextBlock(systemBlocks[0]);
   const agentIdentity = pickTextBlock(systemBlocks[1]);
-  const systemPrompt = pickTextBlock(systemBlocks[2]);
+  const promptTexts = (splitFablePrompt ? systemBlocks.slice(2) : [systemBlocks[2]])
+    .map(pickTextBlock);
   const extractedTools = tools.filter(isTemplateTool).map((tool) => ({ ...tool }));
 
-  if (!billingHeader || !agentIdentity || !systemPrompt || extractedTools.length === 0) {
+  if (!billingHeader
+    || !agentIdentity
+    || promptTexts.some((text) => !text)
+    || extractedTools.length === 0) {
     return null;
   }
+  const systemPrompt = promptTexts.join("\n\n");
 
   const toolNames = extractedTools.map((tool) => tool.name);
   const headerValues = extractStaticHeaderValues(captured.headers);
