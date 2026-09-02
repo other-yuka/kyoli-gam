@@ -1,6 +1,6 @@
 {
   "name": "@kyoli-gam/provider-claude-code",
-  "version": "0.0.85",
+  "version": "0.0.86",
   "private": true,
   "description": "Claude Code OAuth provider adapter for kyoli-gam v1",
   "type": "module",
