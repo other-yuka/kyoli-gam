@@ -22,6 +22,7 @@ import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import {
   createDefaultGatewayConfig,
+  createAccountRefreshUpdate,
   createSessionKey,
   inferProviderFromModel,
   isCurrentlyAuthCoolingDown,
@@ -88,6 +89,15 @@ interface RunnerCredentialPayload {
   accessToken: string;
   expiresAt: number;
   subscriptionType: string;
+}
+
+class RunnerCredentialUnavailableError extends Error {
+  readonly status = 503;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "RunnerCredentialUnavailableError";
+  }
 }
 
 export interface Gateway {
@@ -415,20 +425,40 @@ async function handleRunnerCredentialRequest(
     if (!refresh) {
       refresh = (async () => {
         const refreshed = await refreshCredential(refreshToken);
-        const updated = await accounts.update(account.id, {
-          credentialsPatch: {
+        const updated = await accounts.update(account.id, createAccountRefreshUpdate(account, {
+          credentials: {
+            ...account.credentials,
             accessToken: refreshed.accessToken,
             expiresAt: refreshed.expiresAt,
             ...(refreshed.refreshToken !== undefined ? { refreshToken: refreshed.refreshToken } : {}),
             ...(refreshed.accountId !== undefined ? { accountId: refreshed.accountId } : {}),
           },
-          metadataPatch: {
+          metadata: {
+            ...account.metadata,
             ...(refreshed.email !== undefined ? { email: refreshed.email } : {}),
             ...(refreshed.accountId !== undefined ? { accountId: refreshed.accountId } : {}),
           },
-        });
-        if (!updated) throw new Error("Claude Code OAuth account disappeared during refresh.");
-        return runnerCredentialPayload(refreshed.accessToken, refreshed.expiresAt, updated);
+        }));
+        if (updated) {
+          return runnerCredentialPayload(refreshed.accessToken, refreshed.expiresAt, updated);
+        }
+
+        const latest = await accounts.get(account.id);
+        const latestAccessToken = latest ? readString(latest.credentials.accessToken) : undefined;
+        const latestExpiresAt = latest ? readTimestampMs(latest.credentials.expiresAt) : undefined;
+        if (
+          latest?.enabled
+          && !latest.reauthRequiredReason
+          && latestAccessToken
+          && latestExpiresAt
+          && latestExpiresAt > Date.now() + RUNNER_CREDENTIAL_REFRESH_BUFFER_MS
+        ) {
+          return runnerCredentialPayload(latestAccessToken, latestExpiresAt, latest);
+        }
+
+        throw new RunnerCredentialUnavailableError(
+          "Claude Code OAuth account credentials changed during refresh; retry with the latest credentials.",
+        );
       })().finally(() => {
         runnerCredentialRefreshInFlight.delete(account.id);
       });
@@ -437,14 +467,15 @@ async function handleRunnerCredentialRequest(
 
     return jsonResponse(await refresh);
   } catch (error) {
+    const unavailable = error instanceof RunnerCredentialUnavailableError;
     return jsonResponse(
       {
         error: {
-          type: "credential_refresh_failed",
+          type: unavailable ? "credential_unavailable" : "credential_refresh_failed",
           message: error instanceof Error ? error.message : "Claude Code OAuth refresh failed.",
         },
       },
-      { status: 502 },
+      { status: unavailable ? error.status : 502 },
     );
   }
 }
@@ -1041,7 +1072,7 @@ async function handleAdminCodexResetRequest(options: {
 
   const resetAccount = await options.accounts.resetState(credential.account.id) ?? credential.account;
   const usageRefresh = await refreshAccountUsageFromProvider(options.accounts, options.providers, resetAccount);
-  const finalAccount = usageRefresh.ok ? usageRefresh.account : resetAccount;
+  const finalAccount = usageRefresh.account;
 
   return jsonResponse({
     object: "codex_reset_credit_redemption",
@@ -1063,7 +1094,7 @@ async function resolveCodexResetAdminCredential(
   let current = account;
   if (shouldRefreshCodexResetCredential(current)) {
     const refresh = await refreshAccountUsageFromProvider(accounts, providers, current);
-    if (refresh.ok) current = refresh.account;
+    current = refresh.account;
   }
 
   const accessToken = readString(current.credentials.accessToken);
@@ -1107,23 +1138,49 @@ async function refreshAccountUsageFromProvider(
   account: AccountRecord,
 ): Promise<
   | { ok: true; account: AccountRecord }
-  | { ok: false; message: string; status?: number }
+  | { ok: false; account: AccountRecord; message: string; status?: number }
 > {
   const provider = providers.find((candidate) => candidate.id === account.provider && candidate.refreshUsage);
   if (!provider?.refreshUsage) {
-    return { ok: false, message: `${account.provider} provider does not expose usage refresh.` };
+    return {
+      ok: false,
+      account,
+      message: `${account.provider} provider does not expose usage refresh.`,
+    };
   }
 
-  const result = await provider.refreshUsage({ account });
+  let result: Awaited<ReturnType<NonNullable<ProviderAdapter["refreshUsage"]>>>;
+  try {
+    result = await provider.refreshUsage({ account });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Account usage refresh failed.";
+    const status = readErrorStatus(error);
+    return {
+      ok: false,
+      account: await accounts.get(account.id) ?? account,
+      message,
+      ...(status !== undefined ? { status } : {}),
+    };
+  }
   if (!result.ok) {
-    return { ok: false, message: result.message, status: result.status };
+    return {
+      ok: false,
+      account: await accounts.get(account.id) ?? account,
+      message: result.message,
+      status: result.status,
+    };
   }
 
-  const updated = await accounts.update(account.id, {
-    credentials: result.credentials ? { ...account.credentials, ...result.credentials } : account.credentials,
-    metadata: result.metadata ? { ...account.metadata, ...result.metadata } : account.metadata,
-  });
-  return { ok: true, account: updated ?? account };
+  const updated = await accounts.update(account.id, createAccountRefreshUpdate(account, result));
+  if (!updated) {
+    return {
+      ok: false,
+      account: await accounts.get(account.id) ?? account,
+      message: "Account credentials changed during usage refresh.",
+      status: 409,
+    };
+  }
+  return { ok: true, account: updated };
 }
 
 function codexResetUpstreamErrorResponse(error: unknown, fallbackMessage: string): Response {

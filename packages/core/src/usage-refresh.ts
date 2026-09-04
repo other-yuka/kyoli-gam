@@ -1,8 +1,8 @@
-import { isDeepStrictEqual } from "node:util";
 import type {
   AccountRecord,
   AccountStore,
 } from "./accounts";
+import { createAccountRefreshUpdate } from "./accounts";
 import type {
   ProviderAdapter,
   ProviderId,
@@ -147,19 +147,13 @@ export class UsageRefreshService {
         return false;
       }
 
-      const nextMetadata = refreshed.metadata
-        ? { ...account.metadata, ...refreshed.metadata }
-        : account.metadata;
-      const nextCredentials = refreshed.credentials
-        && !isDeepStrictEqual(refreshed.credentials, account.credentials)
-        ? { ...account.credentials, ...refreshed.credentials }
-        : undefined;
-      const updated = await this.options.accounts.update(account.id, {
-        ...(nextCredentials ? { credentials: nextCredentials } : {}),
-        metadata: nextMetadata,
-      });
+      const updated = await this.options.accounts.update(
+        account.id,
+        createAccountRefreshUpdate(account, refreshed),
+      );
+      if (!updated) return false;
 
-      if (updated && shouldRecoverAccountState(updated)) {
+      if (shouldRecoverAccountState(updated)) {
         await this.options.accounts.resetState(updated.id);
       }
       this.cooldownUntilByAccount.delete(account.id);

@@ -133,6 +133,86 @@ describe("admin accounts API", () => {
     });
   });
 
+  it("adopts concurrent runner reauthentication instead of returning stale refreshed credentials", async () => {
+    const accounts = new MemoryAccountStore();
+    const account = await accounts.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: {
+        accessToken: "generation-a-access",
+        refreshToken: "generation-a-refresh",
+        expiresAt: Date.now() - 1,
+      },
+      metadata: { planTier: "generation-a", owner: "generation-a" },
+    });
+    let signalRefreshStarted: (() => void) | undefined;
+    let finishRefresh: (() => void) | undefined;
+    const refreshStarted = new Promise<void>((resolve) => {
+      signalRefreshStarted = resolve;
+    });
+    const refreshFinished = new Promise<void>((resolve) => {
+      finishRefresh = resolve;
+    });
+    let refreshCalls = 0;
+    const gateway = createGateway({
+      accounts,
+      providers: [],
+      runnerToken: "runner-secret",
+      async runnerCredentialRefresh(refreshToken) {
+        refreshCalls += 1;
+        expect(refreshToken).toBe("generation-a-refresh");
+        signalRefreshStarted?.();
+        await refreshFinished;
+        return {
+          accessToken: "generation-a-refreshed-access",
+          refreshToken: "generation-a-refreshed-refresh",
+          expiresAt: Date.now() + 60 * 60 * 1000,
+          email: "generation-a@example.test",
+        };
+      },
+    });
+
+    try {
+      const responsePromise = gateway.fetch(
+        new Request("http://127.0.0.1:2021/internal/runner/claude-credential", {
+          method: "POST",
+          headers: { authorization: "Bearer runner-secret" },
+        }),
+      );
+      await refreshStarted;
+      const generationBExpiresAt = Date.now() + 2 * 60 * 60 * 1000;
+      await accounts.update(account.id, {
+        credentials: {
+          accessToken: "generation-b-access",
+          refreshToken: "generation-b-refresh",
+          expiresAt: generationBExpiresAt,
+        },
+        metadata: { planTier: "generation-b", owner: "generation-b" },
+      });
+      finishRefresh?.();
+
+      const response = await responsePromise;
+      const body = (await response.json()) as Record<string, unknown>;
+      const stored = await accounts.get(account.id);
+
+      expect(response.status, JSON.stringify(body)).toBe(200);
+      expect(refreshCalls).toBe(1);
+      expect(body).toMatchObject({
+        accessToken: "generation-b-access",
+        expiresAt: generationBExpiresAt,
+        subscriptionType: "generation-b",
+      });
+      expect(stored?.credentials).toEqual({
+        accessToken: "generation-b-access",
+        refreshToken: "generation-b-refresh",
+        expiresAt: generationBExpiresAt,
+      });
+      expect(stored?.metadata).toEqual({ planTier: "generation-b", owner: "generation-b" });
+    } finally {
+      finishRefresh?.();
+    }
+  });
+
   it("reuses a runner credential that is not near expiry", async () => {
     const accounts = new MemoryAccountStore();
     const expiresAt = Date.now() + 60 * 60 * 1000;
@@ -167,23 +247,26 @@ describe("admin accounts API", () => {
     });
   });
 
-  it("redeems one Codex reset credit and refreshes cached usage", async () => {
+  it("adopts concurrent reauthentication when reset credential refresh fails", async () => {
     const accounts = new MemoryAccountStore();
     const account = await accounts.create({
       provider: "codex",
       kind: "oauth",
-      name: "Codex reset target",
       credentials: {
-        accessToken: "access-token",
-        accountId: "chatgpt-account",
+        accessToken: "generation-a-access",
+        refreshToken: "generation-a-refresh",
+        accountId: "generation-a-account",
+        expiresAt: Date.now() - 1,
       },
-      metadata: {
-        cachedUsage: {
-          five_hour: { utilization: 0, resets_at: "2026-06-17T10:00:00.000Z" },
-          seven_day: { utilization: 95, resets_at: "2026-06-18T10:00:00.000Z" },
-          seven_day_sonnet: null,
-        },
-      },
+      metadata: { owner: "generation-a" },
+    });
+    let signalRefreshStarted: (() => void) | undefined;
+    let finishRefresh: (() => void) | undefined;
+    const refreshStarted = new Promise<void>((resolve) => {
+      signalRefreshStarted = resolve;
+    });
+    const refreshFinished = new Promise<void>((resolve) => {
+      finishRefresh = resolve;
     });
     const gateway = createGateway({
       accounts,
@@ -197,10 +280,102 @@ describe("admin accounts API", () => {
         async handleRequest() {
           return new Response(null, { status: 501 });
         },
-        async refreshUsage() {
+        async refreshUsage({ account: staleAccount }) {
+          expect(staleAccount.credentials.accessToken).toBe("generation-a-access");
+          signalRefreshStarted?.();
+          await refreshFinished;
+          return { ok: false, status: 401, message: "generation A expired" };
+        },
+      }],
+    });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (_input, init) => {
+      const headers = new Headers(init?.headers);
+      expect(headers.get("authorization")).toBe("Bearer generation-b-access");
+      expect(headers.get("ChatGPT-Account-Id")).toBe("generation-b-account");
+      return Response.json({ available_count: 0, credits: [] });
+    };
+
+    try {
+      const responsePromise = gateway.fetch(
+        new Request(`http://127.0.0.1:2021/admin/accounts/${account.id}/codex-reset`),
+      );
+      await refreshStarted;
+      await accounts.update(account.id, {
+        credentials: {
+          accessToken: "generation-b-access",
+          refreshToken: "generation-b-refresh",
+          accountId: "generation-b-account",
+          expiresAt: Date.now() + 60 * 60 * 1000,
+        },
+        metadata: { owner: "generation-b" },
+      });
+      finishRefresh?.();
+
+      const response = await responsePromise;
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({
+        account: { metadata: { owner: "generation-b" } },
+        credits: { available_count: 0 },
+      });
+    } finally {
+      finishRefresh?.();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("redeems one Codex reset credit without overwriting concurrent reauthentication", async () => {
+    const accounts = new MemoryAccountStore();
+    const account = await accounts.create({
+      provider: "codex",
+      kind: "oauth",
+      name: "Codex reset target",
+      credentials: {
+        accessToken: "access-token",
+        accountId: "chatgpt-account",
+        refreshToken: "initial-refresh",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+      },
+      metadata: {
+        owner: "initial",
+        cachedUsage: {
+          five_hour: { utilization: 0, resets_at: "2026-06-17T10:00:00.000Z" },
+          seven_day: { utilization: 95, resets_at: "2026-06-18T10:00:00.000Z" },
+          seven_day_sonnet: null,
+        },
+      },
+    });
+    let signalUsageStarted: (() => void) | undefined;
+    let finishUsage: (() => void) | undefined;
+    const usageStarted = new Promise<void>((resolve) => {
+      signalUsageStarted = resolve;
+    });
+    const usageFinished = new Promise<void>((resolve) => {
+      finishUsage = resolve;
+    });
+    const gateway = createGateway({
+      accounts,
+      providers: [{
+        id: "codex",
+        displayName: "Codex",
+        routes: [],
+        async listModels() {
+          return [];
+        },
+        async handleRequest() {
+          return new Response(null, { status: 501 });
+        },
+        async refreshUsage({ account: staleAccount }) {
+          signalUsageStarted?.();
+          await usageFinished;
           return {
             ok: true,
+            credentials: {
+              ...staleAccount.credentials,
+              accessToken: "usage-access",
+            },
             metadata: {
+              ...staleAccount.metadata,
               cachedUsage: {
                 five_hour: { utilization: 0, resets_at: "2026-06-17T10:00:00.000Z" },
                 seven_day: { utilization: 0, resets_at: "2026-06-24T10:00:00.000Z" },
@@ -249,24 +424,52 @@ describe("admin accounts API", () => {
     };
 
     try {
-      const response = await gateway.fetch(
+      const responsePromise = gateway.fetch(
         new Request(`http://127.0.0.1:2021/admin/accounts/${account.id}/codex-reset`, {
           method: "POST",
         }),
       );
+      await usageStarted;
+      await accounts.update(account.id, {
+        credentials: {
+          accessToken: "generation-b-access",
+          refreshToken: "generation-b-refresh",
+          accountId: "generation-b-account",
+          expiresAt: Date.now() + 2 * 60 * 60 * 1000,
+        },
+        metadataPatch: { owner: "concurrent" },
+      });
+      finishUsage?.();
+      const response = await responsePromise;
       const body = (await response.json()) as {
         consumed: boolean;
         result: { code: string; windows_reset: number };
         account: { metadata?: Record<string, unknown>; credentials?: unknown };
+        usage_refresh: { ok: boolean; message?: string; status?: number };
       };
+      const stored = await accounts.get(account.id);
 
-      expect(response.status).toBe(200);
+      expect(response.status, JSON.stringify(body)).toBe(200);
       expect(body.consumed).toBe(true);
       expect(body.result).toMatchObject({ code: "reset", windows_reset: 1 });
+      expect(body.usage_refresh).toEqual({
+        ok: false,
+        message: "Account credentials changed during usage refresh.",
+        status: 409,
+      });
       expect(body.account.credentials).toBeUndefined();
       expect(body.account.metadata?.cachedUsage).toMatchObject({
-        seven_day: { utilization: 0 },
+        seven_day: { utilization: 95 },
       });
+      expect(stored?.credentials).toMatchObject({
+        accessToken: "generation-b-access",
+        refreshToken: "generation-b-refresh",
+        accountId: "generation-b-account",
+      });
+      expect(stored?.metadata).toMatchObject({
+        owner: "concurrent",
+      });
+      expect(stored?.metadata.cachedUsageAt).toBeUndefined();
     } finally {
       globalThis.fetch = originalFetch;
     }

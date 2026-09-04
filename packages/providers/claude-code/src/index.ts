@@ -11,6 +11,7 @@ import type {
 } from "@kyoli-gam/core";
 import {
   CredentialUnavailableError,
+  createAccountRefreshUpdate,
   executeWithAccountFailover,
   jsonResponse,
   stripProviderPrefix,
@@ -755,6 +756,7 @@ async function readOAuthCredential(input: {
     };
   const account = selection?.account;
   if (!account) return undefined;
+  let selectedAccount = account;
 
   const refreshToken = readString(account.credentials.refreshToken);
   let accessToken = readString(account.credentials.accessToken);
@@ -777,29 +779,55 @@ async function readOAuthCredential(input: {
     accessToken = refreshed.accessToken;
     expiresAt = refreshed.expiresAt;
 
-    await input.accounts?.update(account.id, {
-      credentials: {
-        ...account.credentials,
-        accessToken,
-        expiresAt,
-        refreshToken: refreshed.refreshToken ?? refreshToken,
-        accountId: refreshed.accountId ?? account.credentials.accountId,
-      },
-      metadata: {
-        ...account.metadata,
-        email: refreshed.email ?? account.metadata.email,
-        accountId: refreshed.accountId ?? account.metadata.accountId,
-      },
-    });
+    if (input.accounts) {
+      const updated = await input.accounts.update(account.id, createAccountRefreshUpdate(account, {
+        credentials: {
+          ...account.credentials,
+          accessToken,
+          expiresAt,
+          refreshToken: refreshed.refreshToken ?? refreshToken,
+          accountId: refreshed.accountId ?? account.credentials.accountId,
+        },
+        metadata: {
+          ...account.metadata,
+          email: refreshed.email ?? account.metadata.email,
+          accountId: refreshed.accountId ?? account.metadata.accountId,
+        },
+      }));
+      if (updated) {
+        selectedAccount = updated;
+      } else {
+        const latest = (await input.accounts.listByProvider("claude-code"))
+          .find((candidate) => candidate.id === account.id);
+        const latestAccessToken = latest ? readString(latest.credentials.accessToken) : undefined;
+        const latestExpiresAt = latest ? readNumber(latest.credentials.expiresAt) : undefined;
+        if (
+          !latest
+          || !latest.enabled
+          || latest.reauthRequiredReason
+          || !latestAccessToken
+          || !latestExpiresAt
+          || latestExpiresAt <= Date.now() + TOKEN_EXPIRY_BUFFER_MS
+        ) {
+          throw new CredentialUnavailableError(
+            "Claude Code OAuth credentials changed during refresh",
+            account.id,
+          );
+        }
+        selectedAccount = latest;
+        accessToken = latestAccessToken;
+        expiresAt = latestExpiresAt;
+      }
+    }
   }
 
   return {
     value: accessToken,
-    accountId: account.id,
+    accountId: selectedAccount.id,
     selectionDiagnostics: selection?.diagnostics as Record<string, unknown> | undefined,
     metadata: {
-      ...account.metadata,
-      accountId: account.metadata.accountId ?? account.credentials.accountId,
+      ...selectedAccount.metadata,
+      accountId: selectedAccount.metadata.accountId ?? selectedAccount.credentials.accountId,
     },
   };
 }
