@@ -1,6 +1,6 @@
 {
   "name": "@kyoli-gam/gateway",
-  "version": "0.0.88",
+  "version": "0.0.89",
   "private": true,
   "description": "HTTP gateway for kyoli-gam v1",
   "type": "module",
