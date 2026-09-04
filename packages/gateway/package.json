@@ -40,7 +40,7 @@
     "@kyoli-gam/provider-codex-chatgpt": "workspace:*",
     "developer-icons": "^6.0.5",
     "lucide-react": "^1.35.0",
-    "motion": "^12.43.0",
+    "motion": "^13.1.1",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "ws": "^8.21.3"
