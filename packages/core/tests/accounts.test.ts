@@ -7,6 +7,7 @@ import {
   SQLiteAccountStore,
   SQLiteRequestLogStore,
   SQLiteStickySessionStore,
+  createAccountRefreshUpdate,
 } from "../src";
 
 describe("AccountStore state reset", () => {
@@ -39,6 +40,129 @@ describe("AccountStore state reset", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("rejects a stale refresh result after credentials are replaced", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyoli-account-refresh-cas-"));
+
+    try {
+      const store = new SQLiteAccountStore(join(dir, "kyoli.db"));
+      const stale = await store.create({
+        provider: "codex",
+        kind: "oauth",
+        credentials: {
+          accessToken: "generation-a-access",
+          refreshToken: "generation-a-refresh",
+          accountId: "generation-a-account",
+        },
+        metadata: { owner: "initial" },
+      });
+      await store.update(stale.id, {
+        credentials: {
+          accessToken: "generation-b-access",
+          refreshToken: "generation-b-refresh",
+          accountId: "generation-b-account",
+        },
+        metadataPatch: { owner: "reauthenticated" },
+      });
+
+      const updated = await store.update(stale.id, createAccountRefreshUpdate(stale, {
+        credentials: {
+          ...stale.credentials,
+          accessToken: "generation-a-refreshed-access",
+        },
+        metadata: {
+          ...stale.metadata,
+          cachedUsageAt: 123,
+        },
+      }));
+
+      expect(updated).toBeUndefined();
+      await expect(store.get(stale.id)).resolves.toMatchObject({
+        credentials: {
+          accessToken: "generation-b-access",
+          refreshToken: "generation-b-refresh",
+          accountId: "generation-b-account",
+        },
+        metadata: { owner: "reauthenticated" },
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts an idempotent refresh after the same credentials were already persisted", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyoli-account-refresh-idempotent-"));
+
+    try {
+      const store = new SQLiteAccountStore(join(dir, "kyoli.db"));
+      const account = await store.create({
+        provider: "codex",
+        kind: "oauth",
+        credentials: {
+          accessToken: "generation-a-access",
+          refreshToken: "generation-a-refresh",
+        },
+        metadata: { owner: "initial" },
+      });
+      const refreshUpdate = createAccountRefreshUpdate(account, {
+        credentials: {
+          ...account.credentials,
+          accessToken: "generation-a-refreshed-access",
+          refreshToken: "generation-a-refreshed-refresh",
+          accountId: undefined,
+        },
+        metadata: {
+          ...account.metadata,
+          cachedUsageAt: 123,
+        },
+      });
+      await store.update(account.id, {
+        credentials: refreshUpdate.refreshedCredentials,
+      });
+
+      const updated = await store.update(account.id, refreshUpdate);
+
+      expect(updated).toMatchObject({
+        credentials: {
+          accessToken: "generation-a-refreshed-access",
+          refreshToken: "generation-a-refreshed-refresh",
+        },
+        metadata: {
+          owner: "initial",
+          cachedUsageAt: 123,
+        },
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("enforces refresh CAS in memory and keeps the expected snapshot immutable", async () => {
+    const store = new MemoryAccountStore();
+    const account = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "generation-a-access",
+        refreshToken: "generation-a-refresh",
+      },
+      metadata: { owner: "generation-a" },
+    });
+    const refreshUpdate = createAccountRefreshUpdate(account, {
+      credentials: {
+        ...account.credentials,
+        accessToken: "generation-a-refreshed-access",
+      },
+      metadata: {
+        ...account.metadata,
+        cachedUsageAt: 123,
+      },
+    });
+
+    account.credentials.accessToken = "mutated-out-of-band";
+
+    await expect(store.update(account.id, refreshUpdate)).resolves.toBeUndefined();
   });
 
   it("puts transient 401/403 failures into auth cooldown without disabling the account", async () => {

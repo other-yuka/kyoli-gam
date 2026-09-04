@@ -4,19 +4,20 @@ import type {
   AccountExecutionTraceEvent,
   AccountPool,
   AccountRecord,
-  AccountUpdateInput,
   GatewayWebSocketContext,
   GatewayWebSocketMessage,
   ModelInfo,
   ProviderAdapter,
 } from "@kyoli-gam/core";
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import {
   executeWithAccountFailover,
   CredentialUnavailableError,
   classifyCodexFailure,
   classifyCodexJsonEventFailure,
   CODEX_UNKNOWN_RATE_LIMIT_BACKOFF_MS,
+  createAccountRefreshUpdate,
   drainSseFrames,
   isCodexStartupOutputEvent,
   jsonResponse,
@@ -177,6 +178,15 @@ class CodexOAuthPersistenceError extends Error {
   constructor(readonly originalError: unknown) {
     super(originalError instanceof Error ? originalError.message : String(originalError));
     this.name = "CodexOAuthPersistenceError";
+  }
+}
+class CodexAccountCredentialsChangedError extends Error {
+  readonly status = 409;
+  readonly code = "account_credentials_changed";
+
+  constructor() {
+    super("Codex account credentials changed during OAuth token refresh.");
+    this.name = "CodexAccountCredentialsChangedError";
   }
 }
 type CodexUsageRefresh = (
@@ -1646,7 +1656,7 @@ function collectImageBase64(value: unknown, found: string[]): void {
   for (const child of Object.values(record)) collectImageBase64(child, found);
 }
 
-async function refreshAndPersistCodexOAuthToken(input: {
+async function refreshCodexOAuthTokenCoalesced(input: {
   refreshToken: string;
   tokenRefresh: CodexTokenRefresh;
   persist: (refreshed: CodexTokenRefreshResult) => Promise<void>;
@@ -1681,11 +1691,11 @@ async function refreshAndPersistCodexOAuthToken(input: {
   }
 }
 
-function codexOAuthRefreshUpdate(
+function codexOAuthRefreshedFields(
   account: AccountRecord,
   refreshToken: string,
   refreshed: CodexTokenRefreshResult,
-): AccountUpdateInput {
+): Pick<AccountRecord, "credentials" | "metadata"> {
   const chatgptAccountId = refreshed.accountId ?? readString(account.credentials.accountId);
   return {
     credentials: {
@@ -1702,6 +1712,36 @@ function codexOAuthRefreshUpdate(
       planTier: refreshed.planTier ?? account.metadata.planTier,
     },
   };
+}
+
+async function persistCodexOAuthRefresh(
+  accounts: AccountPool | undefined,
+  account: AccountRecord,
+  refreshToken: string,
+  refreshed: CodexTokenRefreshResult,
+): Promise<void> {
+  if (!accounts) return;
+  const refreshedFields = codexOAuthRefreshedFields(account, refreshToken, refreshed);
+  const updated = await accounts.update(
+    account.id,
+    createAccountRefreshUpdate(account, refreshedFields),
+  );
+  if (updated) return;
+
+  const current = (await accounts.listByProvider(account.provider))
+    .find((candidate) => candidate.id === account.id);
+  if (
+    current
+    && isDeepStrictEqual(
+      toPersistedCredentialShape(current.credentials),
+      toPersistedCredentialShape(refreshedFields.credentials),
+    )
+  ) return;
+  throw new CodexAccountCredentialsChangedError();
+}
+
+function toPersistedCredentialShape(value: Record<string, unknown>): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
 }
 
 async function readOAuthCredential(input: {
@@ -1742,11 +1782,11 @@ async function readOAuthCredential(input: {
   if (!accessToken || !expiresAt || expiresAt <= Date.now() + TOKEN_EXPIRY_BUFFER_MS) {
     if (!refreshToken) return undefined;
 
-    const refreshed = await refreshAndPersistCodexOAuthToken({
+    const refreshed = await refreshCodexOAuthTokenCoalesced({
       refreshToken,
       tokenRefresh: input.tokenRefresh,
       persist: async (result) => {
-        await input.accounts?.update(account.id, codexOAuthRefreshUpdate(account, refreshToken, result));
+        await persistCodexOAuthRefresh(input.accounts, account, refreshToken, result);
       },
     }).catch(async (error) => {
       if (error instanceof CodexOAuthPersistenceError) throw error.originalError;
@@ -1781,11 +1821,11 @@ async function refreshOAuthCredentialForAccount(input: {
   const refreshToken = readString(account.credentials.refreshToken);
   if (!refreshToken) return undefined;
 
-  const refreshed = await refreshAndPersistCodexOAuthToken({
+  const refreshed = await refreshCodexOAuthTokenCoalesced({
     refreshToken,
     tokenRefresh: input.tokenRefresh,
     persist: async (result) => {
-      await input.accounts?.update(account.id, codexOAuthRefreshUpdate(account, refreshToken, result));
+      await persistCodexOAuthRefresh(input.accounts, account, refreshToken, result);
     },
   }).catch(async (error) => {
     if (error instanceof CodexOAuthPersistenceError) throw error.originalError;
@@ -1822,17 +1862,15 @@ async function refreshCodexUsageForAccount(input: {
   const refreshTokenForUsage = () => {
     if (!refreshToken) throw new Error("Codex account has no refresh token for usage refresh.");
     const currentRefreshToken = refreshToken;
-    return refreshAndPersistCodexOAuthToken({
+    return refreshCodexOAuthTokenCoalesced({
       refreshToken: currentRefreshToken,
       tokenRefresh: input.tokenRefresh,
       persist: async (result) => {
-        await input.accounts?.update(
-          input.account.id,
-          codexOAuthRefreshUpdate(
-            { ...input.account, credentials, metadata },
-            currentRefreshToken,
-            result,
-          ),
+        await persistCodexOAuthRefresh(
+          input.accounts,
+          { ...input.account, credentials, metadata },
+          currentRefreshToken,
+          result,
         );
       },
     });

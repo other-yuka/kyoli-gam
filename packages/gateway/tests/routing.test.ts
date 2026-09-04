@@ -1092,6 +1092,100 @@ describe("gateway routing", () => {
     expect(text).not.toContain("response.completed");
   });
 
+  it("preserves HTTP 200 JSON terminal failures across response modes", async () => {
+    const upstreamPayloads = [
+      {
+        type: "response.failed",
+        response: {
+          id: "resp_failed",
+          status: "failed",
+          output: [{
+            id: "msg_partial",
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "partial output" }],
+          }],
+          output_text: "partial output",
+          error: {
+            code: "server_error",
+            message: "streaming JSON failed",
+            param: "upstream",
+          },
+        },
+      },
+      {
+        id: "msg_failed",
+        type: "message",
+        model: "claude-sonnet-4-5",
+        error: { type: "overloaded_error", message: "non-streaming JSON failed" },
+        content: [],
+      },
+      {
+        error: { type: "overloaded_error", message: "compact JSON failed" },
+      },
+    ];
+    const claude = fakeProvider({
+      id: "claude-code",
+      routes: ["/v1/messages"],
+      models: [
+        {
+          id: "anthropic/claude-sonnet-4-5",
+          provider: "claude-code",
+          upstreamId: "claude-sonnet-4-5",
+          capabilities: ["messages", "streaming", "claude-code"],
+        },
+      ],
+      handle: async () => Response.json(upstreamPayloads.shift()),
+    });
+    const gateway = createGateway({
+      accounts: new MemoryAccountStore(),
+      providers: [claude],
+    });
+    const request = (route: "/backend-api/codex/responses" | "/backend-api/codex/responses/compact", stream?: boolean) =>
+      gateway.fetch(
+        new Request(`http://127.0.0.1:2021${route}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            model: "kyoli-claude/claude-sonnet-4-5",
+            input: "hello",
+            ...(stream === undefined ? {} : { stream }),
+          }),
+        }),
+      );
+
+    const streaming = await request("/backend-api/codex/responses", true);
+    const streamingText = await streaming.text();
+    const createdFrame = streamingText
+      .split("\n\n")
+      .find((frame) => frame.includes("event: response.created"));
+    expect(streaming.status).toBe(200);
+    expect(createdFrame).toContain('"status":"in_progress"');
+    expect(createdFrame).not.toContain('"error"');
+    expect(streamingText).toContain("response.failed");
+    expect(streamingText).toContain('"id":"resp_failed"');
+    expect(streamingText).toContain('"output_text":"partial output"');
+    expect(streamingText).toContain('"code":"server_error"');
+    expect(streamingText).toContain('"type":"upstream_error"');
+    expect(streamingText).toContain('"param":"upstream"');
+    expect(streamingText).toContain('"message":"streaming JSON failed"');
+    expect(streamingText).not.toContain("response.completed");
+
+    const nonStreaming = await request("/backend-api/codex/responses", false);
+    await expect(nonStreaming.json()).resolves.toMatchObject({
+      status: "failed",
+      error: { type: "overloaded_error", message: "non-streaming JSON failed" },
+    });
+
+    const compact = await request("/backend-api/codex/responses/compact");
+    await expect(compact.json()).resolves.toMatchObject({
+      object: "response.compaction",
+      type: "response.compact",
+      status: "failed",
+      error: { type: "overloaded_error", message: "compact JSON failed" },
+    });
+  });
+
   it("bridges virtual Claude compact requests through a non-streaming Claude Code request", async () => {
     let seenContext: GatewayRequestContext | undefined;
     const claude = fakeProvider({

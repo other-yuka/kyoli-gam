@@ -92,12 +92,13 @@ describe("UsageRefreshService", () => {
       .toBe(10);
   });
 
-  it("does not overwrite credentials that changed during a usage refresh", async () => {
+  it("merges refreshed fields with concurrent metadata changes", async () => {
     const store = new MemoryAccountStore();
     const account = await store.create({
       provider: "codex",
       kind: "oauth",
       credentials: { accessToken: "stale-access", refreshToken: "stale-refresh" },
+      metadata: { source: "initial" },
     });
     let signalUsageStarted: (() => void) | undefined;
     let finishUsage: (() => void) | undefined;
@@ -112,8 +113,15 @@ describe("UsageRefreshService", () => {
       await usageFinished;
       return {
         ok: true,
-        credentials: staleAccount.credentials,
-        metadata: { cachedUsageAt: Date.now() },
+        credentials: {
+          ...staleAccount.credentials,
+          accessToken: "refreshed-access",
+        },
+        metadata: {
+          ...staleAccount.metadata,
+          cachedUsageAt: Date.now(),
+          usageSource: "refresh",
+        },
       };
     });
     const service = new UsageRefreshService({
@@ -125,14 +133,149 @@ describe("UsageRefreshService", () => {
     const refresh = service.refreshOnce();
     await usageStarted;
     await store.update(account.id, {
-      credentials: { accessToken: "fresh-access", refreshToken: "rotated-refresh" },
+      metadataPatch: { source: "concurrent" },
     });
     finishUsage?.();
     await refresh;
 
     expect((await store.get(account.id))?.credentials).toEqual({
-      accessToken: "fresh-access",
-      refreshToken: "rotated-refresh",
+      accessToken: "refreshed-access",
+      refreshToken: "stale-refresh",
+    });
+    expect((await store.get(account.id))?.metadata).toMatchObject({
+      source: "concurrent",
+      usageSource: "refresh",
+      cachedUsageAt: expect.any(Number),
+    });
+  });
+
+  it("preserves concurrent nested usage metadata changes", async () => {
+    const store = new MemoryAccountStore();
+    const account = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      metadata: {
+        cachedUsage: {
+          five_hour: { utilization: 10 },
+          seven_day: { utilization: 20 },
+        },
+      },
+    });
+    let signalUsageStarted: (() => void) | undefined;
+    let finishUsage: (() => void) | undefined;
+    const usageStarted = new Promise<void>((resolve) => {
+      signalUsageStarted = resolve;
+    });
+    const usageFinished = new Promise<void>((resolve) => {
+      finishUsage = resolve;
+    });
+    const provider = createUsageProvider(async ({ account: staleAccount }) => {
+      signalUsageStarted?.();
+      await usageFinished;
+      const staleUsage = staleAccount.metadata.cachedUsage as Record<string, unknown>;
+      return {
+        ok: true,
+        metadata: {
+          ...staleAccount.metadata,
+          cachedUsage: {
+            ...staleUsage,
+            five_hour: { utilization: 25 },
+          },
+          cachedUsageAt: Date.now(),
+        },
+      };
+    });
+    const service = new UsageRefreshService({
+      accounts: store,
+      providers: [provider],
+      intervalMs: 0,
+    });
+
+    const refresh = service.refreshOnce();
+    await usageStarted;
+    const currentUsage = account.metadata.cachedUsage as Record<string, unknown>;
+    await store.update(account.id, {
+      metadataPatch: {
+        cachedUsage: {
+          ...currentUsage,
+          seven_day: { utilization: 30, operatorNote: "keep" },
+        },
+      },
+    });
+    finishUsage?.();
+    await refresh;
+
+    await expect(store.get(account.id)).resolves.toMatchObject({
+      metadata: {
+        cachedUsage: {
+          five_hour: { utilization: 25 },
+          seven_day: { utilization: 30, operatorNote: "keep" },
+        },
+      },
+    });
+  });
+
+  it("rejects a stale refresh after concurrent credentials are replaced", async () => {
+    const store = new MemoryAccountStore();
+    const account = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "generation-a-access",
+        refreshToken: "generation-a-refresh",
+        accountId: "generation-a-account",
+      },
+      metadata: { owner: "initial" },
+    });
+    let signalUsageStarted: (() => void) | undefined;
+    let finishUsage: (() => void) | undefined;
+    const usageStarted = new Promise<void>((resolve) => {
+      signalUsageStarted = resolve;
+    });
+    const usageFinished = new Promise<void>((resolve) => {
+      finishUsage = resolve;
+    });
+    const provider = createUsageProvider(async ({ account: staleAccount }) => {
+      signalUsageStarted?.();
+      await usageFinished;
+      return {
+        ok: true,
+        credentials: {
+          ...staleAccount.credentials,
+          accessToken: "generation-a-refreshed-access",
+        },
+        metadata: {
+          ...staleAccount.metadata,
+          cachedUsageAt: Date.now(),
+        },
+      };
+    });
+    const service = new UsageRefreshService({
+      accounts: store,
+      providers: [provider],
+      intervalMs: 0,
+    });
+
+    const refresh = service.refreshOnce();
+    await usageStarted;
+    await store.update(account.id, {
+      credentials: {
+        accessToken: "generation-b-access",
+        refreshToken: "generation-b-refresh",
+        accountId: "generation-b-account",
+      },
+      metadataPatch: { owner: "reauthenticated" },
+    });
+    finishUsage?.();
+
+    await expect(refresh).resolves.toMatchObject({ checked: 1, refreshed: 0, failed: 1 });
+    await expect(store.get(account.id)).resolves.toMatchObject({
+      credentials: {
+        accessToken: "generation-b-access",
+        refreshToken: "generation-b-refresh",
+        accountId: "generation-b-account",
+      },
+      metadata: { owner: "reauthenticated" },
     });
   });
 

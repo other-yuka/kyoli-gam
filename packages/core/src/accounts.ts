@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
+import { isDeepStrictEqual } from "node:util";
 import type { ProviderId } from "./index";
 import type { AccountFailureClass, AccountFailurePhase } from "./provider-executor";
 import { Database } from "./sqlite";
@@ -48,6 +49,35 @@ export interface AccountUpdateInput {
   credentialsPatch?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
   metadataPatch?: Record<string, unknown>;
+  metadataMergePatch?: Record<string, unknown>;
+  expectedCredentials?: Record<string, unknown>;
+  refreshedCredentials?: Record<string, unknown>;
+}
+
+export function createAccountRefreshUpdate(
+  account: Pick<AccountRecord, "credentials" | "metadata">,
+  refreshed: {
+    credentials?: Record<string, unknown>;
+    metadata?: Record<string, unknown>;
+  },
+): AccountUpdateInput {
+  return {
+    expectedCredentials: toPersistedRecordShape(account.credentials),
+    ...(refreshed.credentials
+      ? {
+        refreshedCredentials: toPersistedRecordShape({
+          ...account.credentials,
+          ...refreshed.credentials,
+        }),
+      }
+      : {}),
+    ...(refreshed.credentials
+      ? { credentialsPatch: changedRecordFields(account.credentials, refreshed.credentials) }
+      : {}),
+    ...(refreshed.metadata
+      ? { metadataMergePatch: changedRecordFields(account.metadata, refreshed.metadata) }
+      : {}),
+  };
 }
 
 export interface AccountResetStateInput {
@@ -131,6 +161,7 @@ export class MemoryAccountStore implements AccountStore {
   async update(id: string, input: AccountUpdateInput): Promise<AccountRecord | undefined> {
     const existing = this.accounts.get(id);
     if (!existing) return undefined;
+    if (!matchesCredentialPrecondition(existing.credentials, input)) return undefined;
 
     const updated = updateAccountRecord(existing, input);
     this.accounts.set(id, updated);
@@ -292,55 +323,39 @@ export class SQLiteAccountStore implements AccountStore {
   }
 
   async update(id: string, input: AccountUpdateInput): Promise<AccountRecord | undefined> {
-    const existing = this.read(id);
-    if (!existing) return undefined;
+    this.db.exec("begin immediate");
+    try {
+      const existing = this.read(id);
+      if (!existing || !matchesCredentialPrecondition(existing.credentials, input)) {
+        this.db.exec("commit");
+        return undefined;
+      }
 
-    const updated = updateAccountRecord(existing, input);
-    this.db
-      .query(
-        `update accounts
-          set name = ?,
-              enabled = ?,
-              credentials_json = ?,
-              metadata_json = ?,
-              failure_count = ?,
-                last_used_at = ?,
-                last_error_at = ?,
-                rate_limit_reset_at = ?,
-                rate_limit_blocked_at = ?,
-                rate_limit_cooldown_until = ?,
-                auth_cooldown_until = ?,
-              consecutive_auth_failures = ?,
-              last_failure_class = ?,
-              last_failure_code = ?,
-              last_failure_message = ?,
-              last_failure_phase = ?,
-              reauth_required_reason = ?,
-              updated_at = ?
-          where id = ?`,
-      )
-      .run(
-        updated.name,
-        updated.enabled ? 1 : 0,
-        JSON.stringify(updated.credentials),
-        JSON.stringify(updated.metadata),
-        updated.failureCount,
-          updated.lastUsedAt ?? null,
-          updated.lastErrorAt ?? null,
-          updated.rateLimitResetAt ?? null,
-          updated.rateLimitBlockedAt ?? null,
-          updated.rateLimitCooldownUntil ?? null,
-          updated.authCooldownUntil ?? null,
-        updated.consecutiveAuthFailures,
-        updated.lastFailureClass ?? null,
-        updated.lastFailureCode ?? null,
-        updated.lastFailureMessage ?? null,
-        updated.lastFailurePhase ?? null,
-        updated.reauthRequiredReason ?? null,
-        updated.updatedAt,
-        id,
-      );
-    return updated;
+      const updated = updateAccountRecord(existing, input);
+      const result = this.db
+        .query(
+          `update accounts
+            set name = ?,
+                enabled = ?,
+                credentials_json = ?,
+                metadata_json = ?,
+                updated_at = ?
+            where id = ?`,
+        )
+        .run(
+          updated.name,
+          updated.enabled ? 1 : 0,
+          JSON.stringify(updated.credentials),
+          JSON.stringify(updated.metadata),
+          updated.updatedAt,
+          id,
+        );
+      this.db.exec("commit");
+      return result.changes > 0 ? updated : undefined;
+    } catch (error) {
+      this.db.exec("rollback");
+      throw error;
+    }
   }
 
   async resetState(
@@ -508,6 +523,9 @@ function updateAccountRecord(
 ): AccountRecord {
   const credentials = input.credentials ?? existing.credentials;
   const metadata = input.metadata ?? existing.metadata;
+  const metadataPatched = input.metadataPatch
+    ? { ...metadata, ...input.metadataPatch }
+    : metadata;
   return {
     ...existing,
     name: input.name ?? existing.name,
@@ -515,9 +533,9 @@ function updateAccountRecord(
     credentials: input.credentialsPatch
       ? { ...credentials, ...input.credentialsPatch }
       : credentials,
-    metadata: input.metadataPatch
-      ? { ...metadata, ...input.metadataPatch }
-      : metadata,
+    metadata: input.metadataMergePatch
+      ? applyRecordMergePatch(metadataPatched, input.metadataMergePatch)
+      : metadataPatched,
     failureCount: existing.failureCount,
       lastUsedAt: existing.lastUsedAt,
       lastErrorAt: existing.lastErrorAt,
@@ -533,6 +551,64 @@ function updateAccountRecord(
     reauthRequiredReason: existing.reauthRequiredReason,
     updatedAt: new Date().toISOString(),
   };
+}
+
+function changedRecordFields(
+  previous: Record<string, unknown>,
+  refreshed: Record<string, unknown>,
+): Record<string, unknown> {
+  const changed: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(refreshed)) {
+    const previousValue = previous[key];
+    if (isRecordValue(previousValue) && isRecordValue(value)) {
+      const nested = changedRecordFields(previousValue, value);
+      if (Object.keys(nested).length > 0) changed[key] = nested;
+    } else if (!isDeepStrictEqual(previousValue, value)) {
+      changed[key] = value;
+    }
+  }
+  return changed;
+}
+
+function applyRecordMergePatch(
+  previous: Record<string, unknown>,
+  patch: Record<string, unknown>,
+): Record<string, unknown> {
+  const merged = { ...previous };
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === undefined) {
+      delete merged[key];
+      continue;
+    }
+    if (isRecordValue(merged[key]) && isRecordValue(value)) {
+      merged[key] = applyRecordMergePatch(merged[key] as Record<string, unknown>, value);
+    } else {
+      merged[key] = value;
+    }
+  }
+  return merged;
+}
+
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function matchesCredentialPrecondition(
+  current: Record<string, unknown>,
+  input: AccountUpdateInput,
+): boolean {
+  if (!input.expectedCredentials) return true;
+  const persistedCurrent = toPersistedRecordShape(current);
+  return isDeepStrictEqual(persistedCurrent, toPersistedRecordShape(input.expectedCredentials))
+    || (input.refreshedCredentials !== undefined
+      && isDeepStrictEqual(
+        persistedCurrent,
+        toPersistedRecordShape(input.refreshedCredentials),
+      ));
+}
+
+function toPersistedRecordShape(value: Record<string, unknown>): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
 }
 
 function recordAccountSuccess(

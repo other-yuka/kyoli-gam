@@ -8,6 +8,7 @@ import {
   SQLiteStickySessionStore,
   StickyAccountPool,
   UsageRefreshService,
+  createAccountRefreshUpdate,
   listBlockedAccounts,
   listExpiredRateLimitAccounts,
   listFailedAccounts,
@@ -857,23 +858,29 @@ async function resolveCodexResetCredential(
 
   if ((!accessToken || isExpired(account.credentials.expiresAt) || !chatgptAccountId) && refreshToken) {
     const refreshed = await refreshCodexOAuthToken(refreshToken);
-    accessToken = refreshed.accessToken;
-    chatgptAccountId = refreshed.accountId ?? chatgptAccountId;
-    current = await store.update(account.id, {
-      credentials: {
-        ...account.credentials,
-        accessToken,
-        refreshToken: refreshed.refreshToken ?? refreshToken,
-        expiresAt: refreshed.expiresAt,
-        accountId: chatgptAccountId,
-      },
-      metadata: {
-        ...account.metadata,
-        email: refreshed.email ?? account.metadata.email,
-        accountId: chatgptAccountId ?? account.metadata.accountId,
-        planTier: refreshed.planTier ?? account.metadata.planTier,
-      },
-    }) ?? account;
+    const refreshedAccount = await store.update(
+      account.id,
+      createAccountRefreshUpdate(account, {
+        credentials: {
+          ...account.credentials,
+          accessToken: refreshed.accessToken,
+          refreshToken: refreshed.refreshToken ?? refreshToken,
+          expiresAt: refreshed.expiresAt,
+          accountId: refreshed.accountId ?? chatgptAccountId,
+        },
+        metadata: {
+          ...account.metadata,
+          email: refreshed.email ?? account.metadata.email,
+          accountId: refreshed.accountId ?? chatgptAccountId ?? account.metadata.accountId,
+          planTier: refreshed.planTier ?? account.metadata.planTier,
+        },
+      }),
+    );
+    const latest = refreshedAccount ?? await store.get(account.id);
+    if (!latest) throw new Error(`Account not found: ${account.id}`);
+    current = latest;
+    accessToken = readString(current.credentials.accessToken);
+    chatgptAccountId = readString(current.credentials.accountId) ?? readString(current.metadata.accountId);
   }
 
   if (!accessToken) throw new Error("Codex account has no access token and cannot list reset credits.");
@@ -890,11 +897,15 @@ async function refreshCodexUsageForStatus(
   if (!result) return { ok: false, message: "Codex provider does not expose usage refresh." };
   if (!result.ok) return { ok: false, message: result.message, status: result.status };
 
-  const updated = await store.update(account.id, {
-    credentials: result.credentials ? { ...account.credentials, ...result.credentials } : account.credentials,
-    metadata: result.metadata ? { ...account.metadata, ...result.metadata } : account.metadata,
-  });
-  const metadata = updated?.metadata ?? { ...account.metadata, ...result.metadata };
+  const updated = await store.update(account.id, createAccountRefreshUpdate(account, result));
+  if (!updated) {
+    return {
+      ok: false,
+      message: "Account credentials changed during usage refresh.",
+      status: 409,
+    };
+  }
+  const metadata = updated.metadata;
   return {
     ok: true,
     cachedUsage: readRecord(metadata.cachedUsage),
@@ -1152,7 +1163,7 @@ async function refreshAccountMetadata(
   }
 
   const accountMetadata = await refreshClaudeCodeAccountMetadata(accessToken);
-  const updated = await store.update(account.id, {
+  const updated = await store.update(account.id, createAccountRefreshUpdate(account, {
     credentials,
     metadata: {
       ...metadata,
@@ -1161,8 +1172,8 @@ async function refreshAccountMetadata(
       cachedUsage: accountMetadata.cachedUsage ?? metadata.cachedUsage,
       cachedUsageAt: accountMetadata.cachedUsageAt ?? metadata.cachedUsageAt,
     },
-  });
-  if (!updated) throw new Error(`Account not found: ${account.id}`);
+  }));
+  if (!updated) throw new Error(`Account credentials changed while refreshing: ${account.id}`);
   return updated;
 }
 
@@ -1176,7 +1187,7 @@ async function refreshCodexAccountMetadata(
   }
 
   const refreshed = await refreshCodexOAuthToken(refreshToken);
-  const updated = await store.update(account.id, {
+  const updated = await store.update(account.id, createAccountRefreshUpdate(account, {
     credentials: {
       ...account.credentials,
       accessToken: refreshed.accessToken,
@@ -1190,8 +1201,8 @@ async function refreshCodexAccountMetadata(
       accountId: refreshed.accountId ?? account.metadata.accountId,
       planTier: refreshed.planTier ?? account.metadata.planTier,
     },
-  });
-  if (!updated) throw new Error(`Account not found: ${account.id}`);
+  }));
+  if (!updated) throw new Error(`Account credentials changed while refreshing: ${account.id}`);
   return updated;
 }
 

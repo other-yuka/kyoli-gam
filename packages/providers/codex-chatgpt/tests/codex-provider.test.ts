@@ -4,6 +4,7 @@ import {
   MemoryAccountStore,
   parseCodexRetryAfterSeconds,
   StickyAccountPool,
+  UsageRefreshService,
   type AccountExecutionTraceEvent,
   type GatewayWebSocketMessage,
 } from "@kyoli-gam/core";
@@ -152,6 +153,47 @@ describe("createCodexChatGPTProvider", () => {
       "refresh-rotated",
       "refresh-rotated",
     ]);
+  });
+
+  it("treats same-account coalescing without an account id as idempotent", async () => {
+    const store = new MemoryAccountStore();
+    const account = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-expired",
+        refreshToken: "refresh-shared-account",
+        expiresAt: Date.now() - 1,
+      },
+    });
+    const accounts = new DelayedUpdateAccountPool(store);
+    const tokenRefresh = vi.fn(async () => ({
+      accessToken: "access-shared-account",
+      refreshToken: "refresh-rotated-account",
+      expiresAt: Date.now() + 60 * 60 * 1000,
+    }));
+    const provider = createCodexChatGPTProvider({
+      accounts,
+      tokenRefresh,
+      fetch: async () => new Response(JSON.stringify({ id: "resp_test" }), {
+        headers: { "content-type": "application/json" },
+      }),
+    });
+
+    const first = provider.handleRequest(codexResponsesRequest("same-account-first"));
+    await accounts.firstUpdateStarted;
+    const second = provider.handleRequest(codexResponsesRequest("same-account-second"));
+    await accounts.secondUpdateStarted;
+    accounts.allowUpdates();
+
+    const responses = await Promise.all([first, second]);
+    const saved = await store.get(account.id);
+    expect(responses.map((response) => response.status)).toEqual([200, 200]);
+    expect(tokenRefresh).toHaveBeenCalledTimes(1);
+    expect(saved?.credentials).toMatchObject({
+      accessToken: "access-shared-account",
+      refreshToken: "refresh-rotated-account",
+    });
   });
 
   it("allows a new OAuth refresh after a coalesced refresh fails", async () => {
@@ -1000,7 +1042,56 @@ describe("createCodexChatGPTProvider", () => {
       .toBe(34);
   });
 
-  it("refreshes OAuth credentials before usage refresh when account id is missing", async () => {
+  it("persists usage after an OAuth refresh without an account id", async () => {
+    const store = new MemoryAccountStore();
+    const account = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "expired-access",
+        refreshToken: "refresh-without-account-id",
+        expiresAt: Date.now() - 1,
+      },
+    });
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(store),
+      tokenRefresh: async () => ({
+        accessToken: "refreshed-access",
+        refreshToken: "rotated-refresh",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+      }),
+      fetch: async () => Response.json({
+        plan_type: "plus",
+        rate_limit: {
+          primary_window: { used_percent: 10, reset_after_seconds: 60 },
+          secondary_window: { used_percent: 20, reset_after_seconds: 120 },
+        },
+      }),
+    });
+    const service = new UsageRefreshService({
+      accounts: store,
+      providers: [provider],
+      intervalMs: 0,
+    });
+
+    await expect(service.refreshOnce()).resolves.toMatchObject({
+      checked: 1,
+      refreshed: 1,
+      failed: 0,
+    });
+    await expect(store.get(account.id)).resolves.toMatchObject({
+      credentials: {
+        accessToken: "refreshed-access",
+        refreshToken: "rotated-refresh",
+      },
+      metadata: {
+        planTier: "plus",
+        cachedUsageAt: expect.any(Number),
+      },
+    });
+  });
+
+  it("rejects stale OAuth persistence after concurrent reauthentication", async () => {
     let refreshTokenSeen = "";
     let usageAccountId = "";
     const store = new MemoryAccountStore();
@@ -1012,12 +1103,23 @@ describe("createCodexChatGPTProvider", () => {
         expiresAt: Date.now() + 60 * 60 * 1000,
         refreshToken: "refresh-test",
       },
+      metadata: { owner: "initial" },
+    });
+    let signalRefreshStarted: (() => void) | undefined;
+    let finishRefresh: (() => void) | undefined;
+    const refreshStarted = new Promise<void>((resolve) => {
+      signalRefreshStarted = resolve;
+    });
+    const refreshFinished = new Promise<void>((resolve) => {
+      finishRefresh = resolve;
     });
 
     const provider = createCodexChatGPTProvider({
       accounts: new StickyAccountPool(store),
       tokenRefresh: async (refreshToken) => {
         refreshTokenSeen = refreshToken;
+        signalRefreshStarted?.();
+        await refreshFinished;
         return {
           accessToken: "fresh-access",
           expiresAt: Date.now() + 60 * 60 * 1000,
@@ -1037,15 +1139,33 @@ describe("createCodexChatGPTProvider", () => {
       },
     });
 
-    const refreshed = await provider.refreshUsage?.({ account });
+    const refresh = provider.refreshUsage?.({ account });
+    await refreshStarted;
+    await store.update(account.id, {
+      credentials: {
+        accessToken: "generation-b-access",
+        refreshToken: "generation-b-refresh",
+        expiresAt: Date.now() + 2 * 60 * 60 * 1000,
+        accountId: "generation-b-account",
+      },
+      metadataPatch: { owner: "concurrent" },
+    });
+    finishRefresh?.();
+    await expect(refresh).rejects.toThrow(
+      "Codex account credentials changed during OAuth token refresh.",
+    );
+    const stored = await store.get(account.id);
 
-    expect(refreshed?.ok).toBe(true);
-    if (!refreshed?.ok) throw new Error("usage refresh failed");
     expect(refreshTokenSeen).toBe("refresh-test");
-    expect(usageAccountId).toBe("acct_from_refresh");
-    expect(refreshed.credentials?.accessToken).toBe("fresh-access");
-    expect(refreshed.credentials?.accountId).toBe("acct_from_refresh");
-    expect(refreshed.metadata?.accountId).toBe("acct_from_refresh");
+    expect(usageAccountId).toBe("");
+    expect(stored?.credentials).toMatchObject({
+      accessToken: "generation-b-access",
+      refreshToken: "generation-b-refresh",
+      accountId: "generation-b-account",
+    });
+    expect(stored?.metadata).toMatchObject({
+      owner: "concurrent",
+    });
   });
 
   it("keeps usage refresh working without account id when no refresh token exists", async () => {

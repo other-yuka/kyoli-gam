@@ -1099,6 +1099,96 @@ describe("createClaudeCodeProvider", () => {
     expect(updated?.credentials.refreshToken).toBe("refresh-new");
   });
 
+  it("adopts concurrent reauthentication instead of overwriting it with stale refresh results", async () => {
+    let upstreamAuth = "";
+    const store = new MemoryAccountStore();
+    const account = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: {
+        accessToken: "generation-a-access",
+        refreshToken: "generation-a-refresh",
+        expiresAt: Date.now() - 1,
+      },
+      metadata: { owner: "generation-a" },
+    });
+    let signalRefreshStarted: (() => void) | undefined;
+    let finishRefresh: (() => void) | undefined;
+    const refreshStarted = new Promise<void>((resolve) => {
+      signalRefreshStarted = resolve;
+    });
+    const refreshFinished = new Promise<void>((resolve) => {
+      finishRefresh = resolve;
+    });
+    const provider = createTestClaudeCodeProvider({
+      accounts: new StickyAccountPool(store),
+      baseUrl: "https://example.test",
+      usageRefresh: async () => ({ cachedUsageAt: Date.now() }),
+      tokenRefresh: async (refreshToken) => {
+        expect(refreshToken).toBe("generation-a-refresh");
+        signalRefreshStarted?.();
+        await refreshFinished;
+        return {
+          accessToken: "generation-a-refreshed-access",
+          refreshToken: "generation-a-refreshed-refresh",
+          expiresAt: Date.now() + 60 * 60 * 1000,
+        };
+      },
+      fetch: async (_input, init) => {
+        upstreamAuth = new Headers(init?.headers).get("authorization") ?? "";
+        return new Response(JSON.stringify({ id: "msg_test", type: "message" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    try {
+      const responsePromise = provider.handleRequest({
+        request: new Request("http://127.0.0.1:2021/v1/messages", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            model: "claude-code/claude-sonnet-4-5",
+            max_tokens: 1024,
+            messages: [{ role: "user", content: "hello" }],
+          }),
+        }),
+        route: "/v1/messages",
+        sessionKey: "session-concurrent-reauth",
+        body: {
+          model: "claude-code/claude-sonnet-4-5",
+          max_tokens: 1024,
+          messages: [{ role: "user", content: "hello" }],
+        },
+        model: "claude-code/claude-sonnet-4-5",
+      });
+      await refreshStarted;
+      await store.update(account.id, {
+        credentials: {
+          accessToken: "generation-b-access",
+          refreshToken: "generation-b-refresh",
+          expiresAt: Date.now() + 2 * 60 * 60 * 1000,
+        },
+        metadata: { owner: "generation-b" },
+      });
+      finishRefresh?.();
+
+      const response = await responsePromise;
+      const stored = await store.get(account.id);
+
+      expect(response.status).toBe(200);
+      expect(upstreamAuth).toBe("Bearer generation-b-access");
+      expect(stored?.credentials).toMatchObject({
+        accessToken: "generation-b-access",
+        refreshToken: "generation-b-refresh",
+      });
+      expect(stored?.metadata).toEqual({ owner: "generation-b" });
+    } finally {
+      finishRefresh?.();
+    }
+  });
+
   it("exposes usage refresh metadata through the provider capability", async () => {
     const store = new MemoryAccountStore();
     const account = await store.create({

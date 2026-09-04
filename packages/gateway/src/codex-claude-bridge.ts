@@ -239,11 +239,13 @@ async function handleCodexClaudeCompactBridgeRequest(
     payload,
     readString(body.model) ?? converted.body.model,
   );
+  const error = readRecord(responsePayload.error);
   return jsonResponse({
     object: "response.compaction",
     type: "response.compact",
-    status: "completed",
+    status: responsePayload.status === "failed" ? "failed" : "completed",
     output: responsePayload.output,
+    ...(error ? { error } : {}),
   });
 }
 
@@ -557,10 +559,13 @@ async function convertAnthropicResponseToCodexResponses(
   const payload = await upstream.clone().json().catch(() => undefined);
   const responsePayload = convertAnthropicMessageToResponsePayload(payload, request.model);
   if (request.stream) {
+    const terminalEvent = responsePayload.status === "failed"
+      ? "response.failed"
+      : "response.completed";
     return responsesEventStream([
       responsesEvent("response.created", { type: "response.created", response: responseShell(responsePayload) }),
       ...responsePayloadToEvents(responsePayload),
-      responsesEvent("response.completed", { type: "response.completed", response: responsePayload }),
+      responsesEvent(terminalEvent, { type: terminalEvent, response: responsePayload }),
     ]);
   }
   return jsonResponse(responsePayload, { status: upstream.status });
@@ -684,16 +689,12 @@ function convertAnthropicFrame(frame: string, state: StreamState): string[] {
   }
   if (type === "error") {
     state.failed = true;
-    const error = readRecord(payload.error);
     return [responsesEvent("response.failed", {
       type: "response.failed",
       response: {
         ...finalizeResponse(state),
         status: "failed",
-        error: {
-          type: readString(error?.type) ?? "upstream_error",
-          message: readString(error?.message) ?? "Claude bridge stream failed.",
-        },
+        error: normalizeBridgeFailure(payload.error, "Claude bridge stream failed."),
       },
     })];
   }
@@ -808,11 +809,24 @@ function stopContentBlock(index: number, state: StreamState): string[] {
 
 function convertAnthropicMessageToResponsePayload(payload: unknown, model: string): Record<string, unknown> {
   const response = createResponseShell(model);
-  const message = readRecord(payload);
-  if (!message) return response;
+  const envelope = readRecord(payload);
+  if (!envelope) return response;
+  const nestedResponse = readRecord(envelope.response);
+  const message = nestedResponse ?? envelope;
 
   response.id = readString(message.id) ?? response.id;
   response.model = readString(message.model) ?? response.model;
+  const failure = readJsonTerminalFailure(envelope, message);
+  if (nestedResponse) {
+    return {
+      ...response,
+      ...nestedResponse,
+      status: failure ? "failed" : readString(nestedResponse.status) ?? "completed",
+      output: Array.isArray(nestedResponse.output) ? nestedResponse.output : [],
+      output_text: readString(nestedResponse.output_text) ?? "",
+      ...(failure ? { error: failure } : {}),
+    };
+  }
   const state: StreamState = {
     contentBlocks: new Map(),
     failed: false,
@@ -832,7 +846,43 @@ function convertAnthropicMessageToResponsePayload(payload: unknown, model: strin
     }
   }
 
-  return finalizeResponse(state);
+  const finalized = finalizeResponse(state);
+  return failure
+    ? { ...finalized, status: "failed", error: failure }
+    : finalized;
+}
+
+function readJsonTerminalFailure(
+  envelope: Record<string, unknown>,
+  message: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const type = readString(envelope.type);
+  const hasError = "error" in envelope || "error" in message;
+  if (
+    type !== "error"
+    && type !== "response.failed"
+    && readString(message.status) !== "failed"
+    && readString(envelope.status) !== "failed"
+    && !hasError
+  ) {
+    return undefined;
+  }
+  return normalizeBridgeFailure(
+    message.error ?? envelope.error,
+    "Claude bridge request failed.",
+  );
+}
+
+function normalizeBridgeFailure(
+  value: unknown,
+  fallbackMessage: string,
+): Record<string, unknown> {
+  const error = readRecord(value);
+  return {
+    ...error,
+    type: readString(error?.type) ?? "upstream_error",
+    message: readString(error?.message) ?? fallbackMessage,
+  };
 }
 
 function responsePayloadToEvents(payload: Record<string, unknown>): string[] {
@@ -869,11 +919,14 @@ function responsePayloadToEvents(payload: Record<string, unknown>): string[] {
 }
 
 function responseShell(response: Record<string, unknown>): Record<string, unknown> {
-  return {
+  const created: Record<string, unknown> = {
     ...response,
+    status: "in_progress",
     output: [],
     output_text: "",
   };
+  delete created.error;
+  return created;
 }
 
 function createResponseShell(model: string): Record<string, unknown> {
