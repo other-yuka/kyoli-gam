@@ -1,5 +1,17 @@
 # @kyoli-gam/cli
 
+## 0.0.91
+
+### Patch Changes
+
+- [#428](https://github.com/other-yuka/kyoli-gam/pull/428) [`243e633`](https://github.com/other-yuka/kyoli-gam/commit/243e63336ca96f8297abc188135b6d1da548ee16) Thanks [@other-yuka](https://github.com/other-yuka)! - Preserve terminal bridge failures and protect OAuth and usage refreshes from
+  overwriting concurrent account credentials.
+- Updated dependencies [[`243e633`](https://github.com/other-yuka/kyoli-gam/commit/243e63336ca96f8297abc188135b6d1da548ee16)]:
+  - @kyoli-gam/core@0.0.88
+  - @kyoli-gam/gateway@0.0.89
+  - @kyoli-gam/provider-claude-code@0.0.90
+  - @kyoli-gam/provider-codex-chatgpt@0.0.88
+
 ## 0.0.90
 
 ### Patch Changes
