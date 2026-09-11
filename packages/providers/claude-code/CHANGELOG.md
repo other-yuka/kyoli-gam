@@ -1,5 +1,16 @@
 # @kyoli-gam/provider-claude-code
 
+## 0.0.98
+
+### Patch Changes
+
+- [#453](https://github.com/other-yuka/kyoli-gam/pull/453) [`33c308c`](https://github.com/other-yuka/kyoli-gam/commit/33c308c0d99988de5892afafb87841d1be034086) Thanks [@other-yuka](https://github.com/other-yuka)! - Use active quota windows, provider utilization claims, and distinct Retry-After cooldowns for Claude rate limits. Prevent stale success and usage results from restoring cleared limits across shared and gateway account paths.
+
+- [#452](https://github.com/other-yuka/kyoli-gam/pull/452) [`47d1f33`](https://github.com/other-yuka/kyoli-gam/commit/47d1f333f26deac765f440cf35ed4c870312e2c7) Thanks [@other-yuka](https://github.com/other-yuka)! - Filter the unsupported Claude tool-change beta by model family and preserve canonical aliases for dated Claude 4.6+ catalog entries.
+- Updated dependencies [[`33c308c`](https://github.com/other-yuka/kyoli-gam/commit/33c308c0d99988de5892afafb87841d1be034086)]:
+  - opencode-multi-account-core@0.3.29
+  - @kyoli-gam/core@0.0.96
+
 ## 0.0.97
 
 ### Patch Changes
