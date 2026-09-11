@@ -47,7 +47,7 @@ export function aliasesForClaudeCodeModel(id: string, baseIds: readonly string[]
     aliases.push(undatedId, `claude-code/${undatedId}`, `anthropic/${undatedId}`);
   }
   for (const [alias, target] of Object.entries(STATIC_MODEL_ALIASES)) {
-    if (target === id) {
+    if (target === id || resolveDatedCatalogAlias(target, baseIds) === id) {
       aliases.push(alias, `claude-code/${alias}`, `anthropic/${alias}`);
     }
   }
@@ -64,7 +64,7 @@ export function aliasesForClaudeCodeModel(id: string, baseIds: readonly string[]
 }
 
 function undatedClaudeCodeModelId(id: string): string | undefined {
-  if (/\[1m\]$/i.test(id)) return undefined;
+  const isLongContext = /\[1m\]$/i.test(id);
   const normalized = stripClaudeCodeContext1mTag(id);
   if (!/^claude-/i.test(normalized)) return undefined;
   const match = /^(claude-(?:fable|opus|sonnet|haiku)-(\d+)(?:-(\d+))?)-\d{8}$/i.exec(normalized);
@@ -73,7 +73,7 @@ function undatedClaudeCodeModelId(id: string): string | undefined {
   const major = Number(match[2]);
   const minor = Number(match[3] ?? 0);
   if (major < 4 || (major === 4 && minor < 6)) return undefined;
-  return match[1];
+  return `${match[1]}${isLongContext ? "[1m]" : ""}`;
 }
 
 export function stripClaudeCodeProviderPrefix(modelId: string): string {
@@ -88,8 +88,11 @@ export function stripClaudeCodeProviderPrefix(modelId: string): string {
 
 export function resolveClaudeCodeModelAlias(modelId: string): string {
   const unprefixed = stripClaudeCodeProviderPrefix(modelId.trim());
+  const staticTarget = STATIC_MODEL_ALIASES[unprefixed.toLowerCase()];
   return resolveAliasAgainst(unprefixed, cachedBaseModelIds)
-    ?? STATIC_MODEL_ALIASES[unprefixed.toLowerCase()]
+    ?? (staticTarget
+      ? resolveDatedCatalogAlias(staticTarget, cachedBaseModelIds) ?? staticTarget
+      : undefined)
     ?? resolveDatedCatalogAlias(unprefixed, cachedBaseModelIds)
     ?? unprefixed;
 }
@@ -199,9 +202,15 @@ function resolveAliasAgainst(modelId: string, baseIds: readonly string[]): strin
 }
 
 function resolveDatedCatalogAlias(modelId: string, baseIds: readonly string[]): string | undefined {
-  const normalized = stripClaudeCodeProviderPrefix(modelId).toLowerCase();
+  const unprefixed = stripClaudeCodeProviderPrefix(modelId);
+  const isLongContext = /\[1m\]$/i.test(unprefixed);
+  const normalized = stripClaudeCodeContext1mTag(unprefixed).toLowerCase();
+  if (baseIds.some((id) => stripClaudeCodeContext1mTag(id).toLowerCase() === normalized)) {
+    return undefined;
+  }
   const matches = baseIds.filter((id) => undatedClaudeCodeModelId(id)?.toLowerCase() === normalized);
-  return matches.length === 1 ? matches[0] : undefined;
+  if (matches.length !== 1) return undefined;
+  return `${matches[0]}${isLongContext ? "[1m]" : ""}`;
 }
 
 function isModelFamily(value: string): value is typeof MODEL_FAMILIES[number] {
