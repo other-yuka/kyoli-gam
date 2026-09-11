@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  normalizeRatioUsagePercent,
   normalizeUsagePercent,
   scoreQuotaResetPace,
 } from "../src/routing";
@@ -13,9 +12,6 @@ describe("quota reset-aware routing", () => {
   it("keeps percent inputs distinct from ratio inputs", () => {
     expect(normalizeUsagePercent(1)).toBe(1);
     expect(normalizeUsagePercent(92)).toBe(92);
-    expect(normalizeRatioUsagePercent(0.92)).toBe(92);
-    expect(normalizeRatioUsagePercent(1)).toBe(1);
-    expect(normalizeRatioUsagePercent(92)).toBe(92);
   });
 
   it("scores a soon-reset under-pace account above a long-reset over-pace account", () => {

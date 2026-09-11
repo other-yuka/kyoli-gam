@@ -11,7 +11,6 @@ import type {
 import { isCurrentlyRateLimitCoolingDown } from "./account-state";
 import {
   isQuotaWindowActive,
-  normalizeRatioUsagePercent,
   normalizeUsagePercent,
 } from "opencode-multi-account-core";
 
@@ -202,11 +201,11 @@ function shouldRecoverAccountState(account: AccountRecord): boolean {
     return false;
   }
   if (isCurrentlyRateLimitCoolingDown(account)) return false;
-  return hasNoExhaustedUsageWindow(account.metadata.cachedUsage, account.provider) ||
-    hasNoExhaustedUsageWindow(account.metadata.usage, account.provider);
+  return hasNoExhaustedUsageWindow(account.metadata.cachedUsage) ||
+    hasNoExhaustedUsageWindow(account.metadata.usage);
 }
 
-function hasNoExhaustedUsageWindow(value: unknown, provider: ProviderId): boolean {
+function hasNoExhaustedUsageWindow(value: unknown): boolean {
   const usage = readRecord(value);
   if (!usage) return false;
   const windows = [
@@ -218,11 +217,7 @@ function hasNoExhaustedUsageWindow(value: unknown, provider: ProviderId): boolea
   ].map((window) => {
     const record = readRecord(window);
     const rawUtilization = readNumber(record?.utilization);
-    const utilization = rawUtilization === undefined
-      ? undefined
-      : provider === "claude-code"
-        ? normalizeRatioUsagePercent(rawUtilization)
-        : normalizeUsagePercent(rawUtilization);
+    const utilization = normalizeUsagePercent(rawUtilization);
     return {
       utilization,
       resetAt: readUsageWindowResetAt(record),

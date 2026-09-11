@@ -16,12 +16,6 @@ export function normalizeUsagePercent(value: number | null | undefined): number 
   return Math.max(0, Math.min(100, value));
 }
 
-/** Normalize percentage caches while accepting legacy fractional ratios below one. Exact one remains one percent. */
-export function normalizeRatioUsagePercent(value: number | null | undefined): number | undefined {
-  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
-  return normalizeUsagePercent(value >= 0 && value < 1 ? value * 100 : value);
-}
-
 export function isQuotaWindowActive(resetAt: string | null | undefined, now = Date.now()): boolean {
   if (!resetAt) return true;
   const resetMs = Date.parse(resetAt);

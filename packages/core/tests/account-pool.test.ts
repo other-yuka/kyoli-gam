@@ -621,6 +621,36 @@ describe("StickyAccountPool", () => {
     expect(result.diagnostics.softQuotaSkippedAccountIds).toContain(exhausted.id);
   });
 
+  it("treats fractional Claude OAuth utilization as a percentage", async () => {
+    const store = new MemoryAccountStore();
+    const fractionalPercent = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      name: "fractional-percent",
+      metadata: { cachedUsage: { five_hour: { utilization: 0.5, resets_at: null } } },
+    });
+    const overThreshold = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      name: "over-threshold",
+      metadata: { cachedUsage: { five_hour: { utilization: 10, resets_at: null } } },
+    });
+    const pool = new StickyAccountPool(store, {
+      strategy: "round-robin",
+      softQuotaThresholdPercent: 5,
+    });
+
+    const result = await pool.selectWithDiagnostics({
+      provider: "claude-code",
+      kind: "oauth",
+      sessionKey: "fractional-percent-session",
+    });
+
+    expect(result.account?.id).toBe(fractionalPercent.id);
+    expect(result.diagnostics.softQuotaSkippedAccountIds).not.toContain(fractionalPercent.id);
+    expect(result.diagnostics.softQuotaSkippedAccountIds).toContain(overThreshold.id);
+  });
+
   it("uses a conservative default soft quota threshold for fresh selection", async () => {
     const store = new MemoryAccountStore();
     const exhausted = await store.create({

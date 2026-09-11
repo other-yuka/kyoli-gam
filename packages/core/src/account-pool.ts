@@ -7,7 +7,7 @@ import type {
 } from "./accounts";
 import {
   isQuotaWindowActive,
-  normalizeRatioUsagePercent,
+  normalizeUsagePercent,
   scoreQuotaResetPace,
   type QuotaRoutingWindow,
 } from "opencode-multi-account-core";
@@ -416,7 +416,7 @@ function readUsageUtilization(account: AccountRecord, key: string): number | und
   if (!window) return undefined;
   const resetAt = readUsageWindowResetAt(window);
   return isQuotaWindowActive(resetAt)
-    ? normalizeAccountUsagePercent(account, readNumber(window.utilization))
+    ? normalizeUsagePercent(readNumber(window.utilization))
     : undefined;
 }
 
@@ -431,7 +431,7 @@ function readUsageTiers(account: AccountRecord): UsageTier[] {
     .map(({ key, tier }) => {
       const rawUtilization = readNumber(tier.utilization);
       const resetAt = readUsageWindowResetAt(tier);
-      const utilization = normalizeAccountUsagePercent(account, rawUtilization);
+      const utilization = normalizeUsagePercent(rawUtilization);
       return {
         key,
         utilization: utilization ?? 0,
@@ -450,12 +450,6 @@ function readUsageWindowResetAt(tier: Record<string, unknown>): string | undefin
     readString(tier.resetAt) ??
     readString(tier.resets_at) ??
     readString(tier.resetsAt);
-}
-
-function normalizeAccountUsagePercent(account: AccountRecord, value: number | undefined): number | undefined {
-  if (account.provider === "claude-code") return normalizeRatioUsagePercent(value);
-  if (value === undefined || !Number.isFinite(value)) return undefined;
-  return Math.max(0, Math.min(100, value));
 }
 
 function readPlanWeight(

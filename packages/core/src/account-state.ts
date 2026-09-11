@@ -1,7 +1,6 @@
 import type { AccountRecord } from "./accounts";
 import {
   isQuotaWindowActive,
-  normalizeRatioUsagePercent,
   normalizeUsagePercent,
 } from "opencode-multi-account-core";
 
@@ -81,7 +80,7 @@ function hasFreshAvailableUsageAfterBlock(account: AccountRecord, now: number): 
   if (windows.length === 0) return false;
 
   return windows.some((window) => {
-    const utilization = readUsagePercent(window, account);
+    const utilization = readUsagePercent(window);
     if (utilization === undefined) return false;
     const resetAt = readUsageWindowResetAt(window);
     return (resetAt != null && !isQuotaWindowActive(resetAt, now)) || utilization < 100;
@@ -96,12 +95,10 @@ function readQuotaUsageWindowKeys(usage: Record<string, unknown>): string[] {
   return keys;
 }
 
-function readUsagePercent(window: Record<string, unknown>, account: AccountRecord): number | undefined {
+function readUsagePercent(window: Record<string, unknown>): number | undefined {
   const raw = readNumber(window.utilization) ?? readNumber(window.used_percent) ?? readNumber(window.usedPercent);
   if (raw === undefined) return undefined;
-  return account.provider === "claude-code"
-    ? normalizeRatioUsagePercent(raw)
-    : normalizeUsagePercent(raw);
+  return normalizeUsagePercent(raw);
 }
 
 function readUsageWindowResetAt(window: Record<string, unknown>): string | undefined {
