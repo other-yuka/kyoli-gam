@@ -1395,12 +1395,14 @@ describe("createClaudeCodeProvider", () => {
   it.each([
     {
       label: "unified reset",
+      utilization: "1.04",
       resetAfterSeconds: 3600,
       retryAfterSeconds: 60,
       expectedBoundaryAfterSeconds: 3600,
     },
     {
       label: "Retry-After",
+      utilization: "1",
       resetAfterSeconds: 60,
       retryAfterSeconds: 120,
       expectedBoundaryAfterSeconds: 120,
@@ -1409,6 +1411,7 @@ describe("createClaudeCodeProvider", () => {
     resetAfterSeconds,
     retryAfterSeconds,
     expectedBoundaryAfterSeconds,
+    utilization,
   }) => {
     vi.useFakeTimers();
     const now = new Date("2026-09-11T00:00:00.000Z").getTime();
@@ -1450,7 +1453,7 @@ describe("createClaudeCodeProvider", () => {
             return new Response(JSON.stringify({ error: { message: "rate limited" } }), {
               status: 429,
               headers: {
-                "anthropic-ratelimit-unified-5h-utilization": "1",
+                "anthropic-ratelimit-unified-5h-utilization": utilization,
                 "anthropic-ratelimit-unified-7d-utilization": "0.42",
                 "anthropic-ratelimit-unified-representative-claim": "mystery_window",
                 "anthropic-ratelimit-unified-reset": String(resetSeconds),

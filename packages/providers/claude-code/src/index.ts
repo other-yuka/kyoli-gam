@@ -966,7 +966,7 @@ function claudeClaimUtilization(headers: Headers, claim: string): number | undef
         : undefined;
   const parsed = readUtilization(raw);
   if (parsed === undefined) return undefined;
-  return parsed <= 1 ? parsed * 100 : parsed;
+  return normalizeClaudeCodeHeaderUtilization(parsed);
 }
 
 function isUnmappedClaudeQuotaClaim(headers: Headers, claim: string | undefined): boolean {
@@ -1063,7 +1063,7 @@ function parseClaudeCodeRateLimitHeaders(headers: Headers): {
 }
 
 function normalizeClaudeCodeHeaderUtilization(value: number): number {
-  const percent = value >= 0 && value <= 1 ? value * 100 : value;
+  const percent = value * 100;
   return Math.max(0, Math.min(100, percent));
 }
 

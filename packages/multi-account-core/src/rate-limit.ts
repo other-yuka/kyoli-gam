@@ -86,8 +86,8 @@ export function createRateLimitHandlers(dependencies: RateLimitDependencies) {
   function readClaudeUtilization(value: string | null): number | undefined {
     if (value == null || value.trim() === "") return undefined;
     const parsed = Number(value.trim());
-    if (!Number.isFinite(parsed) || parsed < 0 || parsed > 100) return undefined;
-    return parsed <= 1 ? parsed * 100 : parsed;
+    if (!Number.isFinite(parsed) || parsed < 0) return undefined;
+    return Math.min(100, parsed * 100);
   }
 
   function claudeUnifiedResetFromResponse(response: Response): { resetAt: string; resetMs: number } | null {

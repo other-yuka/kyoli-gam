@@ -199,7 +199,7 @@ describe("core/rate-limit", () => {
       new Response("", {
         status: 429,
         headers: {
-          "anthropic-ratelimit-unified-5h-utilization": "1",
+          "anthropic-ratelimit-unified-5h-utilization": "1.04",
           "anthropic-ratelimit-unified-7d-utilization": "0.42",
           "anthropic-ratelimit-unified-representative-claim": "mystery_window",
           "anthropic-ratelimit-unified-reset": String(resetSeconds),
