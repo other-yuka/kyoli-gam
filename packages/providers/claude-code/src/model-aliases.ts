@@ -43,7 +43,7 @@ export function resetCachedClaudeCodeBaseModelsForTest(): void {
 export function aliasesForClaudeCodeModel(id: string, baseIds: readonly string[]): string[] {
   const aliases = [id, `claude-code/${id}`];
   const undatedId = undatedClaudeCodeModelId(id);
-  if (undatedId) {
+  if (undatedId && resolveDatedCatalogAlias(undatedId, baseIds)?.toLowerCase() === id.toLowerCase()) {
     aliases.push(undatedId, `claude-code/${undatedId}`, `anthropic/${undatedId}`);
   }
   for (const [alias, target] of Object.entries(STATIC_MODEL_ALIASES)) {

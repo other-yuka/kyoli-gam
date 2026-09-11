@@ -6,6 +6,7 @@ import {
   buildClaudeCodeModels,
 } from "../src/model-catalog";
 import {
+  aliasesForClaudeCodeModel,
   resolveClaudeCodeModelAlias,
   setCachedClaudeCodeBaseModels,
   toClaudeCodeWireModelId,
@@ -97,6 +98,20 @@ describe("Claude Code dated model catalog aliases", () => {
 
     expect(resolveClaudeCodeModelAlias("claude-sonnet-4-6")).toBe("claude-sonnet-4-6");
     expect(toClaudeCodeWireModelId("claude-sonnet-4-6")).toBe("claude-sonnet-4-6");
+    expect(aliasesForClaudeCodeModel("claude-sonnet-4-6-20260115", [
+      "claude-sonnet-4-6",
+      "claude-sonnet-4-6-20260115",
+    ])).not.toContain("claude-sonnet-4-6");
+  });
+
+  it("does not synthesize an alias when dated catalog matches are ambiguous", () => {
+    const baseIds = [
+      "claude-sonnet-4-6-20260115",
+      "claude-sonnet-4-6-20260215",
+    ];
+
+    expect(aliasesForClaudeCodeModel("claude-sonnet-4-6-20260115", baseIds))
+      .not.toContain("claude-sonnet-4-6");
   });
 
   it("does not add aliases to non-dated model ids", () => {
