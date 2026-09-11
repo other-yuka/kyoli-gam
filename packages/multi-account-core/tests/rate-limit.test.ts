@@ -89,6 +89,52 @@ describe("core/rate-limit", () => {
     nowSpy.mockRestore();
   });
 
+  test("uses the matching Sonnet reset after a Sonnet rate-limit response", async () => {
+    const now = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const usage: UsageLimits = {
+      five_hour: { utilization: 20, resets_at: null },
+      seven_day: { utilization: 30, resets_at: null },
+      seven_day_sonnet: { utilization: 40, resets_at: null },
+    };
+    const account = createAccount({
+      cachedUsage: {
+        five_hour: { utilization: 20, resets_at: null },
+        seven_day: { utilization: 30, resets_at: null },
+        seven_day_sonnet: {
+          utilization: 100,
+          resets_at: new Date(now + 3_600_000).toISOString(),
+        },
+      },
+      cachedUsageAt: now - 60_000,
+    });
+    fetchUsage.mockResolvedValue({ ok: true, data: usage });
+    const manager = {
+      markRateLimited: vi.fn(async () => {}),
+      applyUsageCache: vi.fn(async () => {}),
+      getAccountCount: vi.fn(() => 2),
+    };
+
+    await handlers.handleRateLimitResponse(
+      manager,
+      createClient(),
+      account,
+      new Response("", {
+        status: 429,
+        headers: {
+          "anthropic-ratelimit-unified-representative-claim": "seven_day_sonnet",
+          "retry-after": "60",
+        },
+      }),
+    );
+
+    expect(manager.applyUsageCache).toHaveBeenCalledWith("acct-1", usage);
+    expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", 3_600_000);
+    expect(manager.applyUsageCache.mock.invocationCallOrder[0])
+      .toBeLessThan(manager.markRateLimited.mock.invocationCallOrder[0]!);
+    nowSpy.mockRestore();
+  });
+
   test("ignores non-exhausted cached resets", async () => {
     const now = 1_700_000_000_000;
     const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);

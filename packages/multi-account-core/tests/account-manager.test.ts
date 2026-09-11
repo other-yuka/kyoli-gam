@@ -327,6 +327,70 @@ describe("core/account-manager", () => {
     nowSpy.mockRestore();
   });
 
+  test("keeps Sonnet-only exhaustion out of account-wide availability", async () => {
+    const AccountManager = createAccountManagerForProvider({
+      providerAuthId: "anthropic",
+      isTokenExpired: () => false,
+      refreshToken: async () => ({ ok: false, permanent: false }),
+    });
+
+    const now = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const manager = await AccountManager.create(new AccountStore(), createAuth("seed"));
+    const activeUuid = getUuid(manager.getActiveAccount()?.uuid);
+
+    await manager.applyUsageCache(activeUuid, {
+      five_hour: { utilization: 20, resets_at: null },
+      seven_day: { utilization: 30, resets_at: null },
+      seven_day_sonnet: {
+        utilization: 100,
+        resets_at: new Date(now + 3_600_000).toISOString(),
+      },
+    });
+    await manager.refresh();
+
+    const account = manager.getActiveAccount();
+    expect(account?.rateLimitResetAt).toBeUndefined();
+    expect(account && manager.isRateLimited(account)).toBe(false);
+    expect((await manager.selectAccount())?.uuid).toBe(activeUuid);
+    nowSpy.mockRestore();
+  });
+
+  test("treats fractional OAuth usage values as percentages", async () => {
+    const AccountManager = createAccountManagerForProvider({
+      providerAuthId: "anthropic",
+      getConfig: () => ({
+        soft_quota_threshold_percent: 1,
+        cross_process_claims: false,
+        account_selection_strategy: "sticky",
+        max_consecutive_auth_failures: 3,
+        rate_limit_min_backoff_ms: 60_000,
+      }),
+      isTokenExpired: () => false,
+      refreshToken: async () => ({ ok: false, permanent: false }),
+    });
+
+    const manager = await AccountManager.create(new AccountStore(), createAuth("over-threshold"));
+    await manager.addAccount(createAuth("fractional-percent"));
+    const [overThreshold, fractionalPercent] = manager.getAccounts();
+    if (!overThreshold?.uuid || !fractionalPercent?.uuid) {
+      throw new Error("Expected two accounts");
+    }
+
+    await manager.applyUsageCache(overThreshold.uuid, {
+      five_hour: { utilization: 2, resets_at: null },
+      seven_day: null,
+      seven_day_sonnet: null,
+    });
+    await manager.applyUsageCache(fractionalPercent.uuid, {
+      five_hour: { utilization: 0.96, resets_at: null },
+      seven_day: null,
+      seven_day_sonnet: null,
+    });
+
+    expect((await manager.selectAccount())?.uuid).toBe(fractionalPercent.uuid);
+  });
+
   test("computes the earliest recovery across per-account blocking boundaries", async () => {
     const AccountManager = createAccountManagerForProvider({
       providerAuthId: "anthropic",

@@ -133,7 +133,7 @@ export function createRateLimitHandlers(dependencies: RateLimitDependencies) {
     };
   }
 
-  function getResetMsFromUsage(account: ManagedAccount): number | null {
+  function getResetMsFromUsage(account: ManagedAccount, claim?: string | null): number | null {
     const usage = account.cachedUsage;
     if (!usage) return null;
 
@@ -146,6 +146,13 @@ export function createRateLimitHandlers(dependencies: RateLimitDependencies) {
     }
     if (usage.seven_day?.resets_at && normalizeUsagePercent(usage.seven_day.utilization) === 100 && isQuotaWindowActive(usage.seven_day.resets_at, now)) {
       const ms = Date.parse(usage.seven_day.resets_at) - now;
+      if (ms > 0) candidates.push(ms);
+    }
+    if (claim?.toLowerCase() === "seven_day_sonnet"
+      && usage.seven_day_sonnet?.resets_at
+      && normalizeUsagePercent(usage.seven_day_sonnet.utilization) === 100
+      && isQuotaWindowActive(usage.seven_day_sonnet.resets_at, now)) {
+      const ms = Date.parse(usage.seven_day_sonnet.resets_at) - now;
       if (ms > 0) candidates.push(ms);
     }
 
@@ -178,7 +185,7 @@ export function createRateLimitHandlers(dependencies: RateLimitDependencies) {
       ? claudeUnifiedResetFromResponse(response)
       : null;
     const providerResetMs = providerReset?.resetMs ?? null;
-    const cachedResetMs = providerResetMs === null ? getResetMsFromUsage(account) : null;
+    const cachedResetMs = providerResetMs === null ? getResetMsFromUsage(account, nonSubscriptionClaim) : null;
     const resetMs = shouldQuarantineBillingClaim
       ? Math.max(retryAfterMs, NON_SUBSCRIPTION_BILLING_BACKOFF_MS)
       : hasNonExhaustedQuota
@@ -188,9 +195,8 @@ export function createRateLimitHandlers(dependencies: RateLimitDependencies) {
       const providerUsage = claudeUsageFromResponse(response, providerReset.resetAt);
       if (providerUsage) await manager.applyUsageCache(account.uuid, providerUsage);
     }
-    await manager.markRateLimited(account.uuid, resetMs);
-
     if (shouldQuarantineBillingClaim) {
+      await manager.markRateLimited(account.uuid, resetMs);
       if (manager.getAccountCount() > 1) {
         void showToast(
           client,
@@ -210,6 +216,8 @@ export function createRateLimitHandlers(dependencies: RateLimitDependencies) {
         await manager.applyUsageCache(account.uuid, usage);
       }
     }
+
+    await manager.markRateLimited(account.uuid, resetMs);
 
     if (manager.getAccountCount() > 1) {
       void showToast(
