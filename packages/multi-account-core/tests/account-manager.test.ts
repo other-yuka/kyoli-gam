@@ -292,7 +292,11 @@ describe("core/account-manager", () => {
     const manager = await AccountManager.create(new AccountStore(), createAuth("seed"));
     const activeUuid = getUuid(manager.getActiveAccount()?.uuid);
 
-    await manager.markRateLimited(activeUuid, 60_000);
+    await manager.applyUsageCache(activeUuid, {
+      five_hour: { utilization: 100, resets_at: new Date(Date.now() + 60_000).toISOString() },
+      seven_day: null,
+      seven_day_sonnet: null,
+    });
     await manager.applyUsageCache(activeUuid, {
       five_hour: { utilization: 0, resets_at: new Date(Date.now() + 3_600_000).toISOString() },
       seven_day: { utilization: 40, resets_at: new Date(Date.now() + 86_400_000).toISOString() },
@@ -303,7 +307,7 @@ describe("core/account-manager", () => {
     expect(manager.getActiveAccount()?.rateLimitResetAt).toBe(undefined);
   });
 
-  test("applyUsageCache preserves an active provider cooldown when requested", async () => {
+  test("applyUsageCache cannot clear an active provider cooldown", async () => {
     const AccountManager = createAccountManagerForProvider({
       providerAuthId: "anthropic",
       isTokenExpired: () => false,
@@ -320,10 +324,299 @@ describe("core/account-manager", () => {
       five_hour: { utilization: 20, resets_at: null },
       seven_day: null,
       seven_day_sonnet: null,
-    }, { preserveActiveRateLimit: true });
+    });
     await manager.refresh();
 
-    expect(manager.getActiveAccount()?.rateLimitResetAt).toBe(now + 60_000);
+    expect(manager.getActiveAccount()).toMatchObject({
+      rateLimitCooldownUntil: now + 60_000,
+      rateLimitResetAt: now + 60_000,
+    });
+    nowSpy.mockRestore();
+  });
+
+  test("applyUsageCache migrates a legacy provider cooldown before replacing usage", async () => {
+    const AccountManager = createAccountManagerForProvider({
+      providerAuthId: "anthropic",
+      isTokenExpired: () => false,
+      refreshToken: async () => ({ ok: false, permanent: false }),
+    });
+
+    const now = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const store = new AccountStore();
+    const manager = await AccountManager.create(store, createAuth("seed"));
+    const activeUuid = getUuid(manager.getActiveAccount()?.uuid);
+    await store.mutateAccount(activeUuid, (account) => {
+      account.rateLimitResetAt = now + 60_000;
+      account.cachedUsage = {
+        five_hour: { utilization: 20, resets_at: null },
+        seven_day: null,
+        seven_day_sonnet: null,
+      };
+      account.cachedUsageAt = now - 1_000;
+    });
+
+    await manager.applyUsageCache(activeUuid, {
+      five_hour: { utilization: 30, resets_at: null },
+      seven_day: null,
+      seven_day_sonnet: null,
+    });
+    await manager.refresh();
+
+    expect(manager.getActiveAccount()).toMatchObject({
+      rateLimitCooldownUntil: now + 60_000,
+      rateLimitResetAt: now + 60_000,
+    });
+    nowSpy.mockRestore();
+  });
+
+  test("a non-exhausted provider snapshot replaces a stale exhausted usage window", async () => {
+    const AccountManager = createAccountManagerForProvider({
+      providerAuthId: "anthropic",
+      isTokenExpired: () => false,
+      refreshToken: async () => ({ ok: false, permanent: false }),
+    });
+
+    let now = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const manager = await AccountManager.create(new AccountStore(), createAuth("seed"));
+    const activeUuid = getUuid(manager.getActiveAccount()?.uuid);
+    await manager.applyUsageCache(activeUuid, {
+      five_hour: { utilization: 100, resets_at: new Date(now + 12 * 60 * 60 * 1000).toISOString() },
+      seven_day: null,
+      seven_day_sonnet: null,
+    });
+
+    await manager.markRateLimited(activeUuid, 60_000, {
+      usage: {
+        five_hour: { utilization: 92, resets_at: null },
+        seven_day: null,
+        seven_day_sonnet: null,
+      },
+    });
+    await manager.refresh();
+
+    expect(manager.getActiveAccount()).toMatchObject({
+      rateLimitCooldownUntil: now + 60_000,
+      rateLimitResetAt: now + 60_000,
+      cachedUsage: {
+        five_hour: { utilization: 92, resets_at: null },
+      },
+    });
+
+    now += 60_001;
+    manager.clearExpiredRateLimits();
+    expect(manager.isRateLimited(manager.getActiveAccount()!)).toBe(false);
+    nowSpy.mockRestore();
+  });
+
+  test("fresh non-exhausted usage clears a claimed reset after the provider cooldown", async () => {
+    const AccountManager = createAccountManagerForProvider({
+      providerAuthId: "anthropic",
+      isTokenExpired: () => false,
+      refreshToken: async () => ({ ok: false, permanent: false }),
+    });
+
+    let now = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const manager = await AccountManager.create(new AccountStore(), createAuth("seed"));
+    const activeUuid = getUuid(manager.getActiveAccount()?.uuid);
+    await manager.markRateLimited(activeUuid, 60_000, { rateLimitResetMs: 60 * 60_000 });
+
+    now += 60_001;
+    await manager.applyUsageCache(activeUuid, {
+      five_hour: { utilization: 25, resets_at: null },
+      seven_day: null,
+      seven_day_sonnet: null,
+    });
+    await manager.refresh();
+
+    expect(manager.getActiveAccount()).toMatchObject({
+      cachedUsage: {
+        five_hour: { utilization: 25, resets_at: null },
+      },
+    });
+    expect(manager.getActiveAccount()?.rateLimitCooldownUntil).toBeUndefined();
+    expect(manager.getActiveAccount()?.rateLimitResetAt).toBeUndefined();
+    nowSpy.mockRestore();
+  });
+
+  test("ignores an older usage fetch that completes after a rate-limit snapshot", async () => {
+    const AccountManager = createAccountManagerForProvider({
+      providerAuthId: "anthropic",
+      isTokenExpired: () => false,
+      refreshToken: async () => ({ ok: false, permanent: false }),
+    });
+
+    let now = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const manager = await AccountManager.create(new AccountStore(), createAuth("seed"));
+    const activeUuid = getUuid(manager.getActiveAccount()?.uuid);
+    const staleFetchObservedAt = now;
+    await manager.applyUsageCache(activeUuid, {
+      five_hour: { utilization: 20, resets_at: null },
+      seven_day: null,
+      seven_day_sonnet: null,
+    }, { observedAt: staleFetchObservedAt });
+
+    now += 100;
+    await manager.markRateLimited(activeUuid, 60_000);
+    now += 100;
+    await manager.applyUsageCache(activeUuid, {
+      five_hour: { utilization: 100, resets_at: new Date(now + 7 * 24 * 60 * 60 * 1000).toISOString() },
+      seven_day: null,
+      seven_day_sonnet: null,
+    }, { observedAt: staleFetchObservedAt });
+    await manager.refresh();
+
+    expect(manager.getActiveAccount()).toMatchObject({
+      cachedUsage: {
+        five_hour: { utilization: 20, resets_at: null },
+      },
+      cachedUsageAt: 1_700_000_000_000,
+      rateLimitCooldownUntil: 1_700_000_060_100,
+      rateLimitResetAt: 1_700_000_060_100,
+    });
+    nowSpy.mockRestore();
+  });
+
+  test("rejects a usage fetch when a newer rate limit is observed in the same millisecond", async () => {
+    const AccountManager = createAccountManagerForProvider({
+      providerAuthId: "anthropic",
+      isTokenExpired: () => false,
+      refreshToken: async () => ({ ok: false, permanent: false }),
+    });
+
+    const now = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const manager = await AccountManager.create(new AccountStore(), createAuth("seed"));
+    const activeUuid = getUuid(manager.getActiveAccount()?.uuid);
+    const expectedRateLimitObservedAt = manager.getActiveAccount()?.rateLimitObservedAt ?? null;
+    const rateLimitUsage = {
+      five_hour: {
+        utilization: 100,
+        resets_at: new Date(now + 60 * 60 * 1000).toISOString(),
+      },
+      seven_day: null,
+      seven_day_sonnet: null,
+    };
+
+    const observedToken = await manager.markRateLimited(activeUuid, 60_000, {
+      usage: rateLimitUsage,
+    });
+    await manager.applyUsageCache(activeUuid, {
+      five_hour: { utilization: 10, resets_at: null },
+      seven_day: null,
+      seven_day_sonnet: null,
+    }, { observedAt: now, expectedRateLimitObservedAt });
+    await manager.refresh();
+
+    expect(observedToken).toBe(now);
+    expect(manager.getActiveAccount()).toMatchObject({
+      cachedUsage: rateLimitUsage,
+      cachedUsageAt: now,
+      rateLimitCooldownUntil: now + 60_000,
+      rateLimitResetAt: now + 60 * 60 * 1000,
+      rateLimitObservedAt: now,
+    });
+    nowSpy.mockRestore();
+  });
+
+  test("accepts a usage refresh guarded by the current rate-limit token", async () => {
+    const AccountManager = createAccountManagerForProvider({
+      providerAuthId: "anthropic",
+      isTokenExpired: () => false,
+      refreshToken: async () => ({ ok: false, permanent: false }),
+    });
+
+    const now = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const manager = await AccountManager.create(new AccountStore(), createAuth("seed"));
+    const activeUuid = getUuid(manager.getActiveAccount()?.uuid);
+
+    const firstToken = await manager.markRateLimited(activeUuid, 60_000);
+    const secondToken = await manager.markRateLimited(activeUuid, 60_000);
+    await manager.applyUsageCache(activeUuid, {
+      five_hour: { utilization: 25, resets_at: null },
+      seven_day: null,
+      seven_day_sonnet: null,
+    }, {
+      observedAt: now,
+      expectedRateLimitObservedAt: secondToken,
+    });
+    await manager.refresh();
+
+    expect(firstToken).toBe(now);
+    expect(secondToken).toBe(now + 1);
+    expect(manager.getActiveAccount()).toMatchObject({
+      cachedUsage: {
+        five_hour: { utilization: 25, resets_at: null },
+      },
+      cachedUsageAt: now,
+      rateLimitCooldownUntil: now + 60_000,
+      rateLimitObservedAt: now + 1,
+    });
+    nowSpy.mockRestore();
+  });
+
+  test("keeps the rate observation token after recovery to reject a pre-rate-limit snapshot", async () => {
+    const AccountManager = createAccountManagerForProvider({
+      providerAuthId: "anthropic",
+      isTokenExpired: () => false,
+      refreshToken: async () => ({ ok: false, permanent: false }),
+    });
+
+    const now = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const manager = await AccountManager.create(new AccountStore(), createAuth("seed"));
+    const activeUuid = getUuid(manager.getActiveAccount()?.uuid);
+    const expectedRateLimitObservedAt = manager.getActiveAccount()?.rateLimitObservedAt ?? null;
+
+    await manager.markRateLimited(activeUuid, 60_000);
+    await manager.markSuccess(activeUuid);
+    await manager.applyUsageCache(activeUuid, {
+      five_hour: {
+        utilization: 100,
+        resets_at: new Date(now + 60 * 60 * 1000).toISOString(),
+      },
+      seven_day: null,
+      seven_day_sonnet: null,
+    }, { observedAt: now, expectedRateLimitObservedAt });
+    await manager.refresh();
+
+    expect(manager.getActiveAccount()).toMatchObject({
+      rateLimitObservedAt: now,
+    });
+    expect(manager.getActiveAccount()?.cachedUsage).toBeUndefined();
+    expect(manager.getActiveAccount()?.rateLimitResetAt).toBeUndefined();
+    expect(manager.getActiveAccount()?.rateLimitCooldownUntil).toBeUndefined();
+    nowSpy.mockRestore();
+  });
+
+  test("an older request success cannot clear a newer rate limit", async () => {
+    const AccountManager = createAccountManagerForProvider({
+      providerAuthId: "anthropic",
+      isTokenExpired: () => false,
+      refreshToken: async () => ({ ok: false, permanent: false }),
+    });
+
+    let now = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const manager = await AccountManager.create(new AccountStore(), createAuth("seed"));
+    const activeUuid = getUuid(manager.getActiveAccount()?.uuid);
+    const requestStartedAt = now;
+
+    now += 100;
+    await manager.markRateLimited(activeUuid, 60_000);
+    now += 100;
+    await manager.markSuccess(activeUuid, requestStartedAt);
+    await manager.refresh();
+
+    expect(manager.getActiveAccount()).toMatchObject({
+      rateLimitCooldownUntil: 1_700_000_060_100,
+      rateLimitObservedAt: 1_700_000_000_100,
+      rateLimitResetAt: 1_700_000_060_100,
+    });
     nowSpy.mockRestore();
   });
 
@@ -368,13 +661,14 @@ describe("core/account-manager", () => {
       seven_day_sonnet: null,
     };
 
-    await manager.markRateLimited(activeUuid, 60_000, usage);
+    await manager.markRateLimited(activeUuid, 60_000, { usage });
     await manager.refresh();
 
     expect(mutateAccount).toHaveBeenCalledTimes(1);
     expect(manager.getActiveAccount()).toMatchObject({
       cachedUsage: usage,
       cachedUsageAt: expect.any(Number),
+      rateLimitCooldownUntil: expect.any(Number),
       rateLimitResetAt: expect.any(Number),
     });
   });
@@ -464,6 +758,28 @@ describe("core/account-manager", () => {
     });
     await manager.markRateLimited(first.uuid, 60_000);
     await manager.markRateLimited(second.uuid, 5 * 60_000);
+    await manager.refresh();
+
+    expect(manager.getMinWaitTime()).toBe(5 * 60_000);
+    nowSpy.mockRestore();
+  });
+
+  test("uses the latest boundary per account before choosing the earliest account", async () => {
+    const AccountManager = createAccountManagerForProvider({
+      providerAuthId: "anthropic",
+      isTokenExpired: () => false,
+      refreshToken: async () => ({ ok: false, permanent: false }),
+    });
+
+    const now = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const manager = await AccountManager.create(new AccountStore(), createAuth("first"));
+    await manager.addAccount(createAuth("second"));
+    const [first, second] = manager.getAccounts();
+    if (!first?.uuid || !second?.uuid) throw new Error("Expected two accounts");
+
+    await manager.markRateLimited(first.uuid, 5 * 60_000, { rateLimitResetMs: 60_000 });
+    await manager.markRateLimited(second.uuid, 2 * 60_000, { rateLimitResetMs: 10 * 60_000 });
     await manager.refresh();
 
     expect(manager.getMinWaitTime()).toBe(5 * 60_000);

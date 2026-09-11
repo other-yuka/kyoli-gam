@@ -107,7 +107,7 @@ describe("executeWithAccountRotation", () => {
     expect(response.status).toBe(200);
     const body = await response.json();
     expect(body.ok).toBe(true);
-    expect(manager.markSuccess).toHaveBeenCalledWith("acct-1");
+    expect(manager.markSuccess).toHaveBeenCalledWith("acct-1", expect.any(Number));
   });
 
   test("on 429 calls markRateLimited and retries another account", async () => {
@@ -149,7 +149,7 @@ describe("executeWithAccountRotation", () => {
 
     expect(response.status).toBe(200);
     expect(factory.invalidate).toHaveBeenCalledWith("acct-1");
-    expect(manager.markSuccess).toHaveBeenCalledWith("acct-1");
+    expect(manager.markSuccess).toHaveBeenCalledWith("acct-1", expect.any(Number));
   });
 
   test("throws Anthropic auth failure error when all accounts fail 401", async () => {
@@ -217,7 +217,7 @@ describe("executeWithAccountRotation", () => {
 
     expect(response.status).toBe(403);
     expect(manager.markRevoked).not.toHaveBeenCalled();
-    expect(manager.markSuccess).toHaveBeenCalledWith("acct-1");
+    expect(manager.markSuccess).toHaveBeenCalledWith("acct-1", expect.any(Number));
   });
 
   test("retries server errors and returns success", async () => {

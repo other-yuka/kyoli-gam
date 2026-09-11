@@ -125,6 +125,41 @@ describe("Kyoli dashboard", () => {
     expect(screen.getByText("Pinned account")).toBeTruthy();
   });
 
+  it("shows the later provider cooldown as the effective account recovery", async () => {
+    const responses = structuredClone(defaultResponses);
+    const now = Date.now();
+    responses.accounts.data[0] = {
+      ...responses.accounts.data[0],
+      failureCount: 1,
+      lastFailureClass: "rate_limit",
+      lastFailureMessage: "rate limited",
+      rateLimitBlockedAt: new Date(now).toISOString(),
+      rateLimitResetAt: new Date(now + 60 * 60 * 1000).toISOString(),
+      rateLimitCooldownUntil: new Date(now + 5 * 60 * 60 * 1000).toISOString(),
+    } as typeof account & {
+      lastFailureClass: string;
+      lastFailureMessage: string;
+      rateLimitBlockedAt: string;
+      rateLimitCooldownUntil: string;
+      rateLimitResetAt: string;
+    };
+    responses.status.data[0] = {
+      ...responses.status.data[0],
+      ready: 0,
+      rate_limited: 1,
+      failed: 1,
+      next_reset_at: new Date(now + 5 * 60 * 60 * 1000).toISOString(),
+    } as typeof responses.status.data[number] & { next_reset_at: string };
+    vi.stubGlobal("fetch", createFetchMock({ responses }));
+
+    render(<App />);
+
+    const triageTitle = await screen.findByText("Account triage");
+    const triagePanel = triageTitle.closest("button");
+    expect(triagePanel).not.toBeNull();
+    expect(within(triagePanel!).getByText(/next reset in 5 hours/i)).toBeTruthy();
+  });
+
   it("shows all quota accounts with missing snapshot coverage", async () => {
     const responses = structuredClone(defaultResponses);
     const missingAccount = structuredClone(account) as typeof account & { metadata: Record<string, unknown> };

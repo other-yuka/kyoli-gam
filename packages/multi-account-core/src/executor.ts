@@ -18,7 +18,7 @@ export interface ExecutorAccountManager {
   getAccountCount(): number;
   refresh(): Promise<void>;
   selectAccount(stickyKey?: string): Promise<ManagedAccount | null>;
-  markSuccess(uuid: string): Promise<void>;
+  markSuccess(uuid: string, requestStartedAt?: number): Promise<void>;
   markAuthFailure(uuid: string, result: TokenRefreshResult, expected?: DiskCredentials): Promise<void>;
   markRevoked(uuid: string): Promise<void>;
   hasAnyUsableAccount(): boolean;
@@ -349,6 +349,7 @@ export function createExecutorForProvider(
 
       let runtime: Awaited<ReturnType<ExecutorRuntimeFactory["getRuntime"]>>;
       let result: SupervisedTurnResponse;
+      const requestStartedAt = Date.now();
       try {
         runtime = await runtimeFactory.getRuntime(accountUuid);
         result = await fetchAndSupervise(runtime);
@@ -369,7 +370,7 @@ export function createExecutorForProvider(
         continue;
       }
 
-      await manager.markSuccess(accountUuid);
+      await manager.markSuccess(accountUuid, requestStartedAt);
       return transition.response;
     }
 

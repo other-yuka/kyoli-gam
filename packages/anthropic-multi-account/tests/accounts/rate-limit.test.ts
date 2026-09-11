@@ -92,7 +92,7 @@ describe("rate-limit", () => {
     });
 
     const manager = {
-      markRateLimited: vi.fn(async () => {}),
+      markRateLimited: vi.fn(async () => now),
       applyUsageCache: vi.fn(async () => {}),
       getAccountCount: vi.fn(() => 2),
     };
@@ -104,9 +104,14 @@ describe("rate-limit", () => {
       new Response("", { status: 429, headers: { "retry-after-ms": "5000" } }),
     );
 
-    expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", 45_000);
+    expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", 5_000, {
+      rateLimitResetMs: 45_000,
+    });
     expect(fetchUsageMock).toHaveBeenCalledWith("access-1");
-    expect(manager.applyUsageCache).toHaveBeenCalledWith("acct-1", usageFromApi);
+    expect(manager.applyUsageCache).toHaveBeenCalledWith("acct-1", usageFromApi, {
+      observedAt: now,
+      expectedRateLimitObservedAt: now,
+    });
     expect(showToastMock).toHaveBeenCalledTimes(1);
 
     nowSpy.mockRestore();

@@ -278,8 +278,8 @@ describe("pool-chain executor integration", () => {
     expect(response.status).toBe(200);
     expect(runtimeFactory.calls).toEqual(["acct-1", "acct-1", "acct-2"]);
     expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", expect.any(Number));
-    expect(manager.markSuccess).toHaveBeenCalledWith("acct-2");
-    expect(manager.markSuccess).not.toHaveBeenCalledWith("acct-1");
+    expect(manager.markSuccess).toHaveBeenCalledWith("acct-2", expect.any(Number));
+    expect(manager.markSuccess).not.toHaveBeenCalledWith("acct-1", expect.any(Number));
     expect(cascadeStateManager.getSnapshot()).toBeNull();
   });
 });

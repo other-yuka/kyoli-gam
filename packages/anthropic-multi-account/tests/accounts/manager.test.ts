@@ -435,8 +435,8 @@ describe("account-manager", () => {
       await manager.refresh();
 
       let refreshed = manager.getAccounts();
-      expect(refreshed[0]?.rateLimitResetAt).toBe(15_000);
-      expect(refreshed[1]?.rateLimitResetAt).toBe(12_000);
+      expect(refreshed[0]?.rateLimitCooldownUntil).toBe(15_000);
+      expect(refreshed[1]?.rateLimitCooldownUntil).toBe(12_000);
       expect(manager.isRateLimited(refreshed[0]!)).toBe(true);
       expect(manager.isRateLimited(refreshed[1]!)).toBe(true);
       expect(manager.getMinWaitTime()).toBe(2_000);
@@ -444,7 +444,7 @@ describe("account-manager", () => {
       now = 12_100;
       manager.clearExpiredRateLimits();
       refreshed = manager.getAccounts();
-      expect(refreshed[1]?.rateLimitResetAt).toBe(undefined);
+      expect(refreshed[1]?.rateLimitCooldownUntil).toBe(undefined);
       expect(manager.isRateLimited(refreshed[1]!)).toBe(false);
       expect(manager.isRateLimited(refreshed[0]!)).toBe(true);
       expect(manager.getMinWaitTime()).toBe(0);
@@ -452,7 +452,7 @@ describe("account-manager", () => {
       now = 16_000;
       manager.clearExpiredRateLimits();
       refreshed = manager.getAccounts();
-      expect(refreshed[0]?.rateLimitResetAt).toBe(undefined);
+      expect(refreshed[0]?.rateLimitCooldownUntil).toBe(undefined);
       expect(manager.isRateLimited(refreshed[0]!)).toBe(false);
       expect(manager.getMinWaitTime()).toBe(0);
 
@@ -471,7 +471,7 @@ describe("account-manager", () => {
       nowSpy.mockRestore();
 
       const saved = await readStorage();
-      expect(saved.accounts[0]?.rateLimitResetAt).toBe(1_500);
+      expect(saved.accounts[0]?.rateLimitCooldownUntil).toBe(1_500);
     });
   });
 
@@ -562,6 +562,7 @@ describe("account-manager", () => {
 
       const updated = manager.getAccounts()[0]!;
       expect(updated.rateLimitResetAt).toBe(undefined);
+      expect(updated.rateLimitCooldownUntil).toBe(undefined);
       expect(updated.last429At).toBe(undefined);
       expect(updated.consecutiveAuthFailures).toBe(0);
       expect(updated.lastUsed).toBe(123_456);

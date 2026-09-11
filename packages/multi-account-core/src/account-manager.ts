@@ -42,8 +42,15 @@ export interface RuntimeFactoryLike {
   invalidate(uuid: string): void;
 }
 
+export interface MarkRateLimitedOptions {
+  rateLimitResetMs?: number;
+  usage?: UsageLimits;
+}
+
 export interface ApplyUsageCacheOptions {
-  preserveActiveRateLimit?: boolean;
+  observedAt?: number;
+  rateLimitResetMs?: number;
+  expectedRateLimitObservedAt?: number | null;
 }
 
 export interface AccountManagerDependencies {
@@ -73,9 +80,9 @@ export interface AccountManagerInstance {
   clearExpiredRateLimits(): void;
   getMinWaitTime(): number;
   selectAccount(stickyKey?: string): Promise<ManagedAccount | null>;
-  markRateLimited(uuid: string, backoffMs?: number, usage?: UsageLimits): Promise<void>;
+  markRateLimited(uuid: string, backoffMs?: number, options?: MarkRateLimitedOptions): Promise<number | undefined>;
   markRevoked(uuid: string): Promise<void>;
-  markSuccess(uuid: string): Promise<void>;
+  markSuccess(uuid: string, requestStartedAt?: number): Promise<void>;
   markAuthFailure(uuid: string, result: TokenRefreshResult, expected?: DiskCredentials): Promise<void>;
   applyUsageCache(uuid: string, usage: UsageLimits, options?: ApplyUsageCacheOptions): Promise<void>;
   applyProfileCache(uuid: string, profile: ProfileData): Promise<void>;
@@ -173,6 +180,8 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
         lastUsed: storedAccount.lastUsed,
         enabled: storedAccount.enabled,
         rateLimitResetAt: storedAccount.rateLimitResetAt,
+        rateLimitCooldownUntil: storedAccount.rateLimitCooldownUntil,
+        rateLimitObservedAt: storedAccount.rateLimitObservedAt,
         cachedUsage: storedAccount.cachedUsage,
         cachedUsageAt: storedAccount.cachedUsageAt,
         consecutiveAuthFailures: storedAccount.consecutiveAuthFailures,
@@ -258,6 +267,9 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
     }
 
     isRateLimited(account: ManagedAccount): boolean {
+      if (account.rateLimitCooldownUntil && Date.now() < account.rateLimitCooldownUntil) {
+        return true;
+      }
       if (account.rateLimitResetAt && Date.now() < account.rateLimitResetAt) {
         return true;
       }
@@ -280,6 +292,9 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
     clearExpiredRateLimits(): void {
       const now = Date.now();
       for (const account of this.cached) {
+        if (account.rateLimitCooldownUntil && now >= account.rateLimitCooldownUntil) {
+          account.rateLimitCooldownUntil = undefined;
+        }
         if (account.rateLimitResetAt && now >= account.rateLimitResetAt) {
           account.rateLimitResetAt = undefined;
         }
@@ -296,9 +311,13 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
 
       for (const account of eligible) {
         let accountWaitMs = 0;
+        if (account.rateLimitCooldownUntil) {
+          const ms = account.rateLimitCooldownUntil - now;
+          if (ms > 0) accountWaitMs = ms;
+        }
         if (account.rateLimitResetAt) {
           const ms = account.rateLimitResetAt - now;
-          if (ms > 0) accountWaitMs = ms;
+          if (ms > 0) accountWaitMs = Math.max(accountWaitMs, ms);
         }
 
         const usageResetMs = this.getUsageResetMs(account);
@@ -596,30 +615,51 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       account.lastUsed = Date.now();
     }
 
-    async markRateLimited(uuid: string, backoffMs?: number, usage?: UsageLimits): Promise<void> {
+    async markRateLimited(
+      uuid: string,
+      backoffMs?: number,
+      options: MarkRateLimitedOptions = {},
+    ): Promise<number | undefined> {
       const effectiveBackoff = backoffMs ?? getProviderConfig().rate_limit_min_backoff_ms;
       const now = Date.now();
       this.last429Map.set(uuid, now);
-      await this.store.mutateAccount(uuid, (account) => {
-        if (usage) {
-          account.cachedUsage = usage;
+      const updated = await this.store.mutateAccount(uuid, (account) => {
+        const usageResetAt = options.usage
+          ? getExhaustedAccountWideUsageResetAt(options.usage, now)
+          : undefined;
+        const explicitResetAt = readFutureResetAt(options.rateLimitResetMs, now);
+        const rateLimitResetAt = latestResetAt(usageResetAt, explicitResetAt);
+
+        if (options.usage) {
+          account.cachedUsage = options.usage;
           account.cachedUsageAt = now;
         }
-        account.rateLimitResetAt = now + effectiveBackoff;
+        account.rateLimitCooldownUntil = now + effectiveBackoff;
+        account.rateLimitResetAt = latestResetAt(rateLimitResetAt, account.rateLimitCooldownUntil);
+        account.rateLimitObservedAt = Math.max(now, (account.rateLimitObservedAt ?? 0) + 1);
       });
+      return updated?.rateLimitObservedAt;
     }
 
     async markRevoked(uuid: string): Promise<void> {
       await this.removeAccountByUuid(uuid);
     }
 
-    async markSuccess(uuid: string): Promise<void> {
-      this.last429Map.delete(uuid);
+    async markSuccess(uuid: string, requestStartedAt?: number): Promise<void> {
+      let clearedRateLimit = false;
       await this.store.mutateAccount(uuid, (account) => {
-        account.rateLimitResetAt = undefined;
+        const hasNewerRateLimit = requestStartedAt !== undefined
+          && account.rateLimitObservedAt !== undefined
+          && account.rateLimitObservedAt >= requestStartedAt;
+        if (!hasNewerRateLimit) {
+          account.rateLimitResetAt = undefined;
+          account.rateLimitCooldownUntil = undefined;
+          clearedRateLimit = true;
+        }
         account.consecutiveAuthFailures = 0;
         account.lastUsed = Date.now();
       });
+      if (clearedRateLimit) this.last429Map.delete(uuid);
     }
 
     private syncToOpenCode(account: Pick<StoredAccount, "refreshToken" | "accessToken" | "expiresAt">): void {
@@ -705,31 +745,32 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       usage: UsageLimits,
       options: ApplyUsageCacheOptions = {},
     ): Promise<void> {
+      const observedAt = options.observedAt ?? Date.now();
       await this.store.mutateAccount(uuid, (account) => {
         const now = Date.now();
-        const activeRateLimitResetAt = options.preserveActiveRateLimit
-          && account.rateLimitResetAt
-          && account.rateLimitResetAt > now
-          ? account.rateLimitResetAt
+        if ((account.cachedUsageAt ?? 0) > observedAt) return;
+        if (options.expectedRateLimitObservedAt !== undefined) {
+          if ((account.rateLimitObservedAt ?? null) !== options.expectedRateLimitObservedAt) return;
+        } else if ((account.rateLimitObservedAt ?? 0) > observedAt) {
+          return;
+        }
+        const activeProviderCooldownUntil = account.rateLimitCooldownUntil
+          && account.rateLimitCooldownUntil > now
+          ? account.rateLimitCooldownUntil
           : undefined;
-        const exhaustedTierResetTimes = readAccountWideUsageTiers(usage)
-          .flatMap((tier) => {
-            const utilization = normalizeUsagePercent(tier.utilization);
-            if (utilization !== 100 || tier.resetAt == null || !isQuotaWindowActive(tier.resetAt, now)) {
-              return [];
-            }
-            return [Date.parse(tier.resetAt)];
-          })
-          .filter((resetAt) => Number.isFinite(resetAt) && resetAt > now);
-
+        const providerCooldownUntil = account.rateLimitCooldownUntil === undefined
+          ? getLegacyProviderCooldownUntil(account, now)
+          : activeProviderCooldownUntil;
+        const usageResetAt = getExhaustedAccountWideUsageResetAt(usage, now);
+        const explicitResetAt = readFutureResetAt(options.rateLimitResetMs, now);
         account.cachedUsage = usage;
-        account.cachedUsageAt = Date.now();
-        const resetTimes = activeRateLimitResetAt
-          ? [...exhaustedTierResetTimes, activeRateLimitResetAt]
-          : exhaustedTierResetTimes;
-        account.rateLimitResetAt = resetTimes.length > 0
-          ? Math.max(...resetTimes)
-          : undefined;
+        account.cachedUsageAt = observedAt;
+        account.rateLimitCooldownUntil = providerCooldownUntil;
+        account.rateLimitResetAt = latestResetAt(
+          usageResetAt,
+          explicitResetAt,
+          providerCooldownUntil,
+        );
       });
     }
 
@@ -868,6 +909,7 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
         account.authDisabledReason = undefined;
         account.consecutiveAuthFailures = 0;
         account.rateLimitResetAt = undefined;
+        account.rateLimitCooldownUntil = undefined;
       });
       this.runtimeFactory?.invalidate(uuid);
 
@@ -949,6 +991,41 @@ function readAccountWideUsageTiers(usage: UsageLimits | undefined): ManagedUsage
         resetAt: tier.resets_at,
       }]
   );
+}
+
+function getExhaustedAccountWideUsageResetAt(usage: UsageLimits, now: number): number | undefined {
+  const resetTimes = [usage.five_hour, usage.seven_day]
+    .flatMap((tier) => {
+      if (tier == null || normalizeUsagePercent(tier.utilization) !== 100 || tier.resets_at == null) {
+        return [];
+      }
+      if (!isQuotaWindowActive(tier.resets_at, now)) return [];
+      return [Date.parse(tier.resets_at)];
+    })
+    .filter((resetAt) => Number.isFinite(resetAt) && resetAt > now);
+
+  return resetTimes.length > 0 ? Math.max(...resetTimes) : undefined;
+}
+
+function getLegacyProviderCooldownUntil(account: StoredAccount, now: number): number | undefined {
+  const legacyResetAt = account.rateLimitResetAt;
+  if (!legacyResetAt || legacyResetAt <= now) return undefined;
+
+  const usageResetAt = account.cachedUsage
+    ? getExhaustedAccountWideUsageResetAt(account.cachedUsage, now)
+    : undefined;
+  return usageResetAt === legacyResetAt ? undefined : legacyResetAt;
+}
+
+function readFutureResetAt(resetMs: number | undefined, now: number): number | undefined {
+  return resetMs !== undefined && Number.isFinite(resetMs) && resetMs > 0
+    ? now + resetMs
+    : undefined;
+}
+
+function latestResetAt(...resetTimes: Array<number | undefined>): number | undefined {
+  const activeResetTimes = resetTimes.filter((resetAt): resetAt is number => resetAt !== undefined);
+  return activeResetTimes.length > 0 ? Math.max(...activeResetTimes) : undefined;
 }
 
 function readRoutingUsageTiers(usage: UsageLimits | undefined): ManagedUsageTier[] {

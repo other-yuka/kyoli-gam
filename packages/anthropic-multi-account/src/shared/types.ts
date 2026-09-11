@@ -45,6 +45,8 @@ export const StoredAccountSchema = v.object({
   lastUsed: v.number(),
   enabled: v.optional(v.boolean(), true),
   rateLimitResetAt: v.optional(v.number()),
+  rateLimitCooldownUntil: v.optional(v.number()),
+  rateLimitObservedAt: v.optional(v.number()),
   cachedUsage: v.optional(UsageLimitsSchema),
   cachedUsageAt: v.optional(v.number()),
   consecutiveAuthFailures: v.optional(v.number(), 0),
@@ -140,6 +142,8 @@ export interface ManagedAccount {
   lastUsed: number;
   enabled: boolean;
   rateLimitResetAt?: number;
+  rateLimitCooldownUntil?: number;
+  rateLimitObservedAt?: number;
   last429At?: number;
   cachedUsage?: UsageLimits;
   cachedUsageAt?: number;

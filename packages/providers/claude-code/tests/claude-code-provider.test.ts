@@ -1309,8 +1309,9 @@ describe("createClaudeCodeProvider", () => {
     expect(response.status).toBe(200);
     expect(upstreamAuths).toEqual(["Bearer first-access", "Bearer second-access"]);
     expect(firstUpdated?.failureCount).toBe(1);
-    expect(firstUpdated?.rateLimitResetAt).toBeTruthy();
-    expect(new Date(firstUpdated!.rateLimitResetAt!).getTime()).toBeLessThan(Date.now() + 120_000);
+    expect(firstUpdated?.rateLimitResetAt).toBeUndefined();
+    expect(firstUpdated?.rateLimitCooldownUntil).toBeTruthy();
+    expect(new Date(firstUpdated!.rateLimitCooldownUntil!).getTime()).toBeLessThan(Date.now() + 120_000);
     expect(firstUpdated?.metadata.rateLimitClaim).toBe("five_hour");
     expect(firstUpdated?.metadata.rateLimitStatus).toBe("rejected");
     expect((firstUpdated?.metadata.cachedUsage as { five_hour?: { utilization: number } }).five_hour?.utilization).toBe(92);
@@ -1388,8 +1389,9 @@ describe("createClaudeCodeProvider", () => {
     const firstUpdated = await store.get(first.id);
     expect(response.status).toBe(200);
     expect(upstreamAuths).toEqual(["Bearer first-access", "Bearer second-access"]);
-    expect(firstUpdated?.rateLimitResetAt).toBeTruthy();
-    expect(new Date(firstUpdated!.rateLimitResetAt!).getTime()).toBeLessThan(Date.now() + 120_000);
+    expect(firstUpdated?.rateLimitResetAt).toBeUndefined();
+    expect(firstUpdated?.rateLimitCooldownUntil).toBeTruthy();
+    expect(new Date(firstUpdated!.rateLimitCooldownUntil!).getTime()).toBeLessThan(Date.now() + 120_000);
   });
 
   it.each([
@@ -1398,19 +1400,16 @@ describe("createClaudeCodeProvider", () => {
       utilization: "1.04",
       resetAfterSeconds: 3600,
       retryAfterSeconds: 60,
-      expectedBoundaryAfterSeconds: 3600,
     },
     {
       label: "Retry-After",
       utilization: "1",
       resetAfterSeconds: 60,
       retryAfterSeconds: 120,
-      expectedBoundaryAfterSeconds: 120,
     },
   ])("preserves the later $label boundary for an exhausted unknown Claude claim", async ({
     resetAfterSeconds,
     retryAfterSeconds,
-    expectedBoundaryAfterSeconds,
     utilization,
   }) => {
     vi.useFakeTimers();
@@ -1420,7 +1419,7 @@ describe("createClaudeCodeProvider", () => {
     try {
       const resetSeconds = Math.floor(now / 1000) + resetAfterSeconds;
       const expectedQuotaResetAt = new Date(resetSeconds * 1000).toISOString();
-      const expectedBoundaryAt = new Date(now + expectedBoundaryAfterSeconds * 1000).toISOString();
+      const expectedCooldownAt = new Date(now + retryAfterSeconds * 1000).toISOString();
       const store = new MemoryAccountStore();
       const first = await store.create({
         provider: "claude-code",
@@ -1431,7 +1430,7 @@ describe("createClaudeCodeProvider", () => {
           refreshToken: "refresh-first",
         },
       });
-      await store.create({
+      const second = await store.create({
         provider: "claude-code",
         kind: "oauth",
         credentials: {
@@ -1480,13 +1479,21 @@ describe("createClaudeCodeProvider", () => {
 
       expect(response.status).toBe(200);
       expect(upstreamAuths).toEqual(["Bearer first-access", "Bearer second-access"]);
-      expect(firstUpdated?.rateLimitResetAt).toBe(expectedBoundaryAt);
-      expect(firstUpdated?.rateLimitCooldownUntil).toBe(expectedBoundaryAt);
+      expect(firstUpdated?.rateLimitResetAt).toBe(expectedQuotaResetAt);
+      expect(firstUpdated?.rateLimitCooldownUntil).toBe(expectedCooldownAt);
       expect(firstUpdated?.metadata.rateLimitClaim).toBe("mystery_window");
       expect(cachedUsage?.five_hour).toEqual({ utilization: 100, resets_at: expectedQuotaResetAt });
       expect(cachedUsage?.seven_day).toEqual({ utilization: 42, resets_at: null });
 
-      vi.setSystemTime(now + expectedBoundaryAfterSeconds * 1000 + 1);
+      vi.setSystemTime(now + Math.min(resetAfterSeconds, retryAfterSeconds) * 1000 + 1);
+      const stillBlocked = await new StickyAccountPool(store).select({
+        provider: "claude-code",
+        kind: "oauth",
+        sessionKey: "after-shorter-unknown-claim-boundary",
+      });
+      expect(stillBlocked?.id).toBe(second.id);
+
+      vi.setSystemTime(now + Math.max(resetAfterSeconds, retryAfterSeconds) * 1000 + 1);
       const recovered = await new StickyAccountPool(store).select({
         provider: "claude-code",
         kind: "oauth",
@@ -1512,7 +1519,7 @@ describe("createClaudeCodeProvider", () => {
       expectedCachedUsage: {
         five_hour: {
           utilization: 100,
-          resets_at: "2026-09-11T00:01:00.000Z",
+          resets_at: null,
         },
       },
     },
@@ -1578,7 +1585,7 @@ describe("createClaudeCodeProvider", () => {
       const firstUpdated = await store.get(first.id);
 
       expect(response.status).toBe(200);
-      expect(firstUpdated?.rateLimitResetAt).toBe(retryAt);
+      expect(firstUpdated?.rateLimitResetAt).toBeUndefined();
       expect(firstUpdated?.rateLimitCooldownUntil).toBe(retryAt);
       expect(firstUpdated?.metadata.cachedUsage).toEqual(expectedCachedUsage);
     } finally {
@@ -1672,7 +1679,8 @@ describe("createClaudeCodeProvider", () => {
     expect(await response.json()).toMatchObject({ id: "msg_second" });
     expect(upstreamAuths).toEqual(["Bearer first-access", "Bearer second-access"]);
     expect(firstUpdated?.failureCount).toBe(1);
-    expect(firstUpdated?.rateLimitResetAt).toBeTruthy();
+    expect(firstUpdated?.rateLimitResetAt).toBeUndefined();
+    expect(firstUpdated?.rateLimitCooldownUntil).toBeTruthy();
     expect(firstUpdated?.metadata.rateLimitClaim).toBe("five_hour");
     expect(firstUpdated?.metadata.rateLimitStatus).toBe("rejected");
     expect(secondUpdated?.lastUsedAt).toBeTruthy();
@@ -1840,6 +1848,7 @@ describe("createClaudeCodeProvider", () => {
     expect(response.status).toBe(200);
     expect(firstUpdated?.lastFailureClass).toBe("rate_limit");
     expect(firstUpdated?.rateLimitResetAt).toBeUndefined();
+    expect(firstUpdated?.rateLimitCooldownUntil).toBeTruthy();
     expect(firstUpdated?.rateLimitBlockedAt).toBeTruthy();
   });
 

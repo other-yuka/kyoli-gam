@@ -8,11 +8,6 @@ import type {
   ProviderId,
   ProviderUsageRefreshResult,
 } from "./index";
-import { isCurrentlyRateLimitCoolingDown } from "./account-state";
-import {
-  isQuotaWindowActive,
-  normalizeUsagePercent,
-} from "opencode-multi-account-core";
 
 export interface UsageRefreshServiceOptions {
   accounts: AccountStore;
@@ -146,6 +141,7 @@ export class UsageRefreshService {
     try {
       const refresh = provider.refreshUsage;
       if (!refresh) return false;
+      const usageRefreshStartedAt = Date.now();
       const refreshed = await refresh({ account });
       if (!refreshed.ok) {
         await this.handleRefreshFailure(account, refreshed);
@@ -154,13 +150,15 @@ export class UsageRefreshService {
 
       const updated = await this.options.accounts.update(
         account.id,
-        createAccountRefreshUpdate(account, refreshed),
+        createAccountRefreshUpdate(account, refreshed, {
+          usageObservedAt: usageRefreshStartedAt,
+          rateLimitBlockedAt: account.rateLimitBlockedAt,
+          rateLimitObservedAt: account.rateLimitObservedAt,
+          recoverRateLimitState: true,
+        }),
       );
       if (!updated) return false;
 
-      if (shouldRecoverAccountState(updated)) {
-        await this.options.accounts.resetState(updated.id);
-      }
       this.cooldownUntilByAccount.delete(account.id);
       return true;
     } catch (error) {
@@ -196,60 +194,9 @@ export class UsageRefreshService {
   }
 }
 
-function shouldRecoverAccountState(account: AccountRecord): boolean {
-  if (!account.rateLimitResetAt && !account.rateLimitCooldownUntil && account.lastFailureClass !== "quota") {
-    return false;
-  }
-  if (isCurrentlyRateLimitCoolingDown(account)) return false;
-  return hasNoExhaustedUsageWindow(account.metadata.cachedUsage) ||
-    hasNoExhaustedUsageWindow(account.metadata.usage);
-}
-
-function hasNoExhaustedUsageWindow(value: unknown): boolean {
-  const usage = readRecord(value);
-  if (!usage) return false;
-  const windows = [
-    usage.five_hour,
-    usage.seven_day,
-    ...Object.entries(usage)
-      .filter(([key]) => key.startsWith("seven_day_"))
-      .map(([, window]) => window),
-  ].map((window) => {
-    const record = readRecord(window);
-    const rawUtilization = readNumber(record?.utilization);
-    const utilization = normalizeUsagePercent(rawUtilization);
-    return {
-      utilization,
-      resetAt: readUsageWindowResetAt(record),
-    };
-  }).filter((window): window is { utilization: number; resetAt: string | undefined } => window.utilization !== undefined);
-  return windows.length > 0 && windows.every((window) =>
-    window.utilization < 100
-    || (window.resetAt != null && !isQuotaWindowActive(window.resetAt)),
-  );
-}
-
-function readRecord(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : undefined;
-}
-
 function readNumber(value: unknown): number | undefined {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value !== "string") return undefined;
   const parsed = Number(value.trim());
   return Number.isFinite(parsed) ? parsed : undefined;
-}
-
-function readUsageWindowResetAt(window: Record<string, unknown> | undefined): string | undefined {
-  if (!window) return undefined;
-  return readString(window.reset_at)
-    ?? readString(window.resetAt)
-    ?? readString(window.resets_at)
-    ?? readString(window.resetsAt);
-}
-
-function readString(value: unknown): string | undefined {
-  return typeof value === "string" && value.length > 0 ? value : undefined;
 }

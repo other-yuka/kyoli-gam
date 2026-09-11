@@ -299,6 +299,8 @@ async function checkAccountQuota(
     return;
   }
 
+  const usageObservedAt = Date.now();
+  const expectedRateLimitObservedAt = freshAccount.rateLimitObservedAt ?? null;
   const usageResult = await fetchUsage(freshAccount.accessToken);
   if (!usageResult.ok) {
     printQuotaError(freshAccount, `Failed to fetch usage: ${usageResult.reason}`);
@@ -306,7 +308,10 @@ async function checkAccountQuota(
   }
 
   if (freshAccount.uuid) {
-    await manager.applyUsageCache(freshAccount.uuid, usageResult.data);
+    await manager.applyUsageCache(freshAccount.uuid, usageResult.data, {
+      observedAt: usageObservedAt,
+      expectedRateLimitObservedAt,
+    });
   }
 
   let reportAccount = freshAccount;

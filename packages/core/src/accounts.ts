@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { isDeepStrictEqual } from "node:util";
+import { shouldRecoverRateLimitStateAfterUsage } from "./account-state";
 import type { ProviderId } from "./index";
 import type { AccountFailureClass, AccountFailurePhase } from "./provider-executor";
 import { Database } from "./sqlite";
@@ -22,6 +23,7 @@ export interface AccountRecord {
   rateLimitResetAt?: string;
   rateLimitBlockedAt?: string;
   rateLimitCooldownUntil?: string;
+  rateLimitObservedAt?: number;
   authCooldownUntil?: string;
   consecutiveAuthFailures: number;
   lastFailureClass?: AccountFailureClass;
@@ -52,6 +54,13 @@ export interface AccountUpdateInput {
   metadataMergePatch?: Record<string, unknown>;
   expectedCredentials?: Record<string, unknown>;
   refreshedCredentials?: Record<string, unknown>;
+  usageSnapshotGuard?: {
+    observedAt: number;
+    cachedUsageAt?: number;
+    rateLimitBlockedAt?: string;
+    rateLimitObservedAt?: number;
+  };
+  recoverRateLimitState?: boolean;
 }
 
 export function createAccountRefreshUpdate(
@@ -60,6 +69,12 @@ export function createAccountRefreshUpdate(
     credentials?: Record<string, unknown>;
     metadata?: Record<string, unknown>;
   },
+  options: {
+    usageObservedAt?: number;
+    rateLimitBlockedAt?: string;
+    rateLimitObservedAt?: number;
+    recoverRateLimitState?: boolean;
+  } = {},
 ): AccountUpdateInput {
   return {
     expectedCredentials: toPersistedRecordShape(account.credentials),
@@ -77,6 +92,17 @@ export function createAccountRefreshUpdate(
     ...(refreshed.metadata
       ? { metadataMergePatch: changedRecordFields(account.metadata, refreshed.metadata) }
       : {}),
+    ...(options.usageObservedAt !== undefined
+      ? {
+        usageSnapshotGuard: {
+          observedAt: options.usageObservedAt,
+          cachedUsageAt: readMetadataUsageTimestamp(account.metadata),
+          rateLimitBlockedAt: options.rateLimitBlockedAt,
+          rateLimitObservedAt: options.rateLimitObservedAt,
+        },
+      }
+      : {}),
+    ...(options.recoverRateLimitState ? { recoverRateLimitState: true } : {}),
   };
 }
 
@@ -86,6 +112,7 @@ export interface AccountResetStateInput {
 
 export interface AccountSuccessInput {
   kind?: "request" | "transport";
+  requestStartedAt?: number;
 }
 
 export interface AccountStore {
@@ -230,6 +257,7 @@ export class SQLiteAccountStore implements AccountStore {
           rate_limit_reset_at text,
           rate_limit_blocked_at text,
           rate_limit_cooldown_until text,
+          rate_limit_observed_at integer,
           auth_cooldown_until text,
         consecutive_auth_failures integer not null default 0,
         last_failure_class text,
@@ -247,6 +275,7 @@ export class SQLiteAccountStore implements AccountStore {
       addColumnIfMissing(this.db, "rate_limit_reset_at", "text");
       addColumnIfMissing(this.db, "rate_limit_blocked_at", "text");
       addColumnIfMissing(this.db, "rate_limit_cooldown_until", "text");
+      addColumnIfMissing(this.db, "rate_limit_observed_at", "integer");
       addColumnIfMissing(this.db, "auth_cooldown_until", "text");
     addColumnIfMissing(this.db, "consecutive_auth_failures", "integer not null default 0");
     addColumnIfMissing(this.db, "last_failure_class", "text");
@@ -290,10 +319,11 @@ export class SQLiteAccountStore implements AccountStore {
           credentials_json, metadata_json, failure_count,
             last_used_at, last_error_at, rate_limit_reset_at,
             rate_limit_blocked_at, rate_limit_cooldown_until,
+            rate_limit_observed_at,
             auth_cooldown_until, consecutive_auth_failures,
             last_failure_class, last_failure_code, last_failure_message, last_failure_phase,
             reauth_required_reason, created_at, updated_at
-          ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         account.id,
@@ -309,6 +339,7 @@ export class SQLiteAccountStore implements AccountStore {
           account.rateLimitResetAt ?? null,
           account.rateLimitBlockedAt ?? null,
           account.rateLimitCooldownUntil ?? null,
+          account.rateLimitObservedAt ?? null,
           account.authCooldownUntil ?? null,
         account.consecutiveAuthFailures,
         account.lastFailureClass ?? null,
@@ -350,6 +381,7 @@ export class SQLiteAccountStore implements AccountStore {
           updated.updatedAt,
           id,
         );
+      if (result.changes > 0) this.persistAccountState(updated);
       this.db.exec("commit");
       return result.changes > 0 ? updated : undefined;
     } catch (error) {
@@ -362,36 +394,21 @@ export class SQLiteAccountStore implements AccountStore {
     id: string,
     input: AccountResetStateInput = {},
   ): Promise<AccountRecord | undefined> {
-    const existing = await this.get(id);
-    if (!existing) return undefined;
-
-    const updated = resetAccountState(existing, input);
-    await this.persistAccountState(updated);
-    return updated;
+    return this.mutateAccountState(id, (existing) => resetAccountState(existing, input));
   }
 
   async recordSuccess(
     id: string,
     input: AccountSuccessInput = {},
   ): Promise<AccountRecord | undefined> {
-    const existing = await this.get(id);
-    if (!existing) return undefined;
-
-    const updated = recordAccountSuccess(existing, input);
-    await this.persistAccountState(updated);
-    return updated;
+    return this.mutateAccountState(id, (existing) => recordAccountSuccess(existing, input));
   }
 
   async recordFailure(
     id: string,
     input: AccountFailureInput,
   ): Promise<AccountRecord | undefined> {
-    const existing = await this.get(id);
-    if (!existing) return undefined;
-
-    const updated = recordAccountFailure(existing, input);
-    await this.persistAccountState(updated);
-    return updated;
+    return this.mutateAccountState(id, (existing) => recordAccountFailure(existing, input));
   }
 
   async delete(id: string): Promise<boolean> {
@@ -399,17 +416,40 @@ export class SQLiteAccountStore implements AccountStore {
     return result.changes > 0;
   }
 
-  private async persistAccountState(account: AccountRecord): Promise<void> {
+  private mutateAccountState(
+    id: string,
+    mutate: (existing: AccountRecord) => AccountRecord,
+  ): AccountRecord | undefined {
+    this.db.exec("begin immediate");
+    try {
+      const existing = this.read(id);
+      if (!existing) {
+        this.db.exec("commit");
+        return undefined;
+      }
+      const updated = mutate(existing);
+      this.persistAccountState(updated);
+      this.db.exec("commit");
+      return updated;
+    } catch (error) {
+      this.db.exec("rollback");
+      throw error;
+    }
+  }
+
+  private persistAccountState(account: AccountRecord): void {
     this.db
       .query(
         `update accounts
           set enabled = ?,
+              metadata_json = ?,
               failure_count = ?,
                 last_used_at = ?,
                 last_error_at = ?,
                 rate_limit_reset_at = ?,
                 rate_limit_blocked_at = ?,
                 rate_limit_cooldown_until = ?,
+                rate_limit_observed_at = ?,
                 auth_cooldown_until = ?,
               consecutive_auth_failures = ?,
               last_failure_class = ?,
@@ -422,12 +462,14 @@ export class SQLiteAccountStore implements AccountStore {
       )
       .run(
         account.enabled ? 1 : 0,
+        JSON.stringify(account.metadata),
         account.failureCount,
           account.lastUsedAt ?? null,
           account.lastErrorAt ?? null,
           account.rateLimitResetAt ?? null,
           account.rateLimitBlockedAt ?? null,
           account.rateLimitCooldownUntil ?? null,
+          account.rateLimitObservedAt ?? null,
           account.authCooldownUntil ?? null,
         account.consecutiveAuthFailures,
         account.lastFailureClass ?? null,
@@ -488,6 +530,7 @@ interface AccountRow {
     rate_limit_reset_at?: string | null;
     rate_limit_blocked_at?: string | null;
     rate_limit_cooldown_until?: string | null;
+    rate_limit_observed_at?: number | null;
     auth_cooldown_until?: string | null;
   consecutive_auth_failures?: number;
   last_failure_class?: string | null;
@@ -526,15 +569,19 @@ function updateAccountRecord(
   const metadataPatched = input.metadataPatch
     ? { ...metadata, ...input.metadataPatch }
     : metadata;
-  return {
+  const hasConcurrentUsage = hasConcurrentUsageObservation(existing, input);
+  const metadataMergePatch = input.metadataMergePatch && hasConcurrentUsage
+    ? withoutUsageSnapshot(input.metadataMergePatch)
+    : input.metadataMergePatch;
+  const updated: AccountRecord = {
     ...existing,
     name: input.name ?? existing.name,
     enabled: input.enabled ?? existing.enabled,
     credentials: input.credentialsPatch
       ? { ...credentials, ...input.credentialsPatch }
       : credentials,
-    metadata: input.metadataMergePatch
-      ? applyRecordMergePatch(metadataPatched, input.metadataMergePatch)
+    metadata: metadataMergePatch
+      ? applyRecordMergePatch(metadataPatched, metadataMergePatch)
       : metadataPatched,
     failureCount: existing.failureCount,
       lastUsedAt: existing.lastUsedAt,
@@ -542,6 +589,7 @@ function updateAccountRecord(
       rateLimitResetAt: existing.rateLimitResetAt,
       rateLimitBlockedAt: existing.rateLimitBlockedAt,
       rateLimitCooldownUntil: existing.rateLimitCooldownUntil,
+      rateLimitObservedAt: existing.rateLimitObservedAt,
       authCooldownUntil: existing.authCooldownUntil,
     consecutiveAuthFailures: existing.consecutiveAuthFailures,
     lastFailureClass: existing.lastFailureClass,
@@ -551,6 +599,49 @@ function updateAccountRecord(
     reauthRequiredReason: existing.reauthRequiredReason,
     updatedAt: new Date().toISOString(),
   };
+  return input.recoverRateLimitState && !hasConcurrentUsage && shouldRecoverRateLimitStateAfterUsage(updated)
+    ? resetAccountState(updated, {})
+    : updated;
+}
+
+function hasConcurrentUsageObservation(
+  current: AccountRecord,
+  input: AccountUpdateInput,
+): boolean {
+  const guard = input.usageSnapshotGuard;
+  if (!guard) return false;
+
+  if (current.rateLimitObservedAt !== guard.rateLimitObservedAt) return true;
+
+  const currentUsageAt = readMetadataUsageTimestamp(current.metadata);
+  if (currentUsageAt !== guard.cachedUsageAt && currentUsageAt !== undefined && currentUsageAt >= guard.observedAt) {
+    return true;
+  }
+
+  const blockObservedAt = current.rateLimitBlockedAt ? Date.parse(current.rateLimitBlockedAt) : Number.NaN;
+  return current.rateLimitBlockedAt !== guard.rateLimitBlockedAt
+    && Number.isFinite(blockObservedAt)
+    && blockObservedAt >= guard.observedAt;
+}
+
+function withoutUsageSnapshot(metadata: Record<string, unknown>): Record<string, unknown> {
+  const preserved = { ...metadata };
+  delete preserved.cachedUsage;
+  delete preserved.cachedUsageAt;
+  delete preserved.usage;
+  delete preserved.usageCachedAt;
+  return preserved;
+}
+
+function readMetadataUsageTimestamp(metadata: Record<string, unknown>): number | undefined {
+  return readFiniteNumber(metadata.cachedUsageAt ?? metadata.usageCachedAt);
+}
+
+function readFiniteNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value !== "string" || value.trim() === "") return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function changedRecordFields(
@@ -615,8 +706,12 @@ function recordAccountSuccess(
   existing: AccountRecord,
   input: AccountSuccessInput,
 ): AccountRecord {
-  const now = new Date().toISOString();
-  if (input.kind === "transport") {
+  const nowMs = Date.now();
+  const now = new Date(nowMs).toISOString();
+  const hasNewerRateLimit = input.requestStartedAt !== undefined
+    && existing.rateLimitObservedAt !== undefined
+    && existing.rateLimitObservedAt >= input.requestStartedAt;
+  if (input.kind === "transport" || hasNewerRateLimit) {
     return {
       ...existing,
       lastUsedAt: now,
@@ -669,7 +764,8 @@ function recordAccountFailure(
   existing: AccountRecord,
   input: AccountFailureInput,
 ): AccountRecord {
-  const now = new Date().toISOString();
+  const nowMs = Date.now();
+  const now = new Date(nowMs).toISOString();
   const authFailure = input.status === 401 || input.status === 403;
   const rateLimitFailure = input.status === 429;
   const consecutiveAuthFailures = authFailure
@@ -689,6 +785,9 @@ function recordAccountFailure(
     rateLimitCooldownUntil: rateLimitFailure
       ? input.rateLimitCooldownUntil ?? input.rateLimitResetAt
       : existing.rateLimitCooldownUntil,
+    rateLimitObservedAt: rateLimitFailure
+      ? Math.max(nowMs, (existing.rateLimitObservedAt ?? 0) + 1)
+      : existing.rateLimitObservedAt,
     lastFailureClass: preserveExistingReauthFailure
       ? existing.lastFailureClass ?? input.failureClass ?? failureClassFromStatus(input.status)
       : input.failureClass ?? failureClassFromStatus(input.status),
@@ -727,6 +826,7 @@ function rowToAccount(row: AccountRow): AccountRecord {
       rateLimitResetAt: row.rate_limit_reset_at ?? undefined,
       rateLimitBlockedAt: row.rate_limit_blocked_at ?? undefined,
       rateLimitCooldownUntil: row.rate_limit_cooldown_until ?? undefined,
+      rateLimitObservedAt: row.rate_limit_observed_at ?? undefined,
       authCooldownUntil: row.auth_cooldown_until ?? undefined,
     consecutiveAuthFailures: row.consecutive_auth_failures ?? 0,
     lastFailureClass: readFailureClass(row.last_failure_class),

@@ -73,6 +73,26 @@ describe("core/account-store", () => {
     expect(persisted.accounts[0]?.accessToken).toBe("updated-token");
   });
 
+  test("unrelated mutations preserve rate-limit cooldown provenance", async () => {
+    const store = new AccountStore();
+    await store.addAccount(createAccount("cooldown", {
+      rateLimitResetAt: 1_700_000_060_000,
+      rateLimitCooldownUntil: 1_700_000_060_000,
+      rateLimitObservedAt: 1_700_000_000_000,
+    }));
+
+    await store.mutateAccount("cooldown", (account) => {
+      account.label = "renamed";
+    });
+
+    expect((await store.load()).accounts[0]).toMatchObject({
+      label: "renamed",
+      rateLimitResetAt: 1_700_000_060_000,
+      rateLimitCooldownUntil: 1_700_000_060_000,
+      rateLimitObservedAt: 1_700_000_000_000,
+    });
+  });
+
   test("adopts a fresh winner when only the access token changed", async () => {
     const store = new AccountStore();
     const expiresAt = Date.now() + 60_000;

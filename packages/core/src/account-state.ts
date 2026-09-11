@@ -25,6 +25,7 @@ export function readAccountAvailabilityState(account: AccountRecord, now = Date.
 export function isCurrentlyRateLimited(account: AccountRecord, now = Date.now()): boolean {
   const resetAt = readIsoMs(account.rateLimitResetAt);
   if (resetAt !== undefined && resetAt > now) return true;
+  if (isCurrentlyRateLimitCoolingDown(account, now)) return true;
   return hasUnrecoveredRateLimitBlock(account, now);
 }
 
@@ -49,8 +50,26 @@ export function shouldRecoverRateLimitBlock(account: AccountRecord, now = Date.n
   return hasFreshAvailableUsageAfterBlock(account, now);
 }
 
+export function shouldRecoverRateLimitStateAfterUsage(
+  account: AccountRecord,
+  now = Date.now(),
+): boolean {
+  if (!account.rateLimitResetAt && !account.rateLimitCooldownUntil && account.lastFailureClass !== "quota") {
+    return false;
+  }
+  if (isCurrentlyRateLimitCoolingDown(account, now)) return false;
+  return hasNoExhaustedUsageWindow(account.metadata.cachedUsage, now) ||
+    hasNoExhaustedUsageWindow(account.metadata.usage, now);
+}
+
 export function readRateLimitRetryAt(account: AccountRecord): string | undefined {
-  return account.rateLimitResetAt ?? account.rateLimitCooldownUntil;
+  const candidates = [account.rateLimitResetAt, account.rateLimitCooldownUntil]
+    .map((value) => ({ value, timestamp: readIsoMs(value) }))
+    .filter((candidate): candidate is { value: string; timestamp: number } =>
+      candidate.value !== undefined && candidate.timestamp !== undefined
+    )
+    .sort((left, right) => right.timestamp - left.timestamp);
+  return candidates[0]?.value;
 }
 
 function hasUnrecoveredRateLimitBlock(account: AccountRecord, now: number): boolean {
@@ -101,7 +120,32 @@ function readUsagePercent(window: Record<string, unknown>): number | undefined {
   return normalizeUsagePercent(raw);
 }
 
-function readUsageWindowResetAt(window: Record<string, unknown>): string | undefined {
+function hasNoExhaustedUsageWindow(value: unknown, now: number): boolean {
+  const usage = readRecord(value);
+  if (!usage) return false;
+  const windows = [
+    usage.five_hour,
+    usage.seven_day,
+    ...Object.entries(usage)
+      .filter(([key]) => key.startsWith("seven_day_"))
+      .map(([, window]) => window),
+  ].map((window) => {
+    const record = readRecord(window);
+    return {
+      utilization: readUsagePercent(record ?? {}),
+      resetAt: readUsageWindowResetAt(record),
+    };
+  }).filter((window): window is { utilization: number; resetAt: string | undefined } =>
+    window.utilization !== undefined
+  );
+  return windows.length > 0 && windows.every((window) =>
+    window.utilization < 100
+    || (window.resetAt != null && !isQuotaWindowActive(window.resetAt, now))
+  );
+}
+
+function readUsageWindowResetAt(window: Record<string, unknown> | undefined): string | undefined {
+  if (!window) return undefined;
   return readString(window.reset_at)
     ?? readString(window.resetAt)
     ?? readString(window.resets_at)

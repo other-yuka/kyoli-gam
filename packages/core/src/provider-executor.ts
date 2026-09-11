@@ -181,9 +181,10 @@ export async function executeWithAccountFailover(
       route: input.traceRoute,
       model: input.traceModel,
     });
+    const requestStartedAt = Date.now();
     const result = await executeWithSameAccountRetry(input, credential);
     const response = result.response;
-    await recordAccountResult(input, credential.accountId, response, result.failure);
+    await recordAccountResult(input, credential.accountId, response, result.failure, requestStartedAt);
     const retryable = shouldRetryWithNextAccount({
       status: response.status,
       accountId: credential.accountId,
@@ -387,6 +388,7 @@ async function recordAccountResult(
   accountId: string | undefined,
   response: Response,
   failure?: AccountFailureSignal,
+  requestStartedAt?: number,
 ): Promise<void> {
   if (!input.accounts || !accountId) return;
 
@@ -408,7 +410,7 @@ async function recordAccountResult(
   }
 
   if (response.ok) {
-    await input.accounts.recordSuccess(accountId);
+    await input.accounts.recordSuccess(accountId, { requestStartedAt });
     return;
   }
 
@@ -434,11 +436,10 @@ function statusFromFailure(failure: AccountFailureSignal): number | undefined {
 }
 
 function cooldownUntilFromFailure(failure: AccountFailureSignal): string | undefined {
-  if (failure.resetAt) return failure.resetAt;
   if (failure.retryAfterSeconds && failure.retryAfterSeconds > 0) {
     return new Date(Date.now() + failure.retryAfterSeconds * 1000).toISOString();
   }
-  return undefined;
+  return failure.resetAt;
 }
 
 function cloneUpstreamResponse(upstream: Response): Response {

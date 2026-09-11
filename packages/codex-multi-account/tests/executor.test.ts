@@ -130,7 +130,7 @@ describe("executeWithAccountRotation", () => {
         "https://api.example.com/v1/chat",
       );
 
-      expect(manager.markSuccess).toHaveBeenCalledWith("acct-1");
+      expect(manager.markSuccess).toHaveBeenCalledWith("acct-1", expect.any(Number));
     });
   });
 
@@ -196,7 +196,7 @@ describe("executeWithAccountRotation", () => {
 
       expect(response.status).toBe(200);
       expect(factory.invalidate).toHaveBeenCalledWith("acct-1");
-      expect(manager.markSuccess).toHaveBeenCalledWith("acct-1");
+      expect(manager.markSuccess).toHaveBeenCalledWith("acct-1", expect.any(Number));
     });
 
     test("if retry also 401, marks auth failure and switches account", async () => {
@@ -317,7 +317,7 @@ describe("executeWithAccountRotation", () => {
       // Non-revoked 403 is returned directly (markSuccess is called, response returned)
       expect(response.status).toBe(403);
       expect(manager.markRevoked).not.toHaveBeenCalled();
-      expect(manager.markSuccess).toHaveBeenCalledWith("acct-1");
+      expect(manager.markSuccess).toHaveBeenCalledWith("acct-1", expect.any(Number));
     });
   });
 

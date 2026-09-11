@@ -17,11 +17,19 @@ export interface RateLimitDependencies {
 }
 
 export interface RateLimitAccountManager {
-  markRateLimited(uuid: string, backoffMs?: number, usage?: UsageLimits): Promise<void>;
+  markRateLimited(
+    uuid: string,
+    backoffMs?: number,
+    options?: { rateLimitResetMs?: number; usage?: UsageLimits },
+  ): Promise<number | undefined>;
   applyUsageCache(
     uuid: string,
     usage: UsageLimits,
-    options?: { preserveActiveRateLimit?: boolean },
+    options?: {
+      observedAt?: number;
+      rateLimitResetMs?: number;
+      expectedRateLimitObservedAt?: number | null;
+    },
   ): Promise<void>;
   getAccountCount(): number;
 }
@@ -111,7 +119,7 @@ export function createRateLimitHandlers(dependencies: RateLimitDependencies) {
       : null;
   }
 
-  function claudeUsageFromResponse(response: Response, resetAt: string): UsageLimits | null {
+  function claudeUsageFromResponse(response: Response, resetAt?: string): UsageLimits | null {
     const fiveHour = readClaudeUtilization(response.headers.get("anthropic-ratelimit-unified-5h-utilization"));
     const sevenDay = readClaudeUtilization(response.headers.get("anthropic-ratelimit-unified-7d-utilization"));
     const sevenDaySonnet = readClaudeUtilization(
@@ -127,7 +135,9 @@ export function createRateLimitHandlers(dependencies: RateLimitDependencies) {
       ? null
       : {
         utilization,
-        resets_at: utilization === 100 && (claimedTier === undefined || claimedTier === key) ? resetAt : null,
+        resets_at: utilization === 100 && resetAt && (claimedTier === undefined || claimedTier === key)
+          ? resetAt
+          : null,
       };
 
     return {
@@ -138,8 +148,10 @@ export function createRateLimitHandlers(dependencies: RateLimitDependencies) {
   }
 
   function getResetMsFromUsage(account: ManagedAccount, claim?: string | null): number | null {
-    const usage = account.cachedUsage;
-    if (!usage) return null;
+    return account.cachedUsage ? getResetMsFromUsageLimits(account.cachedUsage, claim) : null;
+  }
+
+  function getResetMsFromUsageLimits(usage: UsageLimits, claim?: string | null): number | null {
 
     const now = Date.now();
     const candidates: number[] = [];
@@ -190,16 +202,20 @@ export function createRateLimitHandlers(dependencies: RateLimitDependencies) {
       : null;
     const providerResetMs = providerReset?.resetMs ?? null;
     const cachedResetMs = providerResetMs === null ? getResetMsFromUsage(account, nonSubscriptionClaim) : null;
-    const resetMs = shouldQuarantineBillingClaim
+    const rateLimitResetMs = hasNonExhaustedQuota
+      ? null
+      : providerResetMs ?? cachedResetMs;
+    const cooldownMs = shouldQuarantineBillingClaim
       ? Math.max(retryAfterMs, NON_SUBSCRIPTION_BILLING_BACKOFF_MS)
-      : hasNonExhaustedQuota
-        ? retryAfterMs
-        : Math.max(providerResetMs ?? cachedResetMs ?? 0, retryAfterMs);
+      : retryAfterMs;
+    const waitMs = Math.max(rateLimitResetMs ?? 0, cooldownMs);
     const usageToPersist = providerReset
       ? claudeUsageFromResponse(response, providerReset.resetAt) ?? undefined
-      : undefined;
+      : hasNonExhaustedQuota
+        ? claudeUsageFromResponse(response) ?? undefined
+        : undefined;
     if (shouldQuarantineBillingClaim) {
-      await manager.markRateLimited(account.uuid, resetMs);
+      await manager.markRateLimited(account.uuid, cooldownMs);
       if (manager.getAccountCount() > 1) {
         void showToast(
           client,
@@ -210,26 +226,40 @@ export function createRateLimitHandlers(dependencies: RateLimitDependencies) {
       return;
     }
 
-    if (usageToPersist) {
-      await manager.markRateLimited(account.uuid, resetMs, usageToPersist);
-    } else {
-      await manager.markRateLimited(account.uuid, resetMs);
-    }
+    const rateLimitObservedAt = usageToPersist || rateLimitResetMs !== null
+      ? await manager.markRateLimited(account.uuid, cooldownMs, {
+        ...(rateLimitResetMs === null ? {} : { rateLimitResetMs }),
+        ...(usageToPersist ? { usage: usageToPersist } : {}),
+      })
+      : await manager.markRateLimited(account.uuid, cooldownMs);
 
-    const shouldFetchUsage = !hasNonExhaustedQuota && providerResetMs === null && account.accessToken
+    const shouldFetchUsage = rateLimitObservedAt !== undefined
+      && !hasNonExhaustedQuota && providerResetMs === null && account.accessToken
       && (!account.cachedUsageAt || Date.now() - account.cachedUsageAt > USAGE_FETCH_COOLDOWN_MS);
 
     if (shouldFetchUsage) {
+      const observedAt = Date.now();
       const usage = await fetchUsageLimits(account.accessToken!, account.accountId);
       if (usage) {
-        await manager.applyUsageCache(account.uuid, usage, { preserveActiveRateLimit: true });
+        const refreshedResetMs = getResetMsFromUsageLimits(usage, nonSubscriptionClaim);
+        await manager.applyUsageCache(
+          account.uuid,
+          usage,
+          refreshedResetMs === null
+            ? { observedAt, expectedRateLimitObservedAt: rateLimitObservedAt }
+            : {
+              observedAt,
+              rateLimitResetMs: refreshedResetMs,
+              expectedRateLimitObservedAt: rateLimitObservedAt,
+            },
+        );
       }
     }
 
     if (manager.getAccountCount() > 1) {
       void showToast(
         client,
-        `${getAccountLabel(account)} rate-limited (resets in ${formatWaitTime(resetMs)}). Switching...`,
+        `${getAccountLabel(account)} rate-limited (resets in ${formatWaitTime(waitMs)}). Switching...`,
         "warning",
       );
     }

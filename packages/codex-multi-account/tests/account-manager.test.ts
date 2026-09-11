@@ -279,11 +279,46 @@ describe("account-manager", () => {
     await manager.markRateLimited(second.uuid, 2_000);
     await manager.refresh();
 
+    expect(manager.getAccounts()[0]?.rateLimitCooldownUntil).toBe(15_000);
+    expect(manager.getAccounts()[1]?.rateLimitCooldownUntil).toBe(12_000);
     expect(manager.getMinWaitTime()).toBe(2_000);
     now = 12_100;
     manager.clearExpiredRateLimits();
     expect(manager.getMinWaitTime()).toBe(0);
 
+    nowSpy.mockRestore();
+  });
+
+  test("persists a quota refresh after reset-credit recovery", async () => {
+    const now = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const manager = await createManagerFromStorage(createTestStorage(1));
+    const account = manager.getAccounts()[0];
+    if (!account?.uuid) {
+      throw new Error("Expected account");
+    }
+
+    const rateLimitObservedAt = await manager.markRateLimited(account.uuid, 60_000);
+    await manager.markSuccess(account.uuid);
+    await manager.refresh();
+    const resetAccount = manager.getAccounts().find((candidate) => candidate.uuid === account.uuid);
+    if (!resetAccount) {
+      throw new Error("Expected reset account");
+    }
+    const usage = createUsage(15);
+
+    await manager.applyUsageCache(account.uuid, usage, {
+      observedAt: now,
+      expectedRateLimitObservedAt: resetAccount.rateLimitObservedAt ?? null,
+    });
+
+    expect(resetAccount.rateLimitObservedAt).toBe(rateLimitObservedAt);
+    const saved = await readStorage();
+    expect(saved.accounts.find((candidate) => candidate.uuid === account.uuid)).toMatchObject({
+      cachedUsage: usage,
+      cachedUsageAt: now,
+      rateLimitObservedAt,
+    });
     nowSpy.mockRestore();
   });
 

@@ -178,7 +178,7 @@ describe("core/executor", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(manager.markSuccess).toHaveBeenCalledWith("acct-1");
+    expect(manager.markSuccess).toHaveBeenCalledWith("acct-1", expect.any(Number));
   });
 
   test("preserves the original Request for providers without a response supervisor", async () => {
@@ -270,8 +270,8 @@ describe("core/executor", () => {
     expect(runtimeFactory.calls).toEqual(["acct-1", "acct-2"]);
     expect(handleRateLimitResponse).toHaveBeenCalledTimes(1);
     expect(manager.markSuccess).toHaveBeenCalledTimes(1);
-    expect(manager.markSuccess).toHaveBeenCalledWith("acct-2");
-    expect(manager.markSuccess).not.toHaveBeenCalledWith("acct-1");
+    expect(manager.markSuccess).toHaveBeenCalledWith("acct-2", expect.any(Number));
+    expect(manager.markSuccess).not.toHaveBeenCalledWith("acct-1", expect.any(Number));
     expect(body).toContain("resp_ok");
     expect(body).not.toContain("usage_limit_reached");
   });
@@ -443,8 +443,8 @@ describe("core/executor", () => {
     expect(handleRateLimitResponse).toHaveBeenCalledTimes(1);
     expect(handleRateLimitResponse).toHaveBeenCalledWith(manager, client, acct1, expect.any(Response));
     expect(manager.markSuccess).toHaveBeenCalledTimes(1);
-    expect(manager.markSuccess).toHaveBeenCalledWith("acct-2");
-    expect(manager.markSuccess).not.toHaveBeenCalledWith("acct-1");
+    expect(manager.markSuccess).toHaveBeenCalledWith("acct-2", expect.any(Number));
+    expect(manager.markSuccess).not.toHaveBeenCalledWith("acct-1", expect.any(Number));
   });
 
   test("401 -> fresh retry 403 revoked marks account revoked and does not mark success", async () => {
@@ -467,8 +467,8 @@ describe("core/executor", () => {
     expect(manager.markRevoked).toHaveBeenCalledTimes(1);
     expect(manager.markRevoked).toHaveBeenCalledWith("acct-1");
     expect(manager.markSuccess).toHaveBeenCalledTimes(1);
-    expect(manager.markSuccess).toHaveBeenCalledWith("acct-2");
-    expect(manager.markSuccess).not.toHaveBeenCalledWith("acct-1");
+    expect(manager.markSuccess).toHaveBeenCalledWith("acct-2", expect.any(Number));
+    expect(manager.markSuccess).not.toHaveBeenCalledWith("acct-1", expect.any(Number));
   });
 
   test("401 -> fresh retry 403 non-revoked returns 403 without markSuccess", async () => {
@@ -508,8 +508,8 @@ describe("core/executor", () => {
 
     expect(response.status).toBe(200);
     expect(manager.markSuccess).toHaveBeenCalledTimes(1);
-    expect(manager.markSuccess).toHaveBeenCalledWith("acct-2");
-    expect(manager.markSuccess).not.toHaveBeenCalledWith("acct-1");
+    expect(manager.markSuccess).toHaveBeenCalledWith("acct-2", expect.any(Number));
+    expect(manager.markSuccess).not.toHaveBeenCalledWith("acct-1", expect.any(Number));
   });
 
   test("repeated 401 -> fresh 429 -> switch flow exhausts retry budget", async () => {
@@ -570,8 +570,8 @@ describe("core/executor", () => {
       acct1,
     );
     expect(manager.markSuccess).toHaveBeenCalledTimes(1);
-    expect(manager.markSuccess).toHaveBeenCalledWith("acct-2");
-    expect(manager.markSuccess).not.toHaveBeenCalledWith("acct-1");
+    expect(manager.markSuccess).toHaveBeenCalledWith("acct-2", expect.any(Number));
+    expect(manager.markSuccess).not.toHaveBeenCalledWith("acct-1", expect.any(Number));
   });
 
   test("5xx server-retry network error continues outer retry loop", async () => {
@@ -594,7 +594,7 @@ describe("core/executor", () => {
     expect(runtimeFactory.calls).toEqual(["acct-1", "acct-1", "acct-2"]);
     expect(manager.markAuthFailure).not.toHaveBeenCalled();
     expect(manager.markSuccess).toHaveBeenCalledTimes(1);
-    expect(manager.markSuccess).toHaveBeenCalledWith("acct-2");
-    expect(manager.markSuccess).not.toHaveBeenCalledWith("acct-1");
+    expect(manager.markSuccess).toHaveBeenCalledWith("acct-2", expect.any(Number));
+    expect(manager.markSuccess).not.toHaveBeenCalledWith("acct-1", expect.any(Number));
   });
 });

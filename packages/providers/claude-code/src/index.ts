@@ -576,7 +576,7 @@ function withClaudeCodeRateLimitReset(
 ): AccountFailureSignal {
   if (failure.class !== "rate_limit" && failure.class !== "quota") return failure;
 
-  const resetAt = readClaudeCodeRateLimitResetAt(headers) ?? failure.resetAt;
+  const resetAt = readClaudeCodeQuotaResetAt(headers) ?? failure.resetAt;
   return {
     ...failure,
     metadata: {
@@ -584,13 +584,13 @@ function withClaudeCodeRateLimitReset(
       ...readClaudeCodeRateLimitMetadata(headers),
     },
     resetAt,
-    retryAfterSeconds: secondsUntilIso(resetAt) ?? failure.retryAfterSeconds,
+    retryAfterSeconds: readClaudeCodeRetryAfterSeconds(headers) ?? failure.retryAfterSeconds ?? 60,
   };
 }
 
 function inferClaudeCodeHttpFailure(response: Response): AccountFailureSignal | undefined {
   if (response.status !== 429) return undefined;
-  const resetAt = readClaudeCodeRateLimitResetAt(response.headers);
+  const resetAt = readClaudeCodeQuotaResetAt(response.headers);
   return {
     class: "rate_limit",
     code: "rate_limit",
@@ -598,7 +598,7 @@ function inferClaudeCodeHttpFailure(response: Response): AccountFailureSignal | 
     metadata: readClaudeCodeRateLimitMetadata(response.headers),
     phase: "startup",
     resetAt,
-    retryAfterSeconds: secondsUntilIso(resetAt),
+    retryAfterSeconds: readClaudeCodeRetryAfterSeconds(response.headers) ?? 60,
     retryScope: "next_account",
   };
 }
@@ -607,7 +607,7 @@ function inferClaudeCodeBillingClaimFailure(response: Response): AccountFailureS
   const parsed = parseClaudeCodeRateLimitHeaders(response.headers);
   if (!parsed || !isClaudeCodeNonSubscriptionBillingClaim(parsed.claim)) return undefined;
 
-  const resetAt = readClaudeCodeRateLimitResetAt(response.headers);
+  const resetAt = readClaudeCodeQuotaResetAt(response.headers);
   return {
     class: "quota",
     code: "non_subscription_billing_claim",
@@ -616,7 +616,7 @@ function inferClaudeCodeBillingClaimFailure(response: Response): AccountFailureS
     metadata: readClaudeCodeRateLimitMetadata(response.headers),
     phase: "startup",
     resetAt,
-    retryAfterSeconds: secondsUntilIso(resetAt),
+    retryAfterSeconds: readClaudeCodeRetryAfterSeconds(response.headers) ?? 60,
     retryScope: "next_account",
   };
 }
@@ -915,13 +915,7 @@ async function refreshClaudeCodeUsageForAccount(input: {
 }
 
 function readClaudeCodeRateLimitResetAt(headers: Headers): string | undefined {
-  const claim = headers.get("anthropic-ratelimit-unified-representative-claim")?.toLowerCase();
-  const utilization = claim ? claudeClaimUtilization(headers, claim) : undefined;
-  const unifiedResetAt = readUnifiedResetAt(headers);
-  const unclaimedExhausted = isUnmappedClaudeQuotaClaim(headers, claim) && hasExhaustedClaudeUtilization(headers);
-  const exhaustedResetAt = unifiedResetAt && (utilization === 100 || unclaimedExhausted)
-    ? unifiedResetAt
-    : undefined;
+  const exhaustedResetAt = readClaudeCodeQuotaResetAt(headers);
   const retryAfterAt = readRetryAfterAt(headers);
   if (exhaustedResetAt && retryAfterAt) {
     return Date.parse(exhaustedResetAt) >= Date.parse(retryAfterAt) ? exhaustedResetAt : retryAfterAt;
@@ -934,9 +928,23 @@ function readClaudeCodeRateLimitResetAt(headers: Headers): string | undefined {
       || headers.get("anthropic-ratelimit-unified-reset")
       || headers.get("anthropic-ratelimit-unified-5h-utilization")
       || headers.get("anthropic-ratelimit-unified-7d-utilization")
-      || claim,
+      || headers.get("anthropic-ratelimit-unified-representative-claim"),
   );
   return hasRateLimitSignal ? new Date(Date.now() + 60_000).toISOString() : undefined;
+}
+
+function readClaudeCodeQuotaResetAt(headers: Headers): string | undefined {
+  const claim = headers.get("anthropic-ratelimit-unified-representative-claim")?.toLowerCase();
+  const utilization = claim ? claudeClaimUtilization(headers, claim) : undefined;
+  const unifiedResetAt = readUnifiedResetAt(headers);
+  const unclaimedExhausted = isUnmappedClaudeQuotaClaim(headers, claim) && hasExhaustedClaudeUtilization(headers);
+  return unifiedResetAt && (utilization === 100 || unclaimedExhausted)
+    ? unifiedResetAt
+    : undefined;
+}
+
+function readClaudeCodeRetryAfterSeconds(headers: Headers): number | undefined {
+  return secondsUntilIso(readRetryAfterAt(headers));
 }
 
 function readRetryAfterAt(headers: Headers): string | undefined {
@@ -1006,12 +1014,12 @@ function parseClaudeCodeRateLimitHeaders(headers: Headers): {
   const util5h = readUtilization(headers.get("anthropic-ratelimit-unified-5h-utilization"));
   const util7d = readUtilization(headers.get("anthropic-ratelimit-unified-7d-utilization"));
   const claim = (headers.get("anthropic-ratelimit-unified-representative-claim") ?? "unknown").toLowerCase();
-  const resetAt = readClaudeCodeRateLimitResetAt(headers);
+  const resetAt = readClaudeCodeQuotaResetAt(headers);
   const unifiedResetAt = readUnifiedResetAt(headers);
   const claimUtilization = claudeClaimUtilization(headers, claim);
-  const claimResetAt = claimUtilization === 100 ? unifiedResetAt ?? resetAt : undefined;
+  const claimResetAt = claimUtilization === 100 ? unifiedResetAt : undefined;
   const unclaimedExhaustedResetAt = isUnmappedClaudeQuotaClaim(headers, claim) && hasExhaustedClaudeUtilization(headers)
-    ? unifiedResetAt ?? resetAt
+    ? unifiedResetAt
     : undefined;
   const cachedUsage: Record<string, unknown> = {};
 

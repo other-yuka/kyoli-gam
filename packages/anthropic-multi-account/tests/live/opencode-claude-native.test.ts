@@ -52,6 +52,7 @@ function isUsableLiveAccount(account: StoredAccount): boolean {
   if (account.enabled === false) return false;
   if (account.isAuthDisabled) return false;
   if (!account.refreshToken) return false;
+  if (account.rateLimitCooldownUntil && account.rateLimitCooldownUntil > Date.now()) return false;
   if (account.rateLimitResetAt && account.rateLimitResetAt > Date.now()) return false;
   return true;
 }
