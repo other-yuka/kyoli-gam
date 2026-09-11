@@ -527,34 +527,37 @@ describe("core/account-manager", () => {
     nowSpy.mockRestore();
   });
 
-  test("uses the fallback probe after the known reset when another exhausted window has no reset", async () => {
-    const AccountManager = createAccountManagerForProvider({
-      providerAuthId: "anthropic",
-      isTokenExpired: () => false,
-      refreshToken: async () => ({ ok: false, permanent: false }),
-    });
+  test.each([null, "invalid-reset"] as const)(
+    "uses the fallback probe after the known reset when another exhausted window has reset %s",
+    async (unknownResetAt) => {
+      const AccountManager = createAccountManagerForProvider({
+        providerAuthId: "anthropic",
+        isTokenExpired: () => false,
+        refreshToken: async () => ({ ok: false, permanent: false }),
+      });
 
-    let now = 1_700_000_000_000;
-    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
-    const manager = await AccountManager.create(new AccountStore(), createAuth("seed"));
-    const activeUuid = getUuid(manager.getActiveAccount()?.uuid);
-    const rateLimitRevision = await manager.markRateLimitedAtRevision!(activeUuid, 60_000, {
-      usage: {
-        five_hour: {
-          utilization: 100,
-          resets_at: new Date(now + 60_000).toISOString(),
+      let now = 1_700_000_000_000;
+      const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+      const manager = await AccountManager.create(new AccountStore(), createAuth("seed"));
+      const activeUuid = getUuid(manager.getActiveAccount()?.uuid);
+      const rateLimitRevision = await manager.markRateLimitedAtRevision!(activeUuid, 60_000, {
+        usage: {
+          five_hour: {
+            utilization: 100,
+            resets_at: new Date(now + 60_000).toISOString(),
+          },
+          seven_day: { utilization: 100, resets_at: unknownResetAt },
+          seven_day_sonnet: null,
         },
-        seven_day: { utilization: 100, resets_at: null },
-        seven_day_sonnet: null,
-      },
-    });
-    if (rateLimitRevision === undefined) throw new Error("Expected a rate-limit revision");
+      });
+      if (rateLimitRevision === undefined) throw new Error("Expected a rate-limit revision");
 
-    await expect(manager.selectAccount()).resolves.toBeNull();
-    now += 60_001;
-    await expect(manager.selectAccount()).resolves.toMatchObject({ uuid: activeUuid });
-    nowSpy.mockRestore();
-  });
+      await expect(manager.selectAccount()).resolves.toBeNull();
+      now += 60_001;
+      await expect(manager.selectAccount()).resolves.toMatchObject({ uuid: activeUuid });
+      nowSpy.mockRestore();
+    },
+  );
 
   test("fresh non-exhausted usage clears a claimed reset after the provider cooldown", async () => {
     const AccountManager = createAccountManagerForProvider({

@@ -311,12 +311,13 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       const now = Date.now();
       return readAccountWideUsageTiers(usage).some((tier) => {
         const utilization = normalizeUsagePercent(tier.utilization);
-        // Unknown-reset utilization still applies soft-quota routing pressure,
-        // but cannot hard-park a plugin account: without a background usage
-        // refresh, the all-exhausted fallback probe is its liveness path.
+        const resetAt = tier.resetAt == null ? Number.NaN : Date.parse(tier.resetAt);
+        // Unknown-reset utilization cannot hard-park a plugin account: without
+        // a background usage refresh, retrying after the finite account
+        // cooldown/reset is its only automatic liveness path.
         return utilization === 100
-          && tier.resetAt != null
-          && isQuotaWindowActive(tier.resetAt, now);
+          && Number.isFinite(resetAt)
+          && resetAt > now;
       });
     }
 
