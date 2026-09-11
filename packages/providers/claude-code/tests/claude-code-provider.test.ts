@@ -1392,6 +1392,197 @@ describe("createClaudeCodeProvider", () => {
     expect(new Date(firstUpdated!.rateLimitResetAt!).getTime()).toBeLessThan(Date.now() + 120_000);
   });
 
+  it.each([
+    {
+      label: "unified reset",
+      resetAfterSeconds: 3600,
+      retryAfterSeconds: 60,
+      expectedBoundaryAfterSeconds: 3600,
+    },
+    {
+      label: "Retry-After",
+      resetAfterSeconds: 60,
+      retryAfterSeconds: 120,
+      expectedBoundaryAfterSeconds: 120,
+    },
+  ])("preserves the later $label boundary for an exhausted unknown Claude claim", async ({
+    resetAfterSeconds,
+    retryAfterSeconds,
+    expectedBoundaryAfterSeconds,
+  }) => {
+    vi.useFakeTimers();
+    const now = new Date("2026-09-11T00:00:00.000Z").getTime();
+    vi.setSystemTime(now);
+
+    try {
+      const resetSeconds = Math.floor(now / 1000) + resetAfterSeconds;
+      const expectedQuotaResetAt = new Date(resetSeconds * 1000).toISOString();
+      const expectedBoundaryAt = new Date(now + expectedBoundaryAfterSeconds * 1000).toISOString();
+      const store = new MemoryAccountStore();
+      const first = await store.create({
+        provider: "claude-code",
+        kind: "oauth",
+        credentials: {
+          accessToken: "first-access",
+          expiresAt: Date.now() + 60 * 60 * 1000,
+          refreshToken: "refresh-first",
+        },
+      });
+      await store.create({
+        provider: "claude-code",
+        kind: "oauth",
+        credentials: {
+          accessToken: "second-access",
+          expiresAt: Date.now() + 60 * 60 * 1000,
+          refreshToken: "refresh-second",
+        },
+      });
+      const upstreamAuths: string[] = [];
+
+      const provider = createTestClaudeCodeProvider({
+        accounts: new StickyAccountPool(store),
+        baseUrl: "https://example.test",
+        fetch: async (_input, init) => {
+          const authorization = new Headers(init?.headers).get("authorization") ?? "";
+          upstreamAuths.push(authorization);
+
+          if (authorization === "Bearer first-access") {
+            return new Response(JSON.stringify({ error: { message: "rate limited" } }), {
+              status: 429,
+              headers: {
+                "anthropic-ratelimit-unified-5h-utilization": "1",
+                "anthropic-ratelimit-unified-7d-utilization": "0.42",
+                "anthropic-ratelimit-unified-representative-claim": "mystery_window",
+                "anthropic-ratelimit-unified-reset": String(resetSeconds),
+                "anthropic-ratelimit-unified-status": "rejected",
+                "content-type": "application/json",
+                "retry-after": String(retryAfterSeconds),
+              },
+            });
+          }
+
+          return new Response(JSON.stringify({ id: "msg_second", type: "message" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        },
+      });
+
+      const response = await provider.handleRequest(createMessagesContext("unknown-claim"));
+      const firstUpdated = await store.get(first.id);
+      const cachedUsage = firstUpdated?.metadata.cachedUsage as {
+        five_hour?: { utilization?: number; resets_at?: string | null };
+        seven_day?: { utilization?: number; resets_at?: string | null };
+      } | undefined;
+
+      expect(response.status).toBe(200);
+      expect(upstreamAuths).toEqual(["Bearer first-access", "Bearer second-access"]);
+      expect(firstUpdated?.rateLimitResetAt).toBe(expectedBoundaryAt);
+      expect(firstUpdated?.rateLimitCooldownUntil).toBe(expectedBoundaryAt);
+      expect(firstUpdated?.metadata.rateLimitClaim).toBe("mystery_window");
+      expect(cachedUsage?.five_hour).toEqual({ utilization: 100, resets_at: expectedQuotaResetAt });
+      expect(cachedUsage?.seven_day).toEqual({ utilization: 42, resets_at: null });
+
+      vi.setSystemTime(now + expectedBoundaryAfterSeconds * 1000 + 1);
+      const recovered = await new StickyAccountPool(store).select({
+        provider: "claude-code",
+        kind: "oauth",
+        sessionKey: "after-unknown-claim-reset",
+      });
+      expect(recovered?.id).toBe(first.id);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    {
+      label: "utilization",
+      utilization: "1junk",
+      unifiedResetSuffix: "",
+      expectedCachedUsage: {},
+    },
+    {
+      label: "unified reset",
+      utilization: "1",
+      unifiedResetSuffix: "junk",
+      expectedCachedUsage: {
+        five_hour: {
+          utilization: 100,
+          resets_at: "2026-09-11T00:01:00.000Z",
+        },
+      },
+    },
+  ])("rejects malformed Claude rate-limit $label headers", async ({
+    utilization,
+    unifiedResetSuffix,
+    expectedCachedUsage,
+  }) => {
+    vi.useFakeTimers();
+    const now = new Date("2026-09-11T00:00:00.000Z").getTime();
+    vi.setSystemTime(now);
+
+    try {
+      const resetSeconds = Math.floor(now / 1000) + 3600;
+      const retryAt = new Date(now + 60_000).toISOString();
+      const store = new MemoryAccountStore();
+      const first = await store.create({
+        provider: "claude-code",
+        kind: "oauth",
+        credentials: {
+          accessToken: "first-access",
+          expiresAt: now + 60 * 60 * 1000,
+          refreshToken: "refresh-first",
+        },
+      });
+      await store.create({
+        provider: "claude-code",
+        kind: "oauth",
+        credentials: {
+          accessToken: "second-access",
+          expiresAt: now + 60 * 60 * 1000,
+          refreshToken: "refresh-second",
+        },
+      });
+
+      const provider = createTestClaudeCodeProvider({
+        accounts: new StickyAccountPool(store),
+        baseUrl: "https://example.test",
+        fetch: async (_input, init) => {
+          const authorization = new Headers(init?.headers).get("authorization");
+          if (authorization === "Bearer first-access") {
+            return new Response(JSON.stringify({ error: { message: "rate limited" } }), {
+              status: 429,
+              headers: {
+                "anthropic-ratelimit-unified-5h-utilization": utilization,
+                "anthropic-ratelimit-unified-representative-claim": "five_hour",
+                "anthropic-ratelimit-unified-reset": `${resetSeconds}${unifiedResetSuffix}`,
+                "anthropic-ratelimit-unified-status": "rejected",
+                "content-type": "application/json",
+                "retry-after": "60",
+              },
+            });
+          }
+
+          return new Response(JSON.stringify({ id: "msg_second", type: "message" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        },
+      });
+
+      const response = await provider.handleRequest(createMessagesContext(`malformed-${unifiedResetSuffix || "usage"}`));
+      const firstUpdated = await store.get(first.id);
+
+      expect(response.status).toBe(200);
+      expect(firstUpdated?.rateLimitResetAt).toBe(retryAt);
+      expect(firstUpdated?.rateLimitCooldownUntil).toBe(retryAt);
+      expect(firstUpdated?.metadata.cachedUsage).toEqual(expectedCachedUsage);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("fails over when a Claude stream starts with a rate limit error", async () => {
     const store = new MemoryAccountStore();
     const first = await store.create({

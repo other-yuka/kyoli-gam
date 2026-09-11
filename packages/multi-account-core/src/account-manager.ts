@@ -291,15 +291,18 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       const waits: number[] = [];
 
       for (const account of eligible) {
+        let accountWaitMs = 0;
         if (account.rateLimitResetAt) {
           const ms = account.rateLimitResetAt - now;
-          if (ms > 0) waits.push(ms);
+          if (ms > 0) accountWaitMs = ms;
         }
 
         const usageResetMs = this.getUsageResetMs(account);
         if (usageResetMs !== null && usageResetMs > 0) {
-          waits.push(usageResetMs);
+          accountWaitMs = Math.max(accountWaitMs, usageResetMs);
         }
+
+        if (accountWaitMs > 0) waits.push(accountWaitMs);
       }
 
       return waits.length > 0 ? Math.min(...waits) : 0;
@@ -319,7 +322,7 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
         }
       }
 
-      return candidates.length > 0 ? Math.min(...candidates) : null;
+      return candidates.length > 0 ? Math.max(...candidates) : null;
     }
 
     async selectAccount(stickyKey?: string): Promise<ManagedAccount | null> {
@@ -704,7 +707,7 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
         account.cachedUsage = usage;
         account.cachedUsageAt = Date.now();
         account.rateLimitResetAt = exhaustedTierResetTimes.length > 0
-          ? Math.min(...exhaustedTierResetTimes)
+          ? Math.max(...exhaustedTierResetTimes)
           : undefined;
       });
     }

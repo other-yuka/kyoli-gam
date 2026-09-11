@@ -356,6 +356,62 @@ describe("StickyAccountPool", () => {
     expect((await store.get(limited.id))?.rateLimitBlockedAt).toBeUndefined();
   });
 
+  it("honors a provider retry cooldown despite fresher available usage", async () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-09-11T00:00:00.000Z").getTime();
+    vi.setSystemTime(now);
+
+    try {
+      const store = new MemoryAccountStore();
+      const limited = await store.create({ provider: "claude-code", kind: "oauth", name: "limited" });
+      const cooldownUntil = new Date(now + 60_000).toISOString();
+      await store.recordFailure(limited.id, {
+        status: 429,
+        message: "rate limited",
+        failureClass: "rate_limit",
+        failureCode: "rate_limit",
+        failurePhase: "startup",
+        rateLimitCooldownUntil: cooldownUntil,
+      });
+      const ready = await store.create({ provider: "claude-code", kind: "oauth", name: "ready" });
+      await store.update(limited.id, {
+        metadata: {
+          cachedUsageAt: now + 1,
+          cachedUsage: {
+            five_hour: { utilization: 10, resets_at: null },
+          },
+        },
+      });
+      const pool = new StickyAccountPool(store);
+
+      const duringCooldown = await pool.select({
+        provider: "claude-code",
+        kind: "oauth",
+        sessionKey: "during-provider-cooldown",
+        preferredAccountId: limited.id,
+      });
+
+      expect(duringCooldown?.id).toBe(ready.id);
+      expect(await store.get(limited.id)).toMatchObject({
+        rateLimitBlockedAt: expect.any(String),
+        rateLimitCooldownUntil: cooldownUntil,
+      });
+
+      vi.setSystemTime(now + 60_001);
+      const afterCooldown = await pool.select({
+        provider: "claude-code",
+        kind: "oauth",
+        sessionKey: "after-provider-cooldown",
+        preferredAccountId: limited.id,
+      });
+
+      expect(afterCooldown?.id).toBe(limited.id);
+      expect((await store.get(limited.id))?.rateLimitBlockedAt).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not recover unknown usage-limit blocks from blank utilization strings", async () => {
     const store = new MemoryAccountStore();
     const limited = await store.create({ provider: "codex", kind: "oauth", name: "limited" });

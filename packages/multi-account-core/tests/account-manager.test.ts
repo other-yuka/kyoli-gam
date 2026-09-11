@@ -302,4 +302,55 @@ describe("core/account-manager", () => {
 
     expect(manager.getActiveAccount()?.rateLimitResetAt).toBe(undefined);
   });
+
+  test("applyUsageCache waits for every exhausted usage window", async () => {
+    const AccountManager = createAccountManagerForProvider({
+      providerAuthId: "anthropic",
+      isTokenExpired: () => false,
+      refreshToken: async () => ({ ok: false, permanent: false }),
+    });
+
+    const now = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const manager = await AccountManager.create(new AccountStore(), createAuth("seed"));
+    const activeUuid = getUuid(manager.getActiveAccount()?.uuid);
+
+    await manager.applyUsageCache(activeUuid, {
+      five_hour: { utilization: 100, resets_at: new Date(now + 10_000).toISOString() },
+      seven_day: { utilization: 100, resets_at: new Date(now + 25_000).toISOString() },
+      seven_day_sonnet: null,
+    });
+    await manager.refresh();
+
+    expect(manager.getActiveAccount()?.rateLimitResetAt).toBe(now + 25_000);
+    expect(manager.getMinWaitTime()).toBe(25_000);
+    nowSpy.mockRestore();
+  });
+
+  test("computes the earliest recovery across per-account blocking boundaries", async () => {
+    const AccountManager = createAccountManagerForProvider({
+      providerAuthId: "anthropic",
+      isTokenExpired: () => false,
+      refreshToken: async () => ({ ok: false, permanent: false }),
+    });
+
+    const now = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const manager = await AccountManager.create(new AccountStore(), createAuth("first"));
+    await manager.addAccount(createAuth("second"));
+    const [first, second] = manager.getAccounts();
+    if (!first?.uuid || !second?.uuid) throw new Error("Expected two accounts");
+
+    await manager.applyUsageCache(first.uuid, {
+      five_hour: { utilization: 100, resets_at: new Date(now + 60 * 60 * 1000).toISOString() },
+      seven_day: null,
+      seven_day_sonnet: null,
+    });
+    await manager.markRateLimited(first.uuid, 60_000);
+    await manager.markRateLimited(second.uuid, 5 * 60_000);
+    await manager.refresh();
+
+    expect(manager.getMinWaitTime()).toBe(5 * 60_000);
+    nowSpy.mockRestore();
+  });
 });

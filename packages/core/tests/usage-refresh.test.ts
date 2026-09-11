@@ -298,6 +298,7 @@ describe("UsageRefreshService", () => {
       failureCode: "rate_limit",
       failurePhase: "startup",
       rateLimitResetAt: new Date(Date.now() + 60_000).toISOString(),
+      rateLimitCooldownUntil: new Date(Date.now() - 1).toISOString(),
     });
     await store.recordFailure(recovered.id, {
       status: 429,
@@ -306,6 +307,7 @@ describe("UsageRefreshService", () => {
       failureCode: "rate_limit",
       failurePhase: "startup",
       rateLimitResetAt: new Date(Date.now() + 60_000).toISOString(),
+      rateLimitCooldownUntil: new Date(Date.now() - 1).toISOString(),
     });
     const provider = createUsageProvider(async ({ account }) => ({
       ok: true,
@@ -348,6 +350,7 @@ describe("UsageRefreshService", () => {
       failureCode: "rate_limit",
       failurePhase: "startup",
       rateLimitResetAt: new Date(Date.now() + 60_000).toISOString(),
+      rateLimitCooldownUntil: new Date(Date.now() - 1).toISOString(),
     });
     const provider = createUsageProvider(async () => ({
       ok: true,
@@ -368,11 +371,53 @@ describe("UsageRefreshService", () => {
     expect(await service.refreshOnce()).toMatchObject({ checked: 1, refreshed: 1 });
     expect((await store.get(account.id))?.rateLimitResetAt).toBeUndefined();
   });
+
+  it("does not let fresh usage clear an active provider retry cooldown", async () => {
+    const store = new MemoryAccountStore();
+    const account = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      metadata: { cachedUsageAt: Date.now() - 10_000 },
+    });
+    const cooldownUntil = new Date(Date.now() + 60_000).toISOString();
+    await store.recordFailure(account.id, {
+      status: 429,
+      message: "rate limited",
+      failureClass: "rate_limit",
+      failureCode: "rate_limit",
+      failurePhase: "startup",
+      rateLimitCooldownUntil: cooldownUntil,
+    });
+    const provider = createUsageProvider(async () => ({
+      ok: true,
+      metadata: {
+        cachedUsageAt: Date.now(),
+        cachedUsage: {
+          five_hour: { utilization: 10, resets_at: null },
+          seven_day: { utilization: 20, resets_at: null },
+        },
+      },
+    }), "claude-code");
+    const service = new UsageRefreshService({
+      accounts: store,
+      providers: [provider],
+      intervalMs: 1,
+    });
+
+    expect(await service.refreshOnce()).toMatchObject({ checked: 1, refreshed: 1 });
+    expect(await store.get(account.id)).toMatchObject({
+      rateLimitBlockedAt: expect.any(String),
+      rateLimitCooldownUntil: cooldownUntil,
+    });
+  });
 });
 
-function createUsageProvider(refreshUsage: ProviderAdapter["refreshUsage"]): ProviderAdapter {
+function createUsageProvider(
+  refreshUsage: ProviderAdapter["refreshUsage"],
+  id: ProviderAdapter["id"] = "codex",
+): ProviderAdapter {
   return {
-    id: "codex",
+    id,
     displayName: "Test Codex",
     routes: [],
     async listModels() {

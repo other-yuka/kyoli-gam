@@ -90,6 +90,49 @@ export function createRateLimitHandlers(dependencies: RateLimitDependencies) {
     return parsed <= 1 ? parsed * 100 : parsed;
   }
 
+  function claudeUnifiedResetFromResponse(response: Response): { resetAt: string; resetMs: number } | null {
+    const rawReset = response.headers.get("anthropic-ratelimit-unified-reset");
+    if (!rawReset || rawReset.trim() === "") return null;
+
+    const resetSeconds = Number(rawReset.trim());
+    if (!Number.isFinite(resetSeconds) || resetSeconds <= 0) return null;
+
+    const resetAt = resetSeconds * 1000;
+    if (!Number.isFinite(resetAt)) return null;
+
+    const resetMs = resetAt - Date.now();
+    const resetDate = new Date(resetAt);
+    return resetMs > 0 && Number.isFinite(resetDate.getTime())
+      ? { resetAt: resetDate.toISOString(), resetMs }
+      : null;
+  }
+
+  function claudeUsageFromResponse(response: Response, resetAt: string): UsageLimits | null {
+    const fiveHour = readClaudeUtilization(response.headers.get("anthropic-ratelimit-unified-5h-utilization"));
+    const sevenDay = readClaudeUtilization(response.headers.get("anthropic-ratelimit-unified-7d-utilization"));
+    const sevenDaySonnet = readClaudeUtilization(
+      response.headers.get("anthropic-ratelimit-unified-7d_sonnet-utilization"),
+    );
+    if (fiveHour === undefined && sevenDay === undefined && sevenDaySonnet === undefined) return null;
+
+    const claim = response.headers.get("anthropic-ratelimit-unified-representative-claim")?.toLowerCase();
+    const claimedTier = claim === "five_hour" || claim === "seven_day" || claim === "seven_day_sonnet"
+      ? claim
+      : undefined;
+    const createTier = (key: string, utilization: number | undefined) => utilization === undefined
+      ? null
+      : {
+        utilization,
+        resets_at: utilization === 100 && (claimedTier === undefined || claimedTier === key) ? resetAt : null,
+      };
+
+    return {
+      five_hour: createTier("five_hour", fiveHour),
+      seven_day: createTier("seven_day", sevenDay),
+      seven_day_sonnet: createTier("seven_day_sonnet", sevenDaySonnet),
+    };
+  }
+
   function getResetMsFromUsage(account: ManagedAccount): number | null {
     const usage = account.cachedUsage;
     if (!usage) return null;
@@ -106,7 +149,7 @@ export function createRateLimitHandlers(dependencies: RateLimitDependencies) {
       if (ms > 0) candidates.push(ms);
     }
 
-    return candidates.length > 0 ? Math.min(...candidates) : null;
+    return candidates.length > 0 ? Math.max(...candidates) : null;
   }
 
   async function fetchUsageLimits(accessToken: string, accountId?: string): Promise<UsageLimits | null> {
@@ -130,11 +173,21 @@ export function createRateLimitHandlers(dependencies: RateLimitDependencies) {
     const nonSubscriptionClaim = response.headers.get("anthropic-ratelimit-unified-representative-claim");
     const shouldQuarantineBillingClaim = isNonSubscriptionBillingClaim(nonSubscriptionClaim);
     const hasNonExhaustedQuota = hasNonExhaustedClaudeQuota(response);
+    const retryAfterMs = retryAfterMsFromResponse(response);
+    const providerReset = !shouldQuarantineBillingClaim && !hasNonExhaustedQuota
+      ? claudeUnifiedResetFromResponse(response)
+      : null;
+    const providerResetMs = providerReset?.resetMs ?? null;
+    const cachedResetMs = providerResetMs === null ? getResetMsFromUsage(account) : null;
     const resetMs = shouldQuarantineBillingClaim
-      ? Math.max(retryAfterMsFromResponse(response), NON_SUBSCRIPTION_BILLING_BACKOFF_MS)
+      ? Math.max(retryAfterMs, NON_SUBSCRIPTION_BILLING_BACKOFF_MS)
       : hasNonExhaustedQuota
-        ? retryAfterMsFromResponse(response)
-        : getResetMsFromUsage(account) ?? retryAfterMsFromResponse(response);
+        ? retryAfterMs
+        : Math.max(providerResetMs ?? cachedResetMs ?? 0, retryAfterMs);
+    if (providerReset) {
+      const providerUsage = claudeUsageFromResponse(response, providerReset.resetAt);
+      if (providerUsage) await manager.applyUsageCache(account.uuid, providerUsage);
+    }
     await manager.markRateLimited(account.uuid, resetMs);
 
     if (shouldQuarantineBillingClaim) {
@@ -148,7 +201,7 @@ export function createRateLimitHandlers(dependencies: RateLimitDependencies) {
       return;
     }
 
-    const shouldFetchUsage = !hasNonExhaustedQuota && account.accessToken
+    const shouldFetchUsage = !hasNonExhaustedQuota && providerResetMs === null && account.accessToken
       && (!account.cachedUsageAt || Date.now() - account.cachedUsageAt > USAGE_FETCH_COOLDOWN_MS);
 
     if (shouldFetchUsage) {

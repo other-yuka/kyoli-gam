@@ -8,6 +8,7 @@ import type {
   ProviderId,
   ProviderUsageRefreshResult,
 } from "./index";
+import { isCurrentlyRateLimitCoolingDown } from "./account-state";
 import {
   isQuotaWindowActive,
   normalizeRatioUsagePercent,
@@ -200,6 +201,7 @@ function shouldRecoverAccountState(account: AccountRecord): boolean {
   if (!account.rateLimitResetAt && !account.rateLimitCooldownUntil && account.lastFailureClass !== "quota") {
     return false;
   }
+  if (isCurrentlyRateLimitCoolingDown(account)) return false;
   return hasNoExhaustedUsageWindow(account.metadata.cachedUsage, account.provider) ||
     hasNoExhaustedUsageWindow(account.metadata.usage, account.provider);
 }

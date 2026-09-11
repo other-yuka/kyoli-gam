@@ -34,9 +34,15 @@ export function isCurrentlyAuthCoolingDown(account: AccountRecord, now = Date.no
   return cooldownUntil !== undefined && cooldownUntil > now;
 }
 
+export function isCurrentlyRateLimitCoolingDown(account: AccountRecord, now = Date.now()): boolean {
+  const cooldownUntil = readIsoMs(account.rateLimitCooldownUntil);
+  return cooldownUntil !== undefined && cooldownUntil > now;
+}
+
 export function shouldRecoverRateLimitBlock(account: AccountRecord, now = Date.now()): boolean {
   if (!account.rateLimitBlockedAt && !account.rateLimitResetAt) return false;
   if (account.reauthRequiredReason || isCurrentlyAuthCoolingDown(account, now)) return false;
+  if (isCurrentlyRateLimitCoolingDown(account, now)) return false;
 
   const resetAt = readIsoMs(account.rateLimitResetAt);
   if (resetAt !== undefined && resetAt <= now) return true;
@@ -51,10 +57,8 @@ export function readRateLimitRetryAt(account: AccountRecord): string | undefined
 function hasUnrecoveredRateLimitBlock(account: AccountRecord, now: number): boolean {
   if (!account.rateLimitBlockedAt) return false;
   if (account.lastFailureClass !== "rate_limit" && account.lastFailureClass !== "quota") return false;
+  if (isCurrentlyRateLimitCoolingDown(account, now)) return true;
   if (hasFreshAvailableUsageAfterBlock(account, now)) return false;
-
-  const cooldownUntil = readIsoMs(account.rateLimitCooldownUntil);
-  if (cooldownUntil !== undefined && cooldownUntil > now) return true;
   return !account.rateLimitResetAt;
 }
 

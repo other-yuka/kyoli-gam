@@ -56,7 +56,7 @@ describe("rate-limit", () => {
     expect(retryAfterMsFromResponse(response)).toBe(60_000);
   });
 
-  test("getResetMsFromUsage returns minimum positive reset from usage", () => {
+  test("getResetMsFromUsage returns the latest exhausted reset from usage", () => {
     const now = 1_700_000_000_000;
     const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
     const account = createAccount({
@@ -67,7 +67,7 @@ describe("rate-limit", () => {
       },
     });
 
-    expect(getResetMsFromUsage(account)).toBe(15_000);
+    expect(getResetMsFromUsage(account)).toBe(30_000);
     nowSpy.mockRestore();
   });
 

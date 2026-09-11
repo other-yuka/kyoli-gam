@@ -48,7 +48,7 @@ describe("core/rate-limit", () => {
     expect(handlers.retryAfterMsFromResponse(response)).toBe(2345);
   });
 
-  test("uses usage reset time when available", async () => {
+  test("waits for every exhausted cached usage window", async () => {
     const now = 1_700_000_000_000;
     const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
 
@@ -81,7 +81,7 @@ describe("core/rate-limit", () => {
       new Response("", { status: 429, headers: { "retry-after-ms": "5000" } }),
     );
 
-    expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", 10_000);
+    expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", 25_000);
     expect(fetchUsage).toHaveBeenCalledWith("access-1", "acct-id-1");
     expect(manager.applyUsageCache).toHaveBeenCalledWith("acct-1", usage);
     expect(showToast).toHaveBeenCalledTimes(1);
@@ -163,6 +163,93 @@ describe("core/rate-limit", () => {
     expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", 60_000);
     expect(fetchUsage).not.toHaveBeenCalled();
     expect(manager.applyUsageCache).not.toHaveBeenCalled();
+    nowSpy.mockRestore();
+  });
+
+  test("preserves a provider reset for an exhausted unknown Claude claim", async () => {
+    const now = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const resetSeconds = Math.floor(now / 1000) + 3600;
+    const account = createAccount({
+      cachedUsage: {
+        five_hour: { utilization: 100, resets_at: new Date(now + 12 * 60 * 60 * 1000).toISOString() },
+        seven_day: { utilization: 40, resets_at: null },
+        seven_day_sonnet: null,
+      },
+      cachedUsageAt: now - 60_000,
+    });
+    fetchUsage.mockResolvedValue({
+      ok: true,
+      data: {
+        five_hour: { utilization: 20, resets_at: null },
+        seven_day: null,
+        seven_day_sonnet: null,
+      },
+    });
+    const manager = {
+      markRateLimited: vi.fn(async () => {}),
+      applyUsageCache: vi.fn(async () => {}),
+      getAccountCount: vi.fn(() => 2),
+    };
+
+    await handlers.handleRateLimitResponse(
+      manager,
+      createClient(),
+      account,
+      new Response("", {
+        status: 429,
+        headers: {
+          "anthropic-ratelimit-unified-5h-utilization": "1",
+          "anthropic-ratelimit-unified-7d-utilization": "0.42",
+          "anthropic-ratelimit-unified-representative-claim": "mystery_window",
+          "anthropic-ratelimit-unified-reset": String(resetSeconds),
+          "retry-after": "60",
+        },
+      }),
+    );
+
+    expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", 3_600_000);
+    expect(fetchUsage).not.toHaveBeenCalled();
+    expect(manager.applyUsageCache).toHaveBeenCalledWith("acct-1", {
+      five_hour: { utilization: 100, resets_at: new Date(now + 3_600_000).toISOString() },
+      seven_day: { utilization: 42, resets_at: null },
+      seven_day_sonnet: null,
+    });
+    nowSpy.mockRestore();
+  });
+
+  test("preserves a Retry-After boundary later than an exhausted provider reset", async () => {
+    const now = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const resetSeconds = Math.floor(now / 1000) + 60;
+    const manager = {
+      markRateLimited: vi.fn(async () => {}),
+      applyUsageCache: vi.fn(async () => {}),
+      getAccountCount: vi.fn(() => 1),
+    };
+
+    await handlers.handleRateLimitResponse(
+      manager,
+      createClient(),
+      createAccount(),
+      new Response("", {
+        status: 429,
+        headers: {
+          "anthropic-ratelimit-unified-5h-utilization": "1",
+          "anthropic-ratelimit-unified-representative-claim": "five_hour",
+          "anthropic-ratelimit-unified-reset": String(resetSeconds),
+          "retry-after": "120",
+        },
+      }),
+    );
+
+    expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", 120_000);
+    expect(fetchUsage).not.toHaveBeenCalled();
+    expect(manager.applyUsageCache).toHaveBeenCalledWith("acct-1", {
+      five_hour: { utilization: 100, resets_at: new Date(now + 60_000).toISOString() },
+      seven_day: null,
+      seven_day_sonnet: null,
+    });
     nowSpy.mockRestore();
   });
 

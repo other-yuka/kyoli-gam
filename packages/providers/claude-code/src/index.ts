@@ -917,30 +917,43 @@ async function refreshClaudeCodeUsageForAccount(input: {
 function readClaudeCodeRateLimitResetAt(headers: Headers): string | undefined {
   const claim = headers.get("anthropic-ratelimit-unified-representative-claim")?.toLowerCase();
   const utilization = claim ? claudeClaimUtilization(headers, claim) : undefined;
-  const reset = headers.get("anthropic-ratelimit-unified-reset");
-  if (reset && utilization === 100) {
-    const seconds = Number.parseInt(reset, 10);
-    if (Number.isFinite(seconds) && seconds > 0) return new Date(seconds * 1000).toISOString();
+  const unifiedResetAt = readUnifiedResetAt(headers);
+  const unclaimedExhausted = isUnmappedClaudeQuotaClaim(headers, claim) && hasExhaustedClaudeUtilization(headers);
+  const exhaustedResetAt = unifiedResetAt && (utilization === 100 || unclaimedExhausted)
+    ? unifiedResetAt
+    : undefined;
+  const retryAfterAt = readRetryAfterAt(headers);
+  if (exhaustedResetAt && retryAfterAt) {
+    return Date.parse(exhaustedResetAt) >= Date.parse(retryAfterAt) ? exhaustedResetAt : retryAfterAt;
   }
-
-  const retryAfter = headers.get("retry-after");
-  if (retryAfter) {
-    const retryAfterSeconds = Number.parseInt(retryAfter, 10);
-    if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0) {
-      return new Date(Date.now() + retryAfterSeconds * 1000).toISOString();
-    }
-    const retryAfterDate = new Date(retryAfter);
-    if (!Number.isNaN(retryAfterDate.getTime())) return retryAfterDate.toISOString();
-  }
+  if (exhaustedResetAt) return exhaustedResetAt;
+  if (retryAfterAt) return retryAfterAt;
 
   const hasRateLimitSignal = Boolean(
     headers.get("anthropic-ratelimit-unified-status")
-      || reset
+      || headers.get("anthropic-ratelimit-unified-reset")
       || headers.get("anthropic-ratelimit-unified-5h-utilization")
       || headers.get("anthropic-ratelimit-unified-7d-utilization")
       || claim,
   );
   return hasRateLimitSignal ? new Date(Date.now() + 60_000).toISOString() : undefined;
+}
+
+function readRetryAfterAt(headers: Headers): string | undefined {
+  const retryAfter = headers.get("retry-after");
+  if (!retryAfter) return undefined;
+
+  const trimmedRetryAfter = retryAfter.trim();
+  const retryAfterSeconds = /^\d+$/.test(trimmedRetryAfter)
+    ? Number(trimmedRetryAfter)
+    : Number.NaN;
+  if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0) {
+    const retryAt = new Date(Date.now() + retryAfterSeconds * 1000);
+    if (Number.isFinite(retryAt.getTime())) return retryAt.toISOString();
+  }
+
+  const retryAfterDate = new Date(retryAfter);
+  return Number.isNaN(retryAfterDate.getTime()) ? undefined : retryAfterDate.toISOString();
 }
 
 function claudeClaimUtilization(headers: Headers, claim: string): number | undefined {
@@ -954,6 +967,20 @@ function claudeClaimUtilization(headers: Headers, claim: string): number | undef
   const parsed = readUtilization(raw);
   if (parsed === undefined) return undefined;
   return parsed <= 1 ? parsed * 100 : parsed;
+}
+
+function isUnmappedClaudeQuotaClaim(headers: Headers, claim: string | undefined): boolean {
+  return !isClaudeCodeNonSubscriptionBillingClaim(claim)
+    && (!claim || claudeClaimUtilization(headers, claim) === undefined);
+}
+
+function hasExhaustedClaudeUtilization(headers: Headers): boolean {
+  for (const [name, value] of headers.entries()) {
+    if (!name.startsWith("anthropic-ratelimit-unified-") || !name.endsWith("-utilization")) continue;
+    const parsed = readUtilization(value);
+    if (parsed !== undefined && normalizeClaudeCodeHeaderUtilization(parsed) === 100) return true;
+  }
+  return false;
 }
 
 function readClaudeCodeRateLimitMetadata(headers: Headers): Record<string, unknown> {
@@ -981,19 +1008,31 @@ function parseClaudeCodeRateLimitHeaders(headers: Headers): {
   const claim = (headers.get("anthropic-ratelimit-unified-representative-claim") ?? "unknown").toLowerCase();
   const resetAt = readClaudeCodeRateLimitResetAt(headers);
   const unifiedResetAt = readUnifiedResetAt(headers);
-  const claimResetAt = claudeClaimUtilization(headers, claim) === 100 ? unifiedResetAt : undefined;
+  const claimUtilization = claudeClaimUtilization(headers, claim);
+  const claimResetAt = claimUtilization === 100 ? unifiedResetAt ?? resetAt : undefined;
+  const unclaimedExhaustedResetAt = isUnmappedClaudeQuotaClaim(headers, claim) && hasExhaustedClaudeUtilization(headers)
+    ? unifiedResetAt ?? resetAt
+    : undefined;
   const cachedUsage: Record<string, unknown> = {};
 
   if (util5h !== undefined) {
     cachedUsage.five_hour = {
       utilization: normalizeClaudeCodeHeaderUtilization(util5h),
-      resets_at: claim === "five_hour" ? claimResetAt ?? null : null,
+      resets_at: claim === "five_hour"
+        ? claimResetAt ?? null
+        : unclaimedExhaustedResetAt && normalizeClaudeCodeHeaderUtilization(util5h) === 100
+          ? unclaimedExhaustedResetAt
+          : null,
     };
   }
   if (util7d !== undefined) {
     cachedUsage.seven_day = {
       utilization: normalizeClaudeCodeHeaderUtilization(util7d),
-      resets_at: claim === "seven_day" ? claimResetAt ?? null : null,
+      resets_at: claim === "seven_day"
+        ? claimResetAt ?? null
+        : unclaimedExhaustedResetAt && normalizeClaudeCodeHeaderUtilization(util7d) === 100
+          ? unclaimedExhaustedResetAt
+          : null,
     };
   }
 
@@ -1002,9 +1041,14 @@ function parseClaudeCodeRateLimitHeaders(headers: Headers): {
     if (!match?.[1]) continue;
     const utilization = readUtilization(value);
     if (utilization === undefined) continue;
+    const normalizedUtilization = normalizeClaudeCodeHeaderUtilization(utilization);
     cachedUsage[`seven_day_${match[1].toLowerCase()}`] = {
-      utilization: normalizeClaudeCodeHeaderUtilization(utilization),
-      resets_at: claim === `seven_day_${match[1].toLowerCase()}` ? claimResetAt ?? null : null,
+      utilization: normalizedUtilization,
+      resets_at: claim === `seven_day_${match[1].toLowerCase()}`
+        ? claimResetAt ?? null
+        : unclaimedExhaustedResetAt && normalizedUtilization === 100
+          ? unclaimedExhaustedResetAt
+          : null,
     };
   }
 
@@ -1025,8 +1069,12 @@ function normalizeClaudeCodeHeaderUtilization(value: number): number {
 
 function readUnifiedResetAt(headers: Headers): string | undefined {
   const reset = headers.get("anthropic-ratelimit-unified-reset");
-  const seconds = reset ? Number.parseInt(reset, 10) : Number.NaN;
-  return Number.isFinite(seconds) && seconds > 0 ? new Date(seconds * 1000).toISOString() : undefined;
+  const trimmedReset = reset?.trim() ?? "";
+  const seconds = /^\d+$/.test(trimmedReset) ? Number(trimmedReset) : Number.NaN;
+  if (!Number.isFinite(seconds) || seconds <= 0) return undefined;
+
+  const resetAt = new Date(seconds * 1000);
+  return Number.isFinite(resetAt.getTime()) ? resetAt.toISOString() : undefined;
 }
 
 function resolvePacingOptions(
@@ -1311,16 +1359,16 @@ function describeClaudeCodeRateLimit(headers: Headers): string {
   const util7d = readUtilization(headers.get("anthropic-ratelimit-unified-7d-utilization"));
   const resetAt = readClaudeCodeRateLimitResetAt(headers);
 
-  if (util5h !== undefined) parts.push(`5h utilization: ${Math.round(util5h * 100)}%`);
-  if (util7d !== undefined) parts.push(`7d utilization: ${Math.round(util7d * 100)}%`);
+  if (util5h !== undefined) parts.push(`5h utilization: ${Math.round(normalizeClaudeCodeHeaderUtilization(util5h))}%`);
+  if (util7d !== undefined) parts.push(`7d utilization: ${Math.round(normalizeClaudeCodeHeaderUtilization(util7d))}%`);
   if (resetAt) parts.push(`resets in ${formatMinutesUntil(resetAt)}m`);
   return parts.join(". ");
 }
 
 function readUtilization(value: string | null | undefined): number | undefined {
-  if (!value) return undefined;
-  const parsed = Number.parseFloat(value);
-  return Number.isFinite(parsed) ? parsed : undefined;
+  if (value == null || value.trim() === "") return undefined;
+  const parsed = Number(value.trim());
+  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 100 ? parsed : undefined;
 }
 
 function formatMinutesUntil(iso: string): number {
