@@ -23,6 +23,7 @@ import {
   CLAUDE_SONNET_1M_MODEL_ID,
   CLAUDE_SONNET_MODEL_ID,
   describeSuspendedClaudeCodeModel,
+  isClaudeCodeBetaAllowedForModel,
   isClaudeCode1mModelLabel,
   isClaudeFableModel,
   isSuspendedClaudeCodeModel,
@@ -1146,6 +1147,7 @@ function buildUpstreamHeaders(input: {
       input.trustClientFingerprint ? headers.get("anthropic-beta") : null,
       getClaudeCodeBetasForModel(fingerprint.anthropicBeta, input.model, input.excludedBetas),
       input.excludedBetas,
+      input.model,
     ),
   );
   upstream.set(
@@ -1465,6 +1467,7 @@ function mergeBetaHeaders(
   incoming: string | null,
   defaults: string,
   excludedBetas: Set<string> = new Set(),
+  model: string | undefined,
 ): string {
   const values = [
     ...defaults.split(","),
@@ -1474,6 +1477,7 @@ function mergeBetaHeaders(
     .filter(
       (value) =>
         value.length > 0 &&
+        isClaudeCodeBetaAllowedForModel(model, value) &&
         !excludedBetas.has(value) &&
         !BILLABLE_BETA_PREFIXES.some((prefix) => value.startsWith(prefix)),
     );

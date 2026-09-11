@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { getClaudeCodeTemplateMetadata } from "./fingerprint-template";
+import { resolveClaudeCodeModelAlias } from "./model-aliases";
 export {
   CCH_SEEDS,
   cchForBody,
@@ -32,6 +33,15 @@ export {
   toClaudeCodeWireModelId,
   type ClaudeCodeSystemPromptTemplate,
 } from "./model-aliases";
+
+export const MID_CONVERSATION_TOOL_CHANGES_BETA = "mid-conversation-tool-changes-2026-07-01";
+
+export function isClaudeCodeBetaAllowedForModel(modelId: string | undefined, beta: string): boolean {
+  if (beta !== MID_CONVERSATION_TOOL_CHANGES_BETA || !modelId) return true;
+
+  const normalizedModelId = resolveClaudeCodeModelAlias(modelId).toLowerCase();
+  return !normalizedModelId.includes("sonnet") && !normalizedModelId.includes("haiku");
+}
 
 const CLAUDE_CODE_API_BASE_URL = "https://api.anthropic.com";
 const STAINLESS_PACKAGE_VERSION = "0.81.0";
