@@ -29,7 +29,9 @@ export interface SelectedCredential {
 export type AccountFailureClass = TurnFailureClass;
 export type AccountFailurePhase = TurnFailurePhase;
 export type AccountFailureSignal = TurnFailureSignal;
-export type AccountExecutionResult = SupervisedTurnResponse;
+export interface AccountExecutionResult extends SupervisedTurnResponse {
+  effectiveCredential?: SelectedCredential;
+}
 
 export type AccountExecutionTraceEvent =
   | (AccountExecutionTraceBase & {
@@ -182,12 +184,14 @@ export async function executeWithAccountFailover(
       route: input.traceRoute,
       model: input.traceModel,
     });
-    const result = await executeWithSameAccountRetry(input, credential);
+    const execution = await executeWithSameAccountRetry(input, credential);
+    const result = execution.result;
+    const effectiveCredential = execution.credential;
     const response = result.response;
-    await recordAccountResult(input, credential, response, result.failure);
+    await recordAccountResult(input, effectiveCredential, response, result.failure);
     const retryable = shouldRetryWithNextAccount({
       status: response.status,
-      accountId: credential.accountId,
+      accountId: effectiveCredential.accountId,
       failure: result.failure,
       downstreamVisible: result.downstreamVisible,
     });
@@ -197,7 +201,7 @@ export async function executeWithAccountFailover(
       provider: input.provider,
       kind: input.kind,
       sessionKey: input.sessionKey,
-      accountId: credential.accountId,
+      accountId: effectiveCredential.accountId,
       attempt: attempt + 1,
       status: response.status,
       retryable,
@@ -208,19 +212,19 @@ export async function executeWithAccountFailover(
       model: input.traceModel,
     });
 
-    if (!retryable || !credential.accountId) {
+    if (!retryable || !effectiveCredential.accountId) {
       return cloneUpstreamResponse(response);
     }
 
     lastRetryableResponse = response;
-    excludedAccountIds.push(credential.accountId);
+    excludedAccountIds.push(effectiveCredential.accountId);
     input.onTrace?.({
       requestId,
       type: "retry",
       provider: input.provider,
       kind: input.kind,
       sessionKey: input.sessionKey,
-      accountId: credential.accountId,
+      accountId: effectiveCredential.accountId,
       attempt: attempt + 1,
       status: response.status,
       failureClass: result.failure?.class,
@@ -253,12 +257,21 @@ export async function executeWithAccountFailover(
 
 async function executeWithSameAccountRetry(
   input: ExecuteWithAccountFailoverInput,
-  credential: SelectedCredential,
-): Promise<AccountExecutionResult> {
+  selectedCredential: SelectedCredential,
+): Promise<{ result: AccountExecutionResult; credential: SelectedCredential }> {
   const maxRetries = Math.max(0, input.sameAccountMaxRetries ?? 0);
+  let credential = selectedCredential;
   for (let retry = 0; ; retry += 1) {
     const result = normalizeAccountExecutionResult(await input.execute(credential));
-    if (!shouldRetrySameAccount(result) || retry >= maxRetries) return result;
+    if (result.effectiveCredential) {
+      if (result.effectiveCredential.accountId !== selectedCredential.accountId) {
+        throw new Error("An effective credential must belong to the selected account.");
+      }
+      credential = result.effectiveCredential;
+    }
+    if (!shouldRetrySameAccount(result) || retry >= maxRetries) {
+      return { result, credential };
+    }
   }
 }
 

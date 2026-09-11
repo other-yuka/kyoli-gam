@@ -148,9 +148,13 @@ export class UsageRefreshService {
         return false;
       }
 
+      const accountSnapshot = refreshed.accountSnapshot ?? account;
+      if (accountSnapshot.id !== account.id) {
+        throw new Error("A usage refresh snapshot must belong to the refreshed account.");
+      }
       const updated = await this.options.accounts.update(
         account.id,
-        createAccountRefreshUpdate(account, refreshed, {
+        createAccountRefreshUpdate(accountSnapshot, refreshed, {
           usageObservedAt: usageRefreshStartedAt,
           recoverRateLimitState: true,
         }),

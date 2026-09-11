@@ -174,6 +174,10 @@ interface CodexOAuthRefreshEntry {
   result: Promise<CodexTokenRefreshResult>;
   participants: number;
 }
+interface CodexOAuthRefreshResult {
+  refreshed: CodexTokenRefreshResult;
+  persistedAccount?: AccountRecord;
+}
 const codexOAuthRefreshesByGrant = new Map<string, CodexOAuthRefreshEntry>();
 class CodexOAuthPersistenceError extends Error {
   constructor(readonly originalError: unknown) {
@@ -923,9 +927,11 @@ async function handleAdmittedCompactRequest(input: {
         });
 
       let currentCredential = credential;
+      const complete = (result: Response | AccountExecutionResult) =>
+        withEffectiveCredential(result, currentCredential);
       let response = await postCompact(currentCredential);
       if (await isCompactBudgetExhaustedResponse(response)) {
-        return compactBudgetExhaustedResult(response);
+        return complete(compactBudgetExhaustedResult(response));
       }
       if (response.status === 401 && currentCredential.accountId) {
         const refreshed = await refreshOAuthCredentialForAccount({
@@ -937,22 +943,22 @@ async function handleAdmittedCompactRequest(input: {
           currentCredential = refreshed;
           response = await postCompact(currentCredential);
           if (await isCompactBudgetExhaustedResponse(response)) {
-            return compactBudgetExhaustedResult(response);
+            return complete(compactBudgetExhaustedResult(response));
           }
         }
       }
-      if (!isRetryableCompactStatus(response.status)) return response;
+      if (!isRetryableCompactStatus(response.status)) return complete(response);
       await sleep(input.options.compactRetryDelayMs ?? 250);
       response = await postCompact(currentCredential);
       if (await isCompactBudgetExhaustedResponse(response)) {
-        return compactBudgetExhaustedResult(response);
+        return complete(compactBudgetExhaustedResult(response));
       }
-      if (!isRetryableCompactStatus(response.status)) return response;
-      return {
+      if (!isRetryableCompactStatus(response.status)) return complete(response);
+      return complete({
         response,
         downstreamVisible: false,
         failure: await compactRetryExhaustedFailure(response),
-      };
+      });
     },
     failureMessage: (status) => `Codex compact upstream returned ${status}`,
     readRateLimitResetAt: readCodexRateLimitResetAt,
@@ -1175,7 +1181,19 @@ async function fetchCodexJsonWithAuthRefresh(input: {
       response = await fetchCodexJsonRequest(input, currentCredential);
     }
   }
-  return input.normalizeStartupFailure ? superviseCodexResponseStartup(response) : response;
+  const result = input.normalizeStartupFailure
+    ? await superviseCodexResponseStartup(response)
+    : response;
+  return withEffectiveCredential(result, currentCredential);
+}
+
+function withEffectiveCredential(
+  result: Response | AccountExecutionResult,
+  credential: SelectedCredential,
+): AccountExecutionResult {
+  return result instanceof Response
+    ? { response: result, effectiveCredential: credential }
+    : { ...result, effectiveCredential: credential };
 }
 
 function fetchCodexJsonRequest(
@@ -1660,8 +1678,8 @@ function collectImageBase64(value: unknown, found: string[]): void {
 async function refreshCodexOAuthTokenCoalesced(input: {
   refreshToken: string;
   tokenRefresh: CodexTokenRefresh;
-  persist: (refreshed: CodexTokenRefreshResult) => Promise<void>;
-}): Promise<CodexTokenRefreshResult> {
+  persist: (refreshed: CodexTokenRefreshResult) => Promise<AccountRecord | undefined>;
+}): Promise<CodexOAuthRefreshResult> {
   const grantFingerprint = createHash("sha256").update(input.refreshToken).digest("hex");
   let entry = codexOAuthRefreshesByGrant.get(grantFingerprint);
   if (!entry) {
@@ -1676,11 +1694,11 @@ async function refreshCodexOAuthTokenCoalesced(input: {
   try {
     const refreshed = await entry.result;
     try {
-      await input.persist(refreshed);
+      const persistedAccount = await input.persist(refreshed);
+      return { refreshed, persistedAccount };
     } catch (error) {
       throw new CodexOAuthPersistenceError(error);
     }
-    return refreshed;
   } finally {
     entry.participants -= 1;
     if (
@@ -1720,14 +1738,14 @@ async function persistCodexOAuthRefresh(
   account: AccountRecord,
   refreshToken: string,
   refreshed: CodexTokenRefreshResult,
-): Promise<void> {
-  if (!accounts) return;
+): Promise<AccountRecord | undefined> {
+  if (!accounts) return undefined;
   const refreshedFields = codexOAuthRefreshedFields(account, refreshToken, refreshed);
   const updated = await accounts.update(
     account.id,
     createAccountRefreshUpdate(account, refreshedFields),
   );
-  if (updated) return;
+  if (updated) return updated;
 
   const current = (await accounts.listByProvider(account.provider))
     .find((candidate) => candidate.id === account.id);
@@ -1737,7 +1755,7 @@ async function persistCodexOAuthRefresh(
       toPersistedCredentialShape(current.credentials),
       toPersistedCredentialShape(refreshedFields.credentials),
     )
-  ) return;
+  ) return current;
   throw new CodexAccountCredentialsChangedError();
 }
 
@@ -1777,18 +1795,18 @@ async function readOAuthCredential(input: {
   let accessToken = readString(account.credentials.accessToken);
   let expiresAt = readNumber(account.credentials.expiresAt);
   let chatgptAccountId = readString(account.credentials.accountId);
+  let credentialAccount = account;
 
   if (!refreshToken && !accessToken) return undefined;
 
   if (!accessToken || !expiresAt || expiresAt <= Date.now() + TOKEN_EXPIRY_BUFFER_MS) {
     if (!refreshToken) return undefined;
 
-    const refreshed = await refreshCodexOAuthTokenCoalesced({
+    const refresh = await refreshCodexOAuthTokenCoalesced({
       refreshToken,
       tokenRefresh: input.tokenRefresh,
-      persist: async (result) => {
-        await persistCodexOAuthRefresh(input.accounts, account, refreshToken, result);
-      },
+      persist: (result) =>
+        persistCodexOAuthRefresh(input.accounts, account, refreshToken, result),
     }).catch(async (error) => {
       if (error instanceof CodexOAuthPersistenceError) throw error.originalError;
       await input.accounts?.recordFailure(account.id, {
@@ -1797,15 +1815,16 @@ async function readOAuthCredential(input: {
       });
       throw new CredentialUnavailableError("Codex OAuth token refresh failed", account.id);
     });
-    accessToken = refreshed.accessToken;
-    expiresAt = refreshed.expiresAt;
-    chatgptAccountId = refreshed.accountId ?? chatgptAccountId;
+    accessToken = refresh.refreshed.accessToken;
+    expiresAt = refresh.refreshed.expiresAt;
+    chatgptAccountId = refresh.refreshed.accountId ?? chatgptAccountId;
+    credentialAccount = refresh.persistedAccount ?? credentialAccount;
   }
 
   return {
     value: accessToken,
     accountId: account.id,
-    rateLimitRevision: captureRateLimitRevision(account),
+    rateLimitRevision: captureRateLimitRevision(credentialAccount),
     chatgptAccountId,
     selectionDiagnostics: selection?.diagnostics as Record<string, unknown> | undefined,
   };
@@ -1823,12 +1842,11 @@ async function refreshOAuthCredentialForAccount(input: {
   const refreshToken = readString(account.credentials.refreshToken);
   if (!refreshToken) return undefined;
 
-  const refreshed = await refreshCodexOAuthTokenCoalesced({
+  const refresh = await refreshCodexOAuthTokenCoalesced({
     refreshToken,
     tokenRefresh: input.tokenRefresh,
-    persist: async (result) => {
-      await persistCodexOAuthRefresh(input.accounts, account, refreshToken, result);
-    },
+    persist: (result) =>
+      persistCodexOAuthRefresh(input.accounts, account, refreshToken, result),
   }).catch(async (error) => {
     if (error instanceof CodexOAuthPersistenceError) throw error.originalError;
     await input.accounts?.recordFailure(account.id, {
@@ -1837,14 +1855,14 @@ async function refreshOAuthCredentialForAccount(input: {
     });
     return undefined;
   });
-  if (!refreshed) return undefined;
+  if (!refresh) return undefined;
 
-  const chatgptAccountId = refreshed.accountId ?? readString(account.credentials.accountId);
+  const chatgptAccountId = refresh.refreshed.accountId ?? readString(account.credentials.accountId);
 
   return {
-    value: refreshed.accessToken,
+    value: refresh.refreshed.accessToken,
     accountId: account.id,
-    rateLimitRevision: captureRateLimitRevision(account),
+    rateLimitRevision: captureRateLimitRevision(refresh.persistedAccount ?? account),
     chatgptAccountId,
   };
 }
@@ -1862,20 +1880,20 @@ async function refreshCodexUsageForAccount(input: {
     readString(input.account.metadata.accountId);
   let credentials = input.account.credentials;
   let metadata = input.account.metadata;
+  let accountSnapshot = input.account;
   const refreshTokenForUsage = () => {
     if (!refreshToken) throw new Error("Codex account has no refresh token for usage refresh.");
     const currentRefreshToken = refreshToken;
     return refreshCodexOAuthTokenCoalesced({
       refreshToken: currentRefreshToken,
       tokenRefresh: input.tokenRefresh,
-      persist: async (result) => {
-        await persistCodexOAuthRefresh(
+      persist: (result) =>
+        persistCodexOAuthRefresh(
           input.accounts,
-          { ...input.account, credentials, metadata },
+          { ...accountSnapshot, credentials, metadata },
           currentRefreshToken,
           result,
-        );
-      },
+        ),
     });
   };
 
@@ -1892,11 +1910,11 @@ async function refreshCodexUsageForAccount(input: {
       };
     }
 
-    const refreshed = await refreshTokenForUsage().catch((error) => {
+    const refresh = await refreshTokenForUsage().catch((error) => {
       if (error instanceof CodexOAuthPersistenceError) throw error.originalError;
       return { error: codexOAuthRefreshFailureInput(error) };
     });
-    if ("error" in refreshed) {
+    if ("error" in refresh) {
       if (shouldBackfillAccountId && accessToken) {
         // Account id backfill is opportunistic for usage refresh. WHAM usage can
         // still work without ChatGPT-Account-Id, so keep valid access-token
@@ -1904,12 +1922,14 @@ async function refreshCodexUsageForAccount(input: {
       } else {
         return {
           ok: false,
-          status: refreshed.error.status,
-          message: refreshed.error.message,
+          status: refresh.error.status,
+          message: refresh.error.message,
           reauthRequiredReason: "Codex OAuth token refresh failed",
         };
       }
     } else {
+      const refreshed = refresh.refreshed;
+      accountSnapshot = refresh.persistedAccount ?? accountSnapshot;
       accessToken = refreshed.accessToken;
       expiresAt = refreshed.expiresAt;
       chatgptAccountId = refreshed.accountId ?? chatgptAccountId;
@@ -1943,11 +1963,13 @@ async function refreshCodexUsageForAccount(input: {
     error: error instanceof CodexUsageFetchError ? error : new CodexUsageFetchError(0, error instanceof Error ? error.message : String(error)),
   }));
   if ("error" in usage && usage.error.status === 401 && refreshToken) {
-    const refreshed = await refreshTokenForUsage().catch((error) => {
+    const refresh = await refreshTokenForUsage().catch((error) => {
       if (error instanceof CodexOAuthPersistenceError) throw error.originalError;
       return { error: codexOAuthRefreshFailureInput(error) };
     });
-    if (!("error" in refreshed)) {
+    if (!("error" in refresh)) {
+      const refreshed = refresh.refreshed;
+      accountSnapshot = refresh.persistedAccount ?? accountSnapshot;
       accessToken = refreshed.accessToken;
       chatgptAccountId = refreshed.accountId ?? chatgptAccountId;
       refreshToken = refreshed.refreshToken ?? refreshToken;
@@ -1983,6 +2005,7 @@ async function refreshCodexUsageForAccount(input: {
 
   return {
     ok: true,
+    accountSnapshot,
     credentials,
     metadata: {
       ...metadata,

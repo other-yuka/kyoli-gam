@@ -5,9 +5,77 @@ import {
   type SelectedCredential,
 } from "../src/provider-executor";
 import { StickyAccountPool } from "../src/account-pool";
-import { MemoryAccountStore, captureRateLimitRevision } from "../src/accounts";
+import {
+  MemoryAccountStore,
+  captureRateLimitRevision,
+  createAccountRefreshUpdate,
+} from "../src/accounts";
 
 describe("executeWithAccountFailover", () => {
+  it("uses a refreshed credential for same-account retry and success recording", async () => {
+    const store = new MemoryAccountStore();
+    const account = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: { accessToken: "old-token", refreshToken: "old-refresh" },
+    });
+    await store.recordFailure(account.id, {
+      status: 500,
+      message: "earlier server failure",
+      failureClass: "transient",
+    });
+    const refreshedAccount = await store.update(account.id, createAccountRefreshUpdate(account, {
+      credentials: { accessToken: "new-token", refreshToken: "new-refresh" },
+    }));
+    if (!refreshedAccount) throw new Error("Expected refreshed account");
+    const attemptedTokens: string[] = [];
+
+    const response = await executeWithAccountFailover({
+      provider: "codex",
+      kind: "oauth",
+      accounts: new StickyAccountPool(store),
+      configuredCredential: {
+        value: "old-token",
+        accountId: account.id,
+        rateLimitRevision: captureRateLimitRevision(account),
+      },
+      sessionKey: "refreshed-credential-retry",
+      maxAttempts: 1,
+      sameAccountMaxRetries: 1,
+      missingCredentialResponse: () => new Response("missing", { status: 401 }),
+      failureMessage: (status) => `failed ${status}`,
+      selectCredential: async () => undefined,
+      execute: async (credential) => {
+        attemptedTokens.push(credential.value);
+        if (attemptedTokens.length === 1) {
+          return {
+            response: new Response("retry", { status: 503 }),
+            downstreamVisible: false,
+            failure: {
+              class: "transient",
+              phase: "startup",
+              httpStatus: 503,
+              retryScope: "same_account",
+            },
+            effectiveCredential: {
+              value: "new-token",
+              accountId: account.id,
+              rateLimitRevision: captureRateLimitRevision(refreshedAccount),
+            },
+          };
+        }
+        return new Response("ok", { status: 200 });
+      },
+    });
+
+    expect(response.status).toBe(200);
+    expect(attemptedTokens).toEqual(["old-token", "new-token"]);
+    await expect(store.get(account.id)).resolves.toMatchObject({
+      failureCount: 0,
+      lastFailureClass: undefined,
+    });
+  });
+
   it("tries more than three accounts by default", async () => {
     const attempts: string[] = [];
     const credentials = Array.from({ length: 4 }, (_, index) => ({

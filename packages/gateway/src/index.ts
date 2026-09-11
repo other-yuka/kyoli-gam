@@ -1172,7 +1172,16 @@ async function refreshAccountUsageFromProvider(
     };
   }
 
-  const updated = await accounts.update(account.id, createAccountRefreshUpdate(account, result, {
+  const accountSnapshot = result.accountSnapshot ?? account;
+  if (accountSnapshot.id !== account.id) {
+    return {
+      ok: false,
+      account: await accounts.get(account.id) ?? account,
+      message: "Usage refresh returned a snapshot for a different account.",
+      status: 409,
+    };
+  }
+  const updated = await accounts.update(account.id, createAccountRefreshUpdate(accountSnapshot, result, {
     usageObservedAt,
     recoverRateLimitState: true,
   }));
