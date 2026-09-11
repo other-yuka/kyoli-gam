@@ -22,10 +22,10 @@
     "release": "pnpm run build && changeset publish"
   },
   "devDependencies": {
-    "@changesets/changelog-github": "^1.0.0",
-    "@changesets/cli": "^3.0.0",
+    "@changesets/changelog-github": "^1.0.1",
+    "@changesets/cli": "^3.0.2",
     "tsup": "^8.5.1",
-    "tsx": "^4.23.12",
+    "tsx": "^4.23.13",
     "turbo": "^2.10.12",
     "vitest": "^4.1.11"
   }
