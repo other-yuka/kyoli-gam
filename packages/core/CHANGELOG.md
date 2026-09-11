@@ -1,5 +1,13 @@
 # @kyoli-gam/core
 
+## 0.0.96
+
+### Patch Changes
+
+- [#453](https://github.com/other-yuka/kyoli-gam/pull/453) [`33c308c`](https://github.com/other-yuka/kyoli-gam/commit/33c308c0d99988de5892afafb87841d1be034086) Thanks [@other-yuka](https://github.com/other-yuka)! - Use active quota windows, provider utilization claims, and distinct Retry-After cooldowns for Claude rate limits. Prevent stale success and usage results from restoring cleared limits across shared and gateway account paths.
+- Updated dependencies [[`33c308c`](https://github.com/other-yuka/kyoli-gam/commit/33c308c0d99988de5892afafb87841d1be034086)]:
+  - opencode-multi-account-core@0.3.29
+
 ## 0.0.95
 
 ### Patch Changes
