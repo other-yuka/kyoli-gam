@@ -244,7 +244,7 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       const usage = account.cachedUsage;
       if (!usage) return false;
 
-      return readUsageTiers(usage).some((tier) =>
+      return readAccountWideUsageTiers(usage).some((tier) =>
         tier.hasUtilization && tier.utilization >= threshold,
       );
     }
@@ -265,7 +265,7 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       if (!usage) return false;
 
       const now = Date.now();
-      return readUsageTiers(usage).some((tier) => {
+      return readAccountWideUsageTiers(usage).some((tier) => {
         const utilization = normalizeUsagePercent(tier.utilization);
         return utilization === 100
           && tier.resetAt != null
@@ -315,7 +315,7 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       const now = Date.now();
       const candidates: number[] = [];
 
-      for (const tier of readUsageTiers(usage)) {
+      for (const tier of readAccountWideUsageTiers(usage)) {
         if (tier.hasUtilization && tier.utilization >= 100 && tier.resetAt != null) {
           const ms = Date.parse(tier.resetAt) - now;
           if (ms > 0) candidates.push(ms);
@@ -580,7 +580,7 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       const usage = account.cachedUsage;
       if (!usage) return 65;
 
-      const utilizations = readUsageTiers(usage)
+      const utilizations = readAccountWideUsageTiers(usage)
         .filter((tier) => tier.hasUtilization)
         .map((tier) => tier.utilization);
 
@@ -694,7 +694,7 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
     async applyUsageCache(uuid: string, usage: UsageLimits): Promise<void> {
       await this.store.mutateAccount(uuid, (account) => {
         const now = Date.now();
-        const exhaustedTierResetTimes = readUsageTiers(usage)
+        const exhaustedTierResetTimes = readAccountWideUsageTiers(usage)
           .flatMap((tier) => {
             const utilization = normalizeUsagePercent(tier.utilization);
             if (utilization !== 100 || tier.resetAt == null || !isQuotaWindowActive(tier.resetAt, now)) {
@@ -911,7 +911,7 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
   };
 }
 
-function readUsageTiers(usage: UsageLimits | undefined): ManagedUsageTier[] {
+function readAccountWideUsageTiers(usage: UsageLimits | undefined): ManagedUsageTier[] {
   if (!usage) return [];
 
   return [
@@ -943,5 +943,5 @@ function readRoutingUsageTiers(usage: UsageLimits | undefined): ManagedUsageTier
       resetAt: usage.seven_day_sonnet.resets_at,
     }];
 
-  return [...readUsageTiers(usage), ...sonnetTier];
+  return [...readAccountWideUsageTiers(usage), ...sonnetTier];
 }
