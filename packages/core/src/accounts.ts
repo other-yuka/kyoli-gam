@@ -581,9 +581,11 @@ function updateAccountRecord(
 ): AccountRecord {
   const nowMs = Date.now();
   const previousUsageBoundary = readUsageRateLimitBoundary(existing.metadata, nowMs);
-  const credentials = input.credentials ?? existing.credentials;
-  const credentialsReplaced = input.credentials !== undefined
-    && hasCredentialGenerationChanged(existing.credentials, input.credentials);
+  const baseCredentials = input.credentials ?? existing.credentials;
+  const credentials = input.credentialsPatch
+    ? { ...baseCredentials, ...input.credentialsPatch }
+    : baseCredentials;
+  const credentialUpdateKind = classifyCredentialUpdate(existing.credentials, credentials, input);
   const metadata = input.metadata ?? existing.metadata;
   const metadataPatched = input.metadataPatch
     ? { ...metadata, ...input.metadataPatch }
@@ -596,9 +598,7 @@ function updateAccountRecord(
     ...existing,
     name: input.name ?? existing.name,
     enabled: input.enabled ?? existing.enabled,
-    credentials: input.credentialsPatch
-      ? { ...credentials, ...input.credentialsPatch }
-      : credentials,
+    credentials,
     metadata: metadataMergePatch
       ? applyRecordMergePatch(metadataPatched, metadataMergePatch)
       : metadataPatched,
@@ -618,14 +618,20 @@ function updateAccountRecord(
     reauthRequiredReason: existing.reauthRequiredReason,
     updatedAt: new Date(nowMs).toISOString(),
   };
-  if (credentialsReplaced) {
+  if (credentialUpdateKind === "replacement") {
     return recoverAccountRateLimitState(updated, { clearUsage: true, nowMs });
   }
-  if (!input.usageSnapshotGuard || hasConcurrentUsage) return updated;
+  if (!input.usageSnapshotGuard || hasConcurrentUsage) {
+    if (credentialUpdateKind === "managed-refresh") {
+      updated.rateLimitObservedAt = nextRateLimitRevision(updated.rateLimitObservedAt, nowMs);
+    }
+    return updated;
+  }
   if (input.recoverRateLimitState && shouldRecoverRateLimitStateAfterUsage(updated, nowMs)) {
     return recoverAccountRateLimitState(updated, { nowMs });
   }
-  if (previousUsageBoundary !== readUsageRateLimitBoundary(updated.metadata, nowMs)) {
+  if (credentialUpdateKind === "managed-refresh"
+    || previousUsageBoundary !== readUsageRateLimitBoundary(updated.metadata, nowMs)) {
     updated.rateLimitObservedAt = nextRateLimitRevision(updated.rateLimitObservedAt, nowMs);
   }
   return updated;
@@ -672,6 +678,26 @@ function hasCredentialGenerationChanged(
       refreshToken: replacement.refreshToken,
     }),
   );
+}
+
+type CredentialUpdateKind = "unchanged" | "managed-refresh" | "replacement";
+
+function classifyCredentialUpdate(
+  existing: Record<string, unknown>,
+  updated: Record<string, unknown>,
+  input: AccountUpdateInput,
+): CredentialUpdateKind {
+  if (!hasCredentialGenerationChanged(existing, updated)) return "unchanged";
+
+  const isManagedRefresh = input.credentials === undefined
+    && input.credentialsPatch !== undefined
+    && input.expectedCredentials !== undefined
+    && input.refreshedCredentials !== undefined
+    && isDeepStrictEqual(
+      toPersistedRecordShape(updated),
+      toPersistedRecordShape(input.refreshedCredentials),
+    );
+  return isManagedRefresh ? "managed-refresh" : "replacement";
 }
 
 function readMetadataUsageTimestamp(metadata: Record<string, unknown>): number | undefined {

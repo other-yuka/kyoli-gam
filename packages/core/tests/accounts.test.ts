@@ -12,36 +12,136 @@ import {
 } from "../src";
 
 describe("AccountStore state reset", () => {
-  it("merges credential and metadata patches into the latest SQLite account", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "kyoli-account-patch-"));
+  it.each(["memory", "sqlite"] as const)(
+    "invalidates rate-limit snapshots when a raw credential patch changes tokens in the %s store",
+    async (kind) => {
+      const dir = kind === "sqlite" ? mkdtempSync(join(tmpdir(), "kyoli-account-patch-")) : undefined;
 
-    try {
-      const store = new SQLiteAccountStore(join(dir, "kyoli.db"));
-      const account = await store.create({
-        provider: "claude-code",
-        kind: "oauth",
-        credentials: { accessToken: "old-access", refreshToken: "keep-refresh" },
-        metadata: { cachedUsageAt: 200, source: "usage-refresh" },
-      });
+      try {
+        const store = kind === "sqlite"
+          ? new SQLiteAccountStore(join(dir!, "kyoli.db"))
+          : new MemoryAccountStore();
+        const resetAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+        const account = await store.create({
+          provider: "claude-code",
+          kind: "oauth",
+          credentials: { accessToken: "old-access", refreshToken: "keep-refresh" },
+          metadata: {
+            cachedUsage: {
+              five_hour: { utilization: 100, resets_at: resetAt },
+            },
+            cachedUsageAt: 200,
+            source: "usage-refresh",
+          },
+        });
+        const blocked = await store.recordFailure(account.id, {
+          status: 429,
+          message: "rate limited",
+          rateLimitResetAt: resetAt,
+          rateLimitCooldownUntil: resetAt,
+        });
+        if (!blocked?.rateLimitObservedAt) throw new Error("Expected a rate-limit revision");
 
-      const updated = await store.update(account.id, {
-        credentialsPatch: { accessToken: "fresh-access" },
-        metadataPatch: { email: "fresh@example.test" },
-      });
+        const updated = await store.update(account.id, {
+          credentialsPatch: { accessToken: "fresh-access" },
+          metadataPatch: { email: "fresh@example.test" },
+        });
 
-      expect(updated?.credentials).toEqual({
-        accessToken: "fresh-access",
-        refreshToken: "keep-refresh",
-      });
-      expect(updated?.metadata).toEqual({
-        cachedUsageAt: 200,
-        source: "usage-refresh",
-        email: "fresh@example.test",
-      });
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
+        expect(updated?.credentials).toEqual({
+          accessToken: "fresh-access",
+          refreshToken: "keep-refresh",
+        });
+        expect(updated?.metadata).toEqual({
+          source: "usage-refresh",
+          email: "fresh@example.test",
+        });
+        expect(updated?.rateLimitResetAt).toBeUndefined();
+        expect(updated?.rateLimitBlockedAt).toBeUndefined();
+        expect(updated?.rateLimitCooldownUntil).toBeUndefined();
+        expect(updated?.rateLimitObservedAt).toBeGreaterThan(blocked.rateLimitObservedAt);
+      } finally {
+        if (dir) rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each(["memory", "sqlite"] as const)(
+    "preserves rate-limit state while a managed token refresh invalidates old requests in the %s store",
+    async (kind) => {
+      const dir = kind === "sqlite" ? mkdtempSync(join(tmpdir(), "kyoli-account-refresh-")) : undefined;
+
+      try {
+        const store = kind === "sqlite"
+          ? new SQLiteAccountStore(join(dir!, "kyoli.db"))
+          : new MemoryAccountStore();
+        const resetAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+        const usageObservedAt = Date.now();
+        const cachedUsage = {
+          five_hour: { utilization: 20, resets_at: resetAt },
+        };
+        const account = await store.create({
+          provider: "codex",
+          kind: "oauth",
+          credentials: { accessToken: "old-access", refreshToken: "old-refresh" },
+          metadata: { cachedUsage, cachedUsageAt: usageObservedAt },
+        });
+        const blocked = await store.recordFailure(account.id, {
+          status: 429,
+          message: "rate limited",
+          rateLimitResetAt: resetAt,
+          rateLimitCooldownUntil: resetAt,
+        });
+        if (!blocked?.rateLimitObservedAt) throw new Error("Expected a rate-limit revision");
+
+        const refreshedCredentials = {
+          ...blocked.credentials,
+          accessToken: "fresh-access",
+          refreshToken: "fresh-refresh",
+        };
+        const credentialRefresh = createAccountRefreshUpdate(blocked, {
+          credentials: refreshedCredentials,
+        });
+        const staleUsage = createAccountRefreshUpdate(blocked, {
+          credentials: refreshedCredentials,
+          metadata: {
+            ...blocked.metadata,
+            cachedUsage: {
+              five_hour: { utilization: 100, resets_at: resetAt },
+            },
+            cachedUsageAt: usageObservedAt + 1,
+          },
+        }, {
+          usageObservedAt: usageObservedAt + 1,
+          recoverRateLimitState: true,
+        });
+
+        const refreshed = await store.update(account.id, credentialRefresh);
+
+        expect(refreshed?.credentials).toMatchObject({
+          accessToken: "fresh-access",
+          refreshToken: "fresh-refresh",
+        });
+        expect(refreshed?.metadata.cachedUsage).toEqual(cachedUsage);
+        expect(refreshed?.rateLimitResetAt).toBe(resetAt);
+        expect(refreshed?.rateLimitCooldownUntil).toBe(resetAt);
+        expect(refreshed?.rateLimitObservedAt).toBeGreaterThan(blocked.rateLimitObservedAt);
+
+        await store.update(account.id, staleUsage);
+        await store.recordSuccess(account.id, {
+          kind: "request",
+          expectedRateLimitRevision: captureRateLimitRevision(blocked),
+        });
+
+        const persisted = await store.get(account.id);
+        expect(persisted?.metadata.cachedUsage).toEqual(cachedUsage);
+        expect(persisted?.rateLimitResetAt).toBe(resetAt);
+        expect(persisted?.rateLimitCooldownUntil).toBe(resetAt);
+        expect(persisted?.rateLimitObservedAt).toBe(refreshed?.rateLimitObservedAt);
+      } finally {
+        if (dir) rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("rejects a stale refresh result after credentials are replaced", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyoli-account-refresh-cas-"));
@@ -119,10 +219,7 @@ describe("AccountStore state reset", () => {
     });
 
     const corrected = await store.update(account.id, {
-      credentials: {
-        ...account.credentials,
-        accountId: "corrected-account-id",
-      },
+      credentialsPatch: { accountId: "corrected-account-id" },
     });
 
     expect(corrected?.credentials.accountId).toBe("corrected-account-id");
