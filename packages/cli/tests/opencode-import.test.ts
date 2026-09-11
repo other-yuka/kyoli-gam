@@ -44,6 +44,10 @@ describe("importOpenCodeAccounts", () => {
       accountId: "claude-account-1",
       deviceId: "local-device",
       localAccountUuid: "local-claude-account",
+      cachedUsage: {
+        format: "percent-v1",
+        five_hour: { utilization: 25 },
+      },
     });
   });
 

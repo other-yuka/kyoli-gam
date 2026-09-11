@@ -682,13 +682,23 @@ describe("StickyAccountPool", () => {
       provider: "claude-code",
       kind: "oauth",
       name: "one-percent",
-      metadata: { cachedUsage: { five_hour: { utilization: 1, resets_at: null } } },
+      metadata: {
+        cachedUsage: {
+          format: "percent-v1",
+          five_hour: { utilization: 1, resets_at: null },
+        },
+      },
     });
     const exhausted = await store.create({
       provider: "claude-code",
       kind: "oauth",
       name: "exhausted",
-      metadata: { cachedUsage: { five_hour: { utilization: 100, resets_at: null } } },
+      metadata: {
+        cachedUsage: {
+          format: "percent-v1",
+          five_hour: { utilization: 100, resets_at: null },
+        },
+      },
     });
     const pool = new StickyAccountPool(store, {
       strategy: "weighted",
@@ -711,13 +721,23 @@ describe("StickyAccountPool", () => {
       provider: "claude-code",
       kind: "oauth",
       name: "fractional-percent",
-      metadata: { cachedUsage: { five_hour: { utilization: 0.5, resets_at: null } } },
+      metadata: {
+        cachedUsage: {
+          format: "percent-v1",
+          five_hour: { utilization: 0.5, resets_at: null },
+        },
+      },
     });
     const overThreshold = await store.create({
       provider: "claude-code",
       kind: "oauth",
       name: "over-threshold",
-      metadata: { cachedUsage: { five_hour: { utilization: 10, resets_at: null } } },
+      metadata: {
+        cachedUsage: {
+          format: "percent-v1",
+          five_hour: { utilization: 10, resets_at: null },
+        },
+      },
     });
     const pool = new StickyAccountPool(store, {
       strategy: "round-robin",

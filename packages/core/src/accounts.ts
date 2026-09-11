@@ -12,6 +12,8 @@ import { Database } from "./sqlite";
 
 export type AccountKind = "oauth";
 
+export const CLAUDE_CODE_CACHED_USAGE_FORMAT = "percent-v1";
+
 declare const rateLimitRevisionBrand: unique symbol;
 export type RateLimitRevision = number & { readonly [rateLimitRevisionBrand]: true };
 
@@ -567,7 +569,7 @@ function createAccountRecord(input: AccountCreateInput): AccountRecord {
     name: input.name ?? `${input.provider} ${input.kind}`,
     enabled: input.enabled ?? true,
     credentials: input.credentials ?? {},
-    metadata: input.metadata ?? {},
+    metadata: normalizeAccountMetadata(input.provider, input.metadata ?? {}),
     failureCount: 0,
     consecutiveAuthFailures: 0,
     createdAt: now,
@@ -599,9 +601,12 @@ function updateAccountRecord(
     name: input.name ?? existing.name,
     enabled: input.enabled ?? existing.enabled,
     credentials,
-    metadata: metadataMergePatch
-      ? applyRecordMergePatch(metadataPatched, metadataMergePatch)
-      : metadataPatched,
+    metadata: normalizeAccountMetadata(
+      existing.provider,
+      metadataMergePatch
+        ? applyRecordMergePatch(metadataPatched, metadataMergePatch)
+        : metadataPatched,
+    ),
     failureCount: existing.failureCount,
       lastUsedAt: existing.lastUsedAt,
       lastErrorAt: existing.lastErrorAt,
@@ -886,7 +891,10 @@ function recordAccountFailure(
   return {
     ...existing,
     enabled: reauthRequiredReason ? false : existing.enabled,
-    metadata: input.metadata ? { ...existing.metadata, ...input.metadata } : existing.metadata,
+    metadata: normalizeAccountMetadata(
+      existing.provider,
+      input.metadata ? { ...existing.metadata, ...input.metadata } : existing.metadata,
+    ),
     failureCount: existing.failureCount + 1,
     lastErrorAt: now,
     rateLimitResetAt: rateLimitFailure ? input.rateLimitResetAt : existing.rateLimitResetAt,
@@ -928,7 +936,7 @@ function rowToAccount(row: AccountRow): AccountRecord {
     name: row.name,
     enabled: row.enabled === 1,
     credentials: parseJsonRecord(row.credentials_json),
-    metadata: parseJsonRecord(row.metadata_json),
+    metadata: normalizeAccountMetadata(row.provider, parseJsonRecord(row.metadata_json)),
     failureCount: row.failure_count ?? 0,
     lastUsedAt: row.last_used_at ?? undefined,
       lastErrorAt: row.last_error_at ?? undefined,
@@ -946,6 +954,33 @@ function rowToAccount(row: AccountRow): AccountRecord {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+function normalizeAccountMetadata(
+  provider: ProviderId,
+  metadata: Record<string, unknown>,
+): Record<string, unknown> {
+  if (provider !== "claude-code") return metadata;
+
+  const normalized = { ...metadata };
+  if (!isRecordValue(normalized.cachedUsage)) return normalized;
+
+  const usageFormat = normalized.cachedUsage.format;
+  if (usageFormat === CLAUDE_CODE_CACHED_USAGE_FORMAT) return normalized;
+
+  const hasUnknownFormat = usageFormat !== undefined;
+  const hasLegacyHeaderMetadata = normalized.rateLimitClaim !== undefined
+    || normalized.rateLimitStatus !== undefined;
+  if (hasUnknownFormat || hasLegacyHeaderMetadata) {
+    delete normalized.cachedUsage;
+    delete normalized.cachedUsageAt;
+    return normalized;
+  }
+
+  // Before format markers existed, OAuth and OpenCode imports already stored
+  // percentages. Only response-header snapshots carried ratios, and those
+  // always included the rate-limit claim/status metadata handled above.
+  return normalized;
 }
 
 function parseJsonRecord(value: string): Record<string, unknown> {

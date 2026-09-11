@@ -898,7 +898,16 @@ async function refreshCodexUsageForStatus(
   if (!result) return { ok: false, message: "Codex provider does not expose usage refresh." };
   if (!result.ok) return { ok: false, message: result.message, status: result.status };
 
-  const updated = await store.update(account.id, createAccountRefreshUpdate(account, result, {
+  const accountSnapshot = result.accountSnapshot ?? account;
+  if (accountSnapshot.id !== account.id) {
+    return {
+      ok: false,
+      message: "Usage refresh returned a snapshot for a different account.",
+      status: 409,
+    };
+  }
+
+  const updated = await store.update(account.id, createAccountRefreshUpdate(accountSnapshot, result, {
     usageObservedAt,
     recoverRateLimitState: true,
   }));

@@ -11,6 +11,7 @@ import type {
 } from "@kyoli-gam/core";
 import {
   CredentialUnavailableError,
+  CLAUDE_CODE_CACHED_USAGE_FORMAT,
   captureRateLimitRevision,
   createAccountRefreshUpdate,
   executeWithAccountFailover,
@@ -904,6 +905,13 @@ async function refreshClaudeCodeUsageForAccount(input: {
     };
   }
 
+  const cachedUsage = refreshed.cachedUsage === undefined
+    ? metadata.cachedUsage
+    : {
+      ...refreshed.cachedUsage,
+      format: CLAUDE_CODE_CACHED_USAGE_FORMAT,
+    };
+
   return {
     ok: true,
     credentials,
@@ -911,7 +919,7 @@ async function refreshClaudeCodeUsageForAccount(input: {
       ...metadata,
       email: refreshed.email ?? metadata.email,
       planTier: refreshed.planTier ?? metadata.planTier,
-      cachedUsage: refreshed.cachedUsage ?? metadata.cachedUsage,
+      cachedUsage,
       cachedUsageAt: refreshed.cachedUsageAt ?? metadata.cachedUsageAt,
     },
   };
@@ -997,10 +1005,18 @@ function hasExhaustedClaudeUtilization(headers: Headers): boolean {
 function readClaudeCodeRateLimitMetadata(headers: Headers): Record<string, unknown> {
   const parsed = parseClaudeCodeRateLimitHeaders(headers);
   if (!parsed) return {};
+  const hasCachedUsage = Object.keys(parsed.cachedUsage).length > 0;
 
   return {
-    cachedUsage: parsed.cachedUsage,
-    cachedUsageAt: Date.now(),
+    ...(hasCachedUsage
+      ? {
+        cachedUsage: {
+          format: CLAUDE_CODE_CACHED_USAGE_FORMAT,
+          ...parsed.cachedUsage,
+        },
+        cachedUsageAt: Date.now(),
+      }
+      : {}),
     rateLimitClaim: parsed.claim,
     rateLimitStatus: parsed.status,
     rateLimitResetAt: parsed.resetAt,

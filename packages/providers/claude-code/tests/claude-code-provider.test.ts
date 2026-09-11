@@ -532,6 +532,7 @@ describe("createClaudeCodeProvider", () => {
     });
 
     expect(metadata.planTier).toBe("max");
+    expect(metadata.cachedUsage?.format).toBe("percent-v1");
     expect((metadata.cachedUsage as { seven_day_opus?: { utilization: number } }).seven_day_opus?.utilization)
       .toBe(88);
     expect((metadata.cachedUsage as { seven_day_haiku?: { utilization: number } }).seven_day_haiku?.utilization)
@@ -1296,6 +1297,7 @@ describe("createClaudeCodeProvider", () => {
 
     expect(refreshed?.ok).toBe(true);
     expect(refreshed?.metadata?.planTier).toBe("max");
+    expect((refreshed?.metadata?.cachedUsage as { format?: string }).format).toBe("percent-v1");
     expect((refreshed?.metadata?.cachedUsage as { five_hour?: { utilization: number } }).five_hour?.utilization).toBe(15);
   });
 
@@ -1382,6 +1384,7 @@ describe("createClaudeCodeProvider", () => {
     expect(new Date(firstUpdated!.rateLimitCooldownUntil!).getTime()).toBeLessThan(Date.now() + 120_000);
     expect(firstUpdated?.metadata.rateLimitClaim).toBe("five_hour");
     expect(firstUpdated?.metadata.rateLimitStatus).toBe("rejected");
+    expect((firstUpdated?.metadata.cachedUsage as { format?: string }).format).toBe("percent-v1");
     expect((firstUpdated?.metadata.cachedUsage as { five_hour?: { utilization: number } }).five_hour?.utilization).toBe(92);
     expect((firstUpdated?.metadata.cachedUsage as { seven_day_sonnet?: { utilization: number } }).seven_day_sonnet?.utilization).toBe(71);
     expect(secondUpdated?.lastUsedAt).toBeTruthy();
@@ -1578,13 +1581,14 @@ describe("createClaudeCodeProvider", () => {
       label: "utilization",
       utilization: "1junk",
       unifiedResetSuffix: "",
-      expectedCachedUsage: {},
+      expectedCachedUsage: undefined,
     },
     {
       label: "unified reset",
       utilization: "1",
       unifiedResetSuffix: "junk",
       expectedCachedUsage: {
+        format: "percent-v1",
         five_hour: {
           utilization: 100,
           resets_at: null,

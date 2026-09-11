@@ -10,6 +10,7 @@ import {
   captureRateLimitRevision,
   createAccountRefreshUpdate,
 } from "../src";
+import { Database } from "../src/sqlite";
 
 describe("AccountStore state reset", () => {
   it.each(["memory", "sqlite"] as const)(
@@ -28,6 +29,7 @@ describe("AccountStore state reset", () => {
           credentials: { accessToken: "old-access", refreshToken: "keep-refresh" },
           metadata: {
             cachedUsage: {
+              format: "percent-v1",
               five_hour: { utilization: 100, resets_at: resetAt },
             },
             cachedUsageAt: 200,
@@ -59,6 +61,136 @@ describe("AccountStore state reset", () => {
         expect(updated?.rateLimitBlockedAt).toBeUndefined();
         expect(updated?.rateLimitCooldownUntil).toBeUndefined();
         expect(updated?.rateLimitObservedAt).toBeGreaterThan(blocked.rateLimitObservedAt);
+      } finally {
+        if (dir) rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("sanitizes a pre-upgrade ambiguous Claude usage snapshot when SQLite reloads it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyoli-legacy-claude-reload-"));
+
+    try {
+      const databasePath = join(dir, "kyoli.db");
+      const store = new SQLiteAccountStore(databasePath);
+      const account = await store.create({ provider: "claude-code", kind: "oauth" });
+      const resetAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+      const legacyMetadata = {
+        planTier: "max",
+        cachedUsage: {
+          five_hour: { utilization: 1, resets_at: resetAt },
+          seven_day: { utilization: 0.92, resets_at: resetAt },
+          seven_day_sonnet: { utilization: 1.04, resets_at: resetAt },
+        },
+        cachedUsageAt: Date.now(),
+        rateLimitClaim: "five_hour",
+        rateLimitStatus: "rejected",
+      };
+      const database = new Database(databasePath);
+      database
+        .query("update accounts set metadata_json = ? where id = ?")
+        .run(JSON.stringify(legacyMetadata), account.id);
+      database.close();
+
+      const reloaded = await new SQLiteAccountStore(databasePath).get(account.id);
+
+      expect(reloaded?.metadata).toEqual({
+        planTier: "max",
+        rateLimitClaim: "five_hour",
+        rateLimitStatus: "rejected",
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["memory", "sqlite"] as const)(
+    "discards ambiguous legacy Claude header usage without clearing rate-limit state in the %s store",
+    async (kind) => {
+      const dir = kind === "sqlite" ? mkdtempSync(join(tmpdir(), "kyoli-legacy-claude-usage-")) : undefined;
+
+      try {
+        const databasePath = dir ? join(dir, "kyoli.db") : undefined;
+        const store = kind === "sqlite"
+          ? new SQLiteAccountStore(databasePath!)
+          : new MemoryAccountStore();
+        const resetAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+        const cooldownUntil = new Date(Date.now() + 60_000).toISOString();
+        const account = await store.create({
+          provider: "claude-code",
+          kind: "oauth",
+          metadata: {
+            cachedUsage: {
+              format: "percent-v1",
+              five_hour: { utilization: 20, resets_at: null },
+            },
+            cachedUsageAt: Date.now() - 1,
+          },
+        });
+
+        const blocked = await store.recordFailure(account.id, {
+          status: 429,
+          message: "legacy rate limit",
+          failureClass: "quota",
+          rateLimitResetAt: resetAt,
+          rateLimitCooldownUntil: cooldownUntil,
+          metadata: {
+            cachedUsage: {
+              five_hour: { utilization: 1, resets_at: resetAt },
+              seven_day: { utilization: 0.92, resets_at: resetAt },
+              seven_day_sonnet: { utilization: 1.04, resets_at: resetAt },
+            },
+            cachedUsageAt: Date.now(),
+            rateLimitClaim: "five_hour",
+            rateLimitStatus: "rejected",
+          },
+        });
+
+        expect(blocked?.metadata).toMatchObject({
+          rateLimitClaim: "five_hour",
+          rateLimitStatus: "rejected",
+        });
+        expect(blocked?.metadata.cachedUsage).toBeUndefined();
+        expect(blocked?.metadata.cachedUsageAt).toBeUndefined();
+        expect(blocked?.rateLimitResetAt).toBe(resetAt);
+        expect(blocked?.rateLimitCooldownUntil).toBe(cooldownUntil);
+
+        if (databasePath) {
+          const reloaded = new SQLiteAccountStore(databasePath);
+          const persisted = await reloaded.get(account.id);
+          expect(persisted?.metadata.cachedUsage).toBeUndefined();
+          expect(persisted?.metadata.cachedUsageAt).toBeUndefined();
+          expect(persisted?.rateLimitResetAt).toBe(resetAt);
+          expect(persisted?.rateLimitCooldownUntil).toBe(cooldownUntil);
+        }
+      } finally {
+        if (dir) rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each(["memory", "sqlite"] as const)(
+    "preserves unambiguous legacy Claude OAuth percentages without rescaling them in the %s store",
+    async (kind) => {
+      const dir = kind === "sqlite" ? mkdtempSync(join(tmpdir(), "kyoli-legacy-claude-oauth-")) : undefined;
+
+      try {
+        const store = kind === "sqlite"
+          ? new SQLiteAccountStore(join(dir!, "kyoli.db"))
+          : new MemoryAccountStore();
+        const cachedUsage = {
+          five_hour: { utilization: 1, resets_at: null },
+          seven_day: { utilization: 0.5, resets_at: null },
+        };
+
+        const account = await store.create({
+          provider: "claude-code",
+          kind: "oauth",
+          metadata: { cachedUsage, cachedUsageAt: 123 },
+        });
+
+        expect(account.metadata.cachedUsage).toEqual(cachedUsage);
+        expect(account.metadata.cachedUsageAt).toBe(123);
       } finally {
         if (dir) rmSync(dir, { recursive: true, force: true });
       }
@@ -326,6 +458,7 @@ describe("AccountStore state reset", () => {
         rateLimitCooldownUntil: cooldownUntil,
         metadata: {
           cachedUsage: {
+            format: "percent-v1",
             five_hour: { utilization: 100, resets_at: resetAt },
           },
           cachedUsageAt,
