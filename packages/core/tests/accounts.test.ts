@@ -678,6 +678,63 @@ describe("AccountStore state reset", () => {
     },
   );
 
+  it("does not let timestamped legacy usage override canonical usage with unknown freshness", async () => {
+    const now = new Date("2026-09-11T00:00:00.000Z").getTime();
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+
+    try {
+      const store = new MemoryAccountStore();
+      const account = await store.create({
+        provider: "claude-code",
+        kind: "oauth",
+      });
+      const resetAt = new Date(now + 60 * 60 * 1000).toISOString();
+      const cooldownUntil = new Date(now - 1).toISOString();
+      const blocked = await store.recordFailure(account.id, {
+        status: 429,
+        message: "rate limited",
+        failureClass: "rate_limit",
+        rateLimitResetAt: resetAt,
+        rateLimitCooldownUntil: cooldownUntil,
+      });
+      if (!blocked) throw new Error("Expected blocked account");
+
+      const updated = await store.update(account.id, createAccountRefreshUpdate(blocked, {
+        metadata: {
+          usageCachedAt: now + 1,
+          usage: {
+            five_hour: { utilization: 20, resets_at: null },
+          },
+          cachedUsage: {
+            format: CLAUDE_CODE_CACHED_USAGE_FORMAT,
+            five_hour: {
+              utilization: 100,
+              resets_at: new Date(now + 2 * 60 * 60 * 1000).toISOString(),
+            },
+          },
+        },
+      }, {
+        usageObservedAt: now + 1,
+        recoverRateLimitState: true,
+      }));
+
+      expect(updated).toMatchObject({
+        failureCount: 1,
+        rateLimitBlockedAt: blocked.rateLimitBlockedAt,
+        rateLimitResetAt: resetAt,
+        rateLimitCooldownUntil: cooldownUntil,
+        metadata: {
+          cachedUsage: {
+            five_hour: { utilization: 100 },
+          },
+        },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("puts transient 401/403 failures into auth cooldown without disabling the account", async () => {
     const store = new MemoryAccountStore();
     const account = await store.create({

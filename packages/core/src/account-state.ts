@@ -143,6 +143,7 @@ function readLatestUsageSnapshot(
   const cachedUsageAt = readNumber(metadata.cachedUsageAt);
   const legacyUsage = readRecord(metadata.usage);
   const legacyUsageAt = readNumber(metadata.usageCachedAt);
+  if (cachedUsage && cachedUsageAt === undefined) return undefined;
   const cachedSnapshot = cachedUsage && cachedUsageAt !== undefined
     ? { usage: cachedUsage, observedAt: cachedUsageAt }
     : undefined;

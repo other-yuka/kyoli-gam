@@ -905,14 +905,15 @@ async function refreshClaudeCodeUsageForAccount(input: {
     };
   }
 
-  const hasRefreshedUsage = refreshed.cachedUsage !== undefined;
-  const cachedUsage = !hasRefreshedUsage
+  const hasRefreshedUsageSnapshot =
+    refreshed.cachedUsage !== undefined && refreshed.cachedUsageAt !== undefined;
+  const cachedUsage = !hasRefreshedUsageSnapshot
     ? metadata.cachedUsage
     : {
       ...refreshed.cachedUsage,
       format: CLAUDE_CODE_CACHED_USAGE_FORMAT,
     };
-  const cachedUsageAt = hasRefreshedUsage
+  const cachedUsageAt = hasRefreshedUsageSnapshot
     ? refreshed.cachedUsageAt
     : metadata.cachedUsageAt;
 

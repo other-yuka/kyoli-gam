@@ -1344,7 +1344,7 @@ describe("createClaudeCodeProvider", () => {
     });
   });
 
-  it("does not attach a retained timestamp to newly returned usage", async () => {
+  it("retains the previous usage pair when new usage has no observation timestamp", async () => {
     const oldUsageAt = Date.now() - 60 * 60 * 1000;
     const store = new MemoryAccountStore();
     const account = await store.create({
@@ -1376,10 +1376,10 @@ describe("createClaudeCodeProvider", () => {
     const refreshed = await provider.refreshUsage?.({ account });
 
     expect(refreshed?.ok).toBe(true);
-    expect(refreshed?.metadata?.cachedUsageAt).toBeUndefined();
+    expect(refreshed?.metadata?.cachedUsageAt).toBe(oldUsageAt);
     expect(refreshed?.metadata?.cachedUsage).toMatchObject({
       format: "percent-v1",
-      five_hour: { utilization: 15 },
+      five_hour: { utilization: 90 },
     });
   });
 
