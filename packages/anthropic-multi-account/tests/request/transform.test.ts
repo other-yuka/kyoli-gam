@@ -117,6 +117,7 @@ describe("buildRequestHeaders", () => {
 
     expect(fableBetas).toContain("fallback-credit-2026-06-01");
     expect(fableBetas).toContain("context-1m-2025-08-07");
+    expect(fableBetas).toContain("mid-conversation-tool-changes-2026-07-01");
 
     const opus5Headers = new Headers(buildRequestHeaders(
       "https://api.anthropic.com/v1/messages",
@@ -125,6 +126,7 @@ describe("buildRequestHeaders", () => {
       "claude-opus-5",
     ));
     expect(splitBetas(opus5Headers.get("anthropic-beta"))).toContain("fallback-credit-2026-06-01");
+    expect(splitBetas(opus5Headers.get("anthropic-beta"))).toContain("mid-conversation-tool-changes-2026-07-01");
 
     const opus48Headers = new Headers(buildRequestHeaders(
       "https://api.anthropic.com/v1/messages",
@@ -133,6 +135,7 @@ describe("buildRequestHeaders", () => {
       "claude-opus-4-8",
     ));
     expect(splitBetas(opus48Headers.get("anthropic-beta"))).not.toContain("fallback-credit-2026-06-01");
+    expect(splitBetas(opus48Headers.get("anthropic-beta"))).toContain("mid-conversation-tool-changes-2026-07-01");
 
     const sonnetHeaders = new Headers(buildRequestHeaders(
       "https://api.anthropic.com/v1/messages",
@@ -142,6 +145,7 @@ describe("buildRequestHeaders", () => {
     ));
     const sonnetBetas = splitBetas(sonnetHeaders.get("anthropic-beta"));
     expect(sonnetBetas).not.toContain("mid-conversation-system-2026-04-07");
+    expect(sonnetBetas).not.toContain("mid-conversation-tool-changes-2026-07-01");
     expect(sonnetBetas).toContain("effort-2025-11-24");
 
     const sonnet5Headers = new Headers(buildRequestHeaders(
@@ -152,6 +156,7 @@ describe("buildRequestHeaders", () => {
     ));
     const sonnet5Betas = splitBetas(sonnet5Headers.get("anthropic-beta"));
     expect(sonnet5Betas).toContain("mid-conversation-system-2026-04-07");
+    expect(sonnet5Betas).not.toContain("mid-conversation-tool-changes-2026-07-01");
     expect(sonnet5Betas).toContain("effort-2025-11-24");
 
     const haikuHeaders = new Headers(buildRequestHeaders(
@@ -163,6 +168,17 @@ describe("buildRequestHeaders", () => {
     const haikuBetas = splitBetas(haikuHeaders.get("anthropic-beta"));
     expect(haikuBetas).not.toContain("mid-conversation-system-2026-04-07");
     expect(haikuBetas).not.toContain("effort-2025-11-24");
+    expect(haikuBetas).not.toContain("mid-conversation-tool-changes-2026-07-01");
+
+    const sonnetWithIncomingBeta = new Headers(buildRequestHeaders(
+      "https://api.anthropic.com/v1/messages",
+      { headers: { "anthropic-beta": "mid-conversation-tool-changes-2026-07-01,custom-beta" } },
+      "token-123",
+      "claude-sonnet-5",
+    ));
+    const sonnetWithIncomingBetas = splitBetas(sonnetWithIncomingBeta.get("anthropic-beta"));
+    expect(sonnetWithIncomingBetas).not.toContain("mid-conversation-tool-changes-2026-07-01");
+    expect(sonnetWithIncomingBetas).toContain("custom-beta");
   });
 
   test("can enable 1m beta through environment variable", () => {

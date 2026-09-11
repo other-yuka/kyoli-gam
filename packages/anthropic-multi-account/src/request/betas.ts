@@ -1,4 +1,8 @@
-import { resolveClaudeCodeModelAlias, isClaudeCode1mModelLabel } from "@kyoli-gam/provider-claude-code/opencode";
+import {
+  isClaudeCode1mModelLabel,
+  isClaudeCodeBetaAllowedForModel,
+  resolveClaudeCodeModelAlias,
+} from "@kyoli-gam/provider-claude-code/opencode";
 import { config, getModelOverride, getRequiredBetas } from "../model/config";
 
 export const LONG_CONTEXT_BETAS = config.longContextBetas;
@@ -124,9 +128,13 @@ export function getModelBetas(modelId: string, excluded?: Set<string>): string[]
     }
   }
 
-  if (!excluded || excluded.size === 0) {
-    return betas;
-  }
+  return betas.filter((beta) =>
+    isClaudeCodeBetaAllowedForModel(normalizedModelId, beta)
+    && (!excluded || !excluded.has(beta))
+  );
+}
 
-  return betas.filter((beta) => !excluded.has(beta));
+export function filterModelBetas(modelId: string, betas: string[]): string[] {
+  const normalizedModelId = resolveClaudeCodeModelAlias(modelId);
+  return betas.filter((beta) => isClaudeCodeBetaAllowedForModel(normalizedModelId, beta));
 }
