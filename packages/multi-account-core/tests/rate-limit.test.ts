@@ -348,6 +348,7 @@ describe("core/rate-limit", () => {
         status: 429,
         headers: {
           "anthropic-ratelimit-unified-5h-utilization": "0.92",
+          "anthropic-ratelimit-unified-7d-utilization": "1",
           "anthropic-ratelimit-unified-representative-claim": "five_hour",
           "retry-after": "60",
         },
@@ -357,7 +358,7 @@ describe("core/rate-limit", () => {
     expect(manager.markRateLimitedAtRevision).toHaveBeenCalledWith("acct-1", 60_000, {
       usage: {
         five_hour: { utilization: 92, resets_at: null },
-        seven_day: null,
+        seven_day: { utilization: 100, resets_at: null },
         seven_day_sonnet: null,
       },
     });

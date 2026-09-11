@@ -527,7 +527,7 @@ describe("core/account-manager", () => {
     nowSpy.mockRestore();
   });
 
-  test("keeps exhausted usage without a reset blocked until a fresh snapshot arrives", async () => {
+  test("uses the fallback probe after the known reset when another exhausted window has no reset", async () => {
     const AccountManager = createAccountManagerForProvider({
       providerAuthId: "anthropic",
       isTokenExpired: () => false,
@@ -550,14 +550,8 @@ describe("core/account-manager", () => {
     });
     if (rateLimitRevision === undefined) throw new Error("Expected a rate-limit revision");
 
-    now += 60_001;
     await expect(manager.selectAccount()).resolves.toBeNull();
-    await manager.applyUsageCacheAtRevision(activeUuid, {
-      five_hour: { utilization: 20, resets_at: null },
-      seven_day: { utilization: 30, resets_at: null },
-      seven_day_sonnet: null,
-    }, { observedAt: now, expectedRateLimitRevision: rateLimitRevision });
-
+    now += 60_001;
     await expect(manager.selectAccount()).resolves.toMatchObject({ uuid: activeUuid });
     nowSpy.mockRestore();
   });
