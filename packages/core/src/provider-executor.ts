@@ -413,7 +413,7 @@ async function recordAccountResult(
     await input.accounts.recordSuccess(
       accountId,
       credential.rateLimitRevision === undefined
-        ? { kind: "transport" }
+        ? { kind: "request" }
         : {
           kind: "request",
           expectedRateLimitRevision: credential.rateLimitRevision,

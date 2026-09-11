@@ -339,6 +339,44 @@ describe("executeWithAccountFailover", () => {
     }
   });
 
+  it("clears rate-limit state for a successful legacy credential", async () => {
+    const store = new MemoryAccountStore();
+    const account = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: { accessToken: "token" },
+    });
+    await store.recordFailure(account.id, {
+      status: 429,
+      message: "rate limited",
+      failureClass: "rate_limit",
+      failureCode: "rate_limit",
+      rateLimitCooldownUntil: new Date(Date.now() + 60_000).toISOString(),
+    });
+
+    const response = await executeWithAccountFailover({
+      provider: "claude-code",
+      kind: "oauth",
+      accounts: new StickyAccountPool(store),
+      configuredCredential: {
+        value: "token",
+        accountId: account.id,
+      },
+      sessionKey: "legacy-credential-success",
+      maxAttempts: 1,
+      missingCredentialResponse: () => new Response("missing", { status: 401 }),
+      failureMessage: (status) => `failed ${status}`,
+      selectCredential: async () => undefined,
+      execute: async () => new Response("ok", { status: 200 }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(store.get(account.id)).resolves.toMatchObject({ failureCount: 0 });
+    const recovered = await store.get(account.id);
+    expect(recovered?.rateLimitBlockedAt).toBeUndefined();
+    expect(recovered?.rateLimitCooldownUntil).toBeUndefined();
+  });
+
   it("keeps the missing credential response when the provider has no stored accounts", async () => {
     const store = new MemoryAccountStore();
     const accounts = new StickyAccountPool(store);
