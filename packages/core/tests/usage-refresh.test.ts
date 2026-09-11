@@ -633,6 +633,58 @@ describe("UsageRefreshService", () => {
     expect((await store.get(recovered.id))?.rateLimitResetAt).toBeUndefined();
   });
 
+  it("recovers a blocked Codex account from healthy primary usage windows", async () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-09-11T00:00:00.000Z").getTime();
+    vi.setSystemTime(now);
+
+    try {
+      const store = new MemoryAccountStore();
+      const account = await store.create({
+        provider: "codex",
+        kind: "oauth",
+        metadata: { cachedUsageAt: now - 10_000 },
+      });
+      await store.recordFailure(account.id, {
+        status: 429,
+        message: "quota exhausted",
+        failureClass: "quota",
+        failureCode: "usage_limit_reached",
+        failurePhase: "startup",
+        rateLimitResetAt: new Date(now + 60_000).toISOString(),
+        rateLimitCooldownUntil: new Date(now - 1).toISOString(),
+      });
+      vi.setSystemTime(now + 1);
+      const provider = createUsageProvider(async () => ({
+        ok: true,
+        metadata: {
+          cachedUsageAt: Date.now(),
+          cachedUsage: {
+            primary: { used_percent: 20, resets_at: null },
+            secondary: { used_percent: 30, resets_at: null },
+            credits: { has_credits: true, unlimited: false, balance: "5" },
+          },
+        },
+      }));
+      const service = new UsageRefreshService({
+        accounts: store,
+        providers: [provider],
+        intervalMs: 1,
+      });
+
+      expect(await service.refreshOnce()).toMatchObject({ checked: 1, refreshed: 1 });
+      expect(await store.get(account.id)).toMatchObject({
+        failureCount: 0,
+        lastFailureClass: undefined,
+        rateLimitBlockedAt: undefined,
+        rateLimitCooldownUntil: undefined,
+        rateLimitResetAt: undefined,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("recovers a blocked account when its exhausted usage window has rolled over", async () => {
     vi.useFakeTimers();
     const now = new Date("2026-09-11T00:00:00.000Z").getTime();

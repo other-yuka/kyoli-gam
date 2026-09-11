@@ -180,21 +180,18 @@ function readUsagePercent(window: Record<string, unknown>): number | undefined {
 function hasNoExhaustedUsageWindow(value: unknown, now: number): boolean {
   const usage = readRecord(value);
   if (!usage) return false;
-  const windows = [
-    usage.five_hour,
-    usage.seven_day,
-    ...Object.entries(usage)
-      .filter(([key]) => key.startsWith("seven_day_"))
-      .map(([, window]) => window),
-  ].map((window) => {
-    const record = readRecord(window);
-    return {
-      utilization: readUsagePercent(record ?? {}),
-      resetAt: readUsageWindowResetAt(record),
-    };
-  }).filter((window): window is { utilization: number; resetAt: string | undefined } =>
-    window.utilization !== undefined
-  );
+  const windows = Object.entries(usage)
+    .filter(([key]) => isAccountWideUsageWindowKey(key))
+    .map(([, window]) => {
+      const record = readRecord(window);
+      return {
+        utilization: readUsagePercent(record ?? {}),
+        resetAt: readUsageWindowResetAt(record),
+      };
+    })
+    .filter((window): window is { utilization: number; resetAt: string | undefined } =>
+      window.utilization !== undefined
+    );
   return windows.length > 0 && windows.every((window) =>
     window.utilization < 100
     || (window.resetAt != null && !isQuotaWindowActive(window.resetAt, now))
