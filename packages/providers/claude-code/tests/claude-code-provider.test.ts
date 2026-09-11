@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -2133,7 +2133,22 @@ describe("createClaudeCodeProvider", () => {
 
   it("checks Claude Code template drift through a loopback CLI capture", async () => {
     const previousPath = process.env.KYOLI_CLAUDE_CODE_PATH;
+    const previousConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    const previousBaseUrl = process.env.ANTHROPIC_BASE_URL;
+    const alternateBackendVars = [
+      "CLAUDE_CODE_USE_BEDROCK",
+      "CLAUDE_CODE_USE_VERTEX",
+      "CLAUDE_CODE_USE_FOUNDRY",
+      "CLAUDE_CODE_USE_GATEWAY",
+      "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+      "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+      "CLAUDE_CODE_USE_MANTLE",
+    ] as const;
+    const previousAlternateBackendEnv = Object.fromEntries(
+      alternateBackendVars.map((variable) => [variable, process.env[variable]]),
+    );
     const tempDir = await mkdtemp(join(tmpdir(), "kyoli-claude-template-"));
+    const configDir = join(tempDir, "config");
     const fakeClaudePath = join(tempDir, "claude.mjs");
     const metadata = getClaudeCodeTemplateMetadata();
     const interactiveOnlyTools = new Set(["AskUserQuestion", "EnterPlanMode", "ExitPlanMode"]);
@@ -2144,10 +2159,33 @@ describe("createClaudeCodeProvider", () => {
       "/.claude/projects/-tmp-example-repo/memory/",
     )}\n\n# Language\nAlways respond in Korean.`;
 
+    await mkdir(configDir);
+    await writeFile(
+      join(configDir, "settings.json"),
+      JSON.stringify({
+        env: {
+          ANTHROPIC_BASE_URL: "https://settings.invalid",
+          ...Object.fromEntries(alternateBackendVars.map((variable) => [variable, "1"])),
+        },
+      }),
+      "utf8",
+    );
     await writeFile(
       fakeClaudePath,
       `
 import net from "node:net";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+const alternateBackendVars = ${JSON.stringify(alternateBackendVars)};
+const settings = JSON.parse(readFileSync(join(process.env.CLAUDE_CONFIG_DIR, "settings.json"), "utf8"));
+const settingsIndex = process.argv.indexOf("--settings");
+if (settingsIndex < 0) process.exit(3);
+const cliSettings = JSON.parse(readFileSync(process.argv[settingsIndex + 1], "utf8"));
+const effectiveEnv = { ...(settings.env ?? {}), ...(cliSettings.env ?? {}) };
+if (alternateBackendVars.some((variable) => effectiveEnv[variable])) process.exit(4);
+if (effectiveEnv.ANTHROPIC_BASE_URL !== process.env.ANTHROPIC_BASE_URL) process.exit(5);
+if (!process.env.ANTHROPIC_BASE_URL.startsWith("http://127.0.0.1:")) process.exit(6);
 
 const baseUrl = new URL(process.env.ANTHROPIC_BASE_URL);
 const rejectForeignCapture = async (path, method = "POST") => {
@@ -2218,6 +2256,11 @@ await rejectForeignCapture("/v1/messages");
     );
 
     process.env.KYOLI_CLAUDE_CODE_PATH = fakeClaudePath;
+    process.env.CLAUDE_CONFIG_DIR = configDir;
+    process.env.ANTHROPIC_BASE_URL = "https://parent.invalid";
+    for (const variable of alternateBackendVars) {
+      process.env[variable] = "1";
+    }
     try {
       const report = await checkClaudeCodeTemplateDrift({ timeoutMs: 2_000 });
       expect(report.captured).toBe(true);
@@ -2230,6 +2273,24 @@ await rejectForeignCapture("/v1/messages");
         delete process.env.KYOLI_CLAUDE_CODE_PATH;
       } else {
         process.env.KYOLI_CLAUDE_CODE_PATH = previousPath;
+      }
+      if (previousConfigDir === undefined) {
+        delete process.env.CLAUDE_CONFIG_DIR;
+      } else {
+        process.env.CLAUDE_CONFIG_DIR = previousConfigDir;
+      }
+      if (previousBaseUrl === undefined) {
+        delete process.env.ANTHROPIC_BASE_URL;
+      } else {
+        process.env.ANTHROPIC_BASE_URL = previousBaseUrl;
+      }
+      for (const variable of alternateBackendVars) {
+        const previous = previousAlternateBackendEnv[variable];
+        if (previous === undefined) {
+          delete process.env[variable];
+        } else {
+          process.env[variable] = previous;
+        }
       }
       await rm(tempDir, { recursive: true, force: true });
     }

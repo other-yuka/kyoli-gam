@@ -26,6 +26,11 @@ import {
   createClaudeCodeCaptureNonce,
   isClaudeCodeCaptureRequest,
 } from "./capture-provenance";
+import {
+  createClaudeCaptureEnv,
+  createClaudeCaptureSpawn,
+  withClaudeCaptureSettings,
+} from "./capture-environment";
 
 const CURRENT_SCHEMA_VERSION = 2;
 const LIVE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -479,28 +484,46 @@ async function runClaudeCapture(params: {
     args.push("--model", params.model);
   }
 
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(command, args, {
-      env: {
-        ...process.env,
-        ANTHROPIC_BASE_URL: params.baseUrl,
-      },
-      stdio: "ignore",
-    });
+  // The capture call must reach the local capture server, never a real
+  // provider. ANTHROPIC_BASE_URL only redirects Claude Code's direct
+  // Anthropic API path: in Bedrock/Vertex/Foundry/gateway mode it is ignored,
+  // so an inherited CLAUDE_CODE_USE_BEDROCK=1 (etc.) sends this throwaway
+  // "hi" to the real backend and bills the user for every capture.
+  await withClaudeCaptureSettings(params.baseUrl, async (settingsPath) => {
+    const invocation = createClaudeCaptureSpawn(
+      params.binaryPath,
+      command,
+      [
+        ...args,
+        "--setting-sources",
+        "project,local",
+        "--settings",
+        settingsPath,
+      ],
+    );
 
-    const timeout = setTimeout(() => {
-      child.kill("SIGKILL");
-      reject(new Error("capture timed out"));
-    }, params.timeoutMs);
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(invocation.command, invocation.args, {
+        cwd: dirname(settingsPath),
+        env: createClaudeCaptureEnv(params.baseUrl),
+        stdio: "ignore",
+        windowsVerbatimArguments: invocation.windowsVerbatimArguments,
+      });
 
-    child.once("error", (error) => {
-      clearTimeout(timeout);
-      reject(error);
-    });
+      const timeout = setTimeout(() => {
+        child.kill("SIGKILL");
+        reject(new Error("capture timed out"));
+      }, params.timeoutMs);
 
-    child.once("close", () => {
-      clearTimeout(timeout);
-      resolve();
+      child.once("error", (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      });
+
+      child.once("close", () => {
+        clearTimeout(timeout);
+        resolve();
+      });
     });
   });
 }

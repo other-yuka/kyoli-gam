@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createServer, type IncomingMessage } from "node:http";
-import { platform } from "node:os";
+import { dirname } from "node:path";
 import {
   findClaudeCodeBinary,
   probeClaudeVersion,
@@ -15,6 +15,11 @@ import {
   createClaudeCodeCaptureNonce,
   isClaudeCodeCaptureRequest,
 } from "./capture-provenance";
+import {
+  createClaudeCaptureEnv,
+  createClaudeCaptureSpawn,
+  withClaudeCaptureSettings,
+} from "./capture-environment";
 
 export interface ClaudeCodeTemplateDriftReport {
   binaryPath?: string;
@@ -235,30 +240,41 @@ async function runClaudeCapture(
   const args = isNodeScript
     ? [binaryPath, "--print", "-p", "hi", "--model", CLAUDE_CODE_BASE_CAPTURE_MODEL_ID]
     : ["--print", "-p", "hi", "--model", CLAUDE_CODE_BASE_CAPTURE_MODEL_ID];
+  await withClaudeCaptureSettings(baseUrl, async (settingsPath) => {
+    const invocation = createClaudeCaptureSpawn(
+      binaryPath,
+      command,
+      [
+        ...args,
+        "--setting-sources",
+        "project,local",
+        "--settings",
+        settingsPath,
+      ],
+    );
 
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(command, args, {
-      env: {
-        ...process.env,
-        ANTHROPIC_BASE_URL: baseUrl,
-      },
-      stdio: "ignore",
-      windowsHide: true,
-      shell: platform() === "win32" && /\.(?:cmd|bat)$/i.test(binaryPath),
-    });
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(invocation.command, invocation.args, {
+        cwd: dirname(settingsPath),
+        env: createClaudeCaptureEnv(baseUrl),
+        stdio: "ignore",
+        windowsHide: true,
+        windowsVerbatimArguments: invocation.windowsVerbatimArguments,
+      });
 
-    const timeout = setTimeout(() => {
-      child.kill("SIGKILL");
-      reject(new Error("capture timed out"));
-    }, timeoutMs);
+      const timeout = setTimeout(() => {
+        child.kill("SIGKILL");
+        reject(new Error("capture timed out"));
+      }, timeoutMs);
 
-    child.once("error", (error) => {
-      clearTimeout(timeout);
-      reject(error);
-    });
-    child.once("close", () => {
-      clearTimeout(timeout);
-      resolve();
+      child.once("error", (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      });
+      child.once("close", () => {
+        clearTimeout(timeout);
+        resolve();
+      });
     });
   });
 }
