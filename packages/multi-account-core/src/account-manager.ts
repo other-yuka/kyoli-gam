@@ -42,6 +42,10 @@ export interface RuntimeFactoryLike {
   invalidate(uuid: string): void;
 }
 
+export interface ApplyUsageCacheOptions {
+  preserveActiveRateLimit?: boolean;
+}
+
 export interface AccountManagerDependencies {
   providerAuthId: string;
   getConfig?: () => Pick<PluginConfig, "soft_quota_threshold_percent" | "cross_process_claims" | "account_selection_strategy" | "max_consecutive_auth_failures" | "rate_limit_min_backoff_ms">;
@@ -73,7 +77,7 @@ export interface AccountManagerInstance {
   markRevoked(uuid: string): Promise<void>;
   markSuccess(uuid: string): Promise<void>;
   markAuthFailure(uuid: string, result: TokenRefreshResult, expected?: DiskCredentials): Promise<void>;
-  applyUsageCache(uuid: string, usage: UsageLimits): Promise<void>;
+  applyUsageCache(uuid: string, usage: UsageLimits, options?: ApplyUsageCacheOptions): Promise<void>;
   applyProfileCache(uuid: string, profile: ProfileData): Promise<void>;
   ensureValidToken(uuid: string, client: PluginClient): Promise<TokenRefreshResult>;
   validateNonActiveTokens(client: PluginClient): Promise<void>;
@@ -696,9 +700,18 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       });
     }
 
-    async applyUsageCache(uuid: string, usage: UsageLimits): Promise<void> {
+    async applyUsageCache(
+      uuid: string,
+      usage: UsageLimits,
+      options: ApplyUsageCacheOptions = {},
+    ): Promise<void> {
       await this.store.mutateAccount(uuid, (account) => {
         const now = Date.now();
+        const activeRateLimitResetAt = options.preserveActiveRateLimit
+          && account.rateLimitResetAt
+          && account.rateLimitResetAt > now
+          ? account.rateLimitResetAt
+          : undefined;
         const exhaustedTierResetTimes = readAccountWideUsageTiers(usage)
           .flatMap((tier) => {
             const utilization = normalizeUsagePercent(tier.utilization);
@@ -711,8 +724,11 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
 
         account.cachedUsage = usage;
         account.cachedUsageAt = Date.now();
-        account.rateLimitResetAt = exhaustedTierResetTimes.length > 0
-          ? Math.max(...exhaustedTierResetTimes)
+        const resetTimes = activeRateLimitResetAt
+          ? [...exhaustedTierResetTimes, activeRateLimitResetAt]
+          : exhaustedTierResetTimes;
+        account.rateLimitResetAt = resetTimes.length > 0
+          ? Math.max(...resetTimes)
           : undefined;
       });
     }

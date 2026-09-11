@@ -303,6 +303,30 @@ describe("core/account-manager", () => {
     expect(manager.getActiveAccount()?.rateLimitResetAt).toBe(undefined);
   });
 
+  test("applyUsageCache preserves an active provider cooldown when requested", async () => {
+    const AccountManager = createAccountManagerForProvider({
+      providerAuthId: "anthropic",
+      isTokenExpired: () => false,
+      refreshToken: async () => ({ ok: false, permanent: false }),
+    });
+
+    const now = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const manager = await AccountManager.create(new AccountStore(), createAuth("seed"));
+    const activeUuid = getUuid(manager.getActiveAccount()?.uuid);
+    await manager.markRateLimited(activeUuid, 60_000);
+
+    await manager.applyUsageCache(activeUuid, {
+      five_hour: { utilization: 20, resets_at: null },
+      seven_day: null,
+      seven_day_sonnet: null,
+    }, { preserveActiveRateLimit: true });
+    await manager.refresh();
+
+    expect(manager.getActiveAccount()?.rateLimitResetAt).toBe(now + 60_000);
+    nowSpy.mockRestore();
+  });
+
   test("applyUsageCache waits for every exhausted usage window", async () => {
     const AccountManager = createAccountManagerForProvider({
       providerAuthId: "anthropic",
