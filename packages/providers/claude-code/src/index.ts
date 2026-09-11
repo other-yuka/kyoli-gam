@@ -11,6 +11,7 @@ import type {
 } from "@kyoli-gam/core";
 import {
   CredentialUnavailableError,
+  captureRateLimitRevision,
   createAccountRefreshUpdate,
   executeWithAccountFailover,
   jsonResponse,
@@ -824,6 +825,7 @@ async function readOAuthCredential(input: {
   return {
     value: accessToken,
     accountId: selectedAccount.id,
+    rateLimitRevision: captureRateLimitRevision(selectedAccount),
     selectionDiagnostics: selection?.diagnostics as Record<string, unknown> | undefined,
     metadata: {
       ...selectedAccount.metadata,

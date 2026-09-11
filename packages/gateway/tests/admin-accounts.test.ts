@@ -458,9 +458,7 @@ describe("admin accounts API", () => {
         status: 409,
       });
       expect(body.account.credentials).toBeUndefined();
-      expect(body.account.metadata?.cachedUsage).toMatchObject({
-        seven_day: { utilization: 95 },
-      });
+      expect(body.account.metadata?.cachedUsage).toBeUndefined();
       expect(stored?.credentials).toMatchObject({
         accessToken: "generation-b-access",
         refreshToken: "generation-b-refresh",

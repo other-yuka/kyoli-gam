@@ -1,4 +1,9 @@
 import { isQuotaWindowActive, normalizeUsagePercent } from "./routing";
+import type {
+  ApplyUsageCacheAtRevisionOptions,
+  ApplyUsageCacheOptions,
+  RateLimitRevision,
+} from "./account-manager";
 import type { ManagedAccount, PluginClient, PluginConfig, UsageLimits } from "./types";
 
 const USAGE_FETCH_COOLDOWN_MS = 30_000;
@@ -21,15 +26,17 @@ export interface RateLimitAccountManager {
     uuid: string,
     backoffMs?: number,
     options?: { rateLimitResetMs?: number; usage?: UsageLimits },
-  ): Promise<number | undefined>;
-  applyUsageCache(
+  ): Promise<void>;
+  markRateLimitedAtRevision?(
+    uuid: string,
+    backoffMs?: number,
+    options?: { rateLimitResetMs?: number; usage?: UsageLimits },
+  ): Promise<RateLimitRevision | undefined>;
+  applyUsageCache(uuid: string, usage: UsageLimits, options?: ApplyUsageCacheOptions): Promise<void>;
+  applyUsageCacheAtRevision?(
     uuid: string,
     usage: UsageLimits,
-    options?: {
-      observedAt?: number;
-      rateLimitResetMs?: number;
-      expectedRateLimitObservedAt?: number | null;
-    },
+    options: ApplyUsageCacheAtRevisionOptions,
   ): Promise<void>;
   getAccountCount(): number;
 }
@@ -226,14 +233,26 @@ export function createRateLimitHandlers(dependencies: RateLimitDependencies) {
       return;
     }
 
-    const rateLimitObservedAt = usageToPersist || rateLimitResetMs !== null
-      ? await manager.markRateLimited(account.uuid, cooldownMs, {
+    const rateLimitOptions = usageToPersist || rateLimitResetMs !== null
+      ? {
         ...(rateLimitResetMs === null ? {} : { rateLimitResetMs }),
         ...(usageToPersist ? { usage: usageToPersist } : {}),
-      })
-      : await manager.markRateLimited(account.uuid, cooldownMs);
+      }
+      : undefined;
+    const markRateLimitedAtRevision = manager.markRateLimitedAtRevision?.bind(manager);
+    const applyUsageCacheAtRevision = manager.applyUsageCacheAtRevision?.bind(manager);
+    const supportsRevisionGuards = markRateLimitedAtRevision !== undefined
+      && applyUsageCacheAtRevision !== undefined;
+    let rateLimitRevision: RateLimitRevision | undefined;
+    if (supportsRevisionGuards) {
+      rateLimitRevision = rateLimitOptions === undefined
+        ? await markRateLimitedAtRevision(account.uuid, cooldownMs)
+        : await markRateLimitedAtRevision(account.uuid, cooldownMs, rateLimitOptions);
+    } else {
+      await manager.markRateLimited(account.uuid, waitMs);
+    }
 
-    const shouldFetchUsage = rateLimitObservedAt !== undefined
+    const shouldFetchUsage = (!supportsRevisionGuards || rateLimitRevision !== undefined)
       && !hasNonExhaustedQuota && providerResetMs === null && account.accessToken
       && (!account.cachedUsageAt || Date.now() - account.cachedUsageAt > USAGE_FETCH_COOLDOWN_MS);
 
@@ -242,17 +261,21 @@ export function createRateLimitHandlers(dependencies: RateLimitDependencies) {
       const usage = await fetchUsageLimits(account.accessToken!, account.accountId);
       if (usage) {
         const refreshedResetMs = getResetMsFromUsageLimits(usage, nonSubscriptionClaim);
-        await manager.applyUsageCache(
-          account.uuid,
-          usage,
-          refreshedResetMs === null
-            ? { observedAt, expectedRateLimitObservedAt: rateLimitObservedAt }
-            : {
-              observedAt,
-              rateLimitResetMs: refreshedResetMs,
-              expectedRateLimitObservedAt: rateLimitObservedAt,
-            },
-        );
+        if (applyUsageCacheAtRevision && rateLimitRevision !== undefined) {
+          await applyUsageCacheAtRevision(
+            account.uuid,
+            usage,
+            refreshedResetMs === null
+              ? { observedAt, expectedRateLimitRevision: rateLimitRevision }
+              : {
+                observedAt,
+                rateLimitResetMs: refreshedResetMs,
+                expectedRateLimitRevision: rateLimitRevision,
+              },
+          );
+        } else {
+          await manager.applyUsageCache(account.uuid, usage);
+        }
       }
     }
 

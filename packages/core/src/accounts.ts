@@ -2,12 +2,18 @@ import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { isDeepStrictEqual } from "node:util";
-import { shouldRecoverRateLimitStateAfterUsage } from "./account-state";
+import {
+  readUsageRateLimitBoundary,
+  shouldRecoverRateLimitStateAfterUsage,
+} from "./account-state";
 import type { ProviderId } from "./index";
 import type { AccountFailureClass, AccountFailurePhase } from "./provider-executor";
 import { Database } from "./sqlite";
 
 export type AccountKind = "oauth";
+
+declare const rateLimitRevisionBrand: unique symbol;
+export type RateLimitRevision = number & { readonly [rateLimitRevisionBrand]: true };
 
 export interface AccountRecord {
   id: string;
@@ -58,21 +64,22 @@ export interface AccountUpdateInput {
     observedAt: number;
     cachedUsageAt?: number;
     rateLimitBlockedAt?: string;
-    rateLimitObservedAt?: number;
+    expectedRateLimitRevision: RateLimitRevision | null;
   };
   recoverRateLimitState?: boolean;
 }
 
 export function createAccountRefreshUpdate(
-  account: Pick<AccountRecord, "credentials" | "metadata">,
+  account: Pick<
+    AccountRecord,
+    "credentials" | "metadata" | "rateLimitBlockedAt" | "rateLimitObservedAt"
+  >,
   refreshed: {
     credentials?: Record<string, unknown>;
     metadata?: Record<string, unknown>;
   },
   options: {
     usageObservedAt?: number;
-    rateLimitBlockedAt?: string;
-    rateLimitObservedAt?: number;
     recoverRateLimitState?: boolean;
   } = {},
 ): AccountUpdateInput {
@@ -97,8 +104,8 @@ export function createAccountRefreshUpdate(
         usageSnapshotGuard: {
           observedAt: options.usageObservedAt,
           cachedUsageAt: readMetadataUsageTimestamp(account.metadata),
-          rateLimitBlockedAt: options.rateLimitBlockedAt,
-          rateLimitObservedAt: options.rateLimitObservedAt,
+          rateLimitBlockedAt: account.rateLimitBlockedAt,
+          expectedRateLimitRevision: captureRateLimitRevision(account),
         },
       }
       : {}),
@@ -110,9 +117,17 @@ export interface AccountResetStateInput {
   enable?: boolean;
 }
 
-export interface AccountSuccessInput {
-  kind?: "request" | "transport";
-  requestStartedAt?: number;
+export type AccountSuccessInput =
+  | { kind: "transport" }
+  | { kind: "request"; expectedRateLimitRevision: RateLimitRevision | null }
+  | { kind?: "manual"; expectedRateLimitRevision?: never };
+
+export function captureRateLimitRevision(
+  account: Pick<AccountRecord, "rateLimitObservedAt">,
+): RateLimitRevision | null {
+  return account.rateLimitObservedAt === undefined
+    ? null
+    : account.rateLimitObservedAt as RateLimitRevision;
 }
 
 export interface AccountStore {
@@ -564,7 +579,11 @@ function updateAccountRecord(
   existing: AccountRecord,
   input: AccountUpdateInput,
 ): AccountRecord {
+  const nowMs = Date.now();
+  const previousUsageBoundary = readUsageRateLimitBoundary(existing.metadata, nowMs);
   const credentials = input.credentials ?? existing.credentials;
+  const credentialsReplaced = input.credentials !== undefined
+    && hasCredentialGenerationChanged(existing.credentials, input.credentials);
   const metadata = input.metadata ?? existing.metadata;
   const metadataPatched = input.metadataPatch
     ? { ...metadata, ...input.metadataPatch }
@@ -597,11 +616,19 @@ function updateAccountRecord(
     lastFailureMessage: existing.lastFailureMessage,
     lastFailurePhase: existing.lastFailurePhase,
     reauthRequiredReason: existing.reauthRequiredReason,
-    updatedAt: new Date().toISOString(),
+    updatedAt: new Date(nowMs).toISOString(),
   };
-  return input.recoverRateLimitState && !hasConcurrentUsage && shouldRecoverRateLimitStateAfterUsage(updated)
-    ? resetAccountState(updated, {})
-    : updated;
+  if (credentialsReplaced) {
+    return recoverAccountRateLimitState(updated, { clearUsage: true, nowMs });
+  }
+  if (!input.usageSnapshotGuard || hasConcurrentUsage) return updated;
+  if (input.recoverRateLimitState && shouldRecoverRateLimitStateAfterUsage(updated, nowMs)) {
+    return recoverAccountRateLimitState(updated, { nowMs });
+  }
+  if (previousUsageBoundary !== readUsageRateLimitBoundary(updated.metadata, nowMs)) {
+    updated.rateLimitObservedAt = nextRateLimitRevision(updated.rateLimitObservedAt, nowMs);
+  }
+  return updated;
 }
 
 function hasConcurrentUsageObservation(
@@ -611,17 +638,15 @@ function hasConcurrentUsageObservation(
   const guard = input.usageSnapshotGuard;
   if (!guard) return false;
 
-  if (current.rateLimitObservedAt !== guard.rateLimitObservedAt) return true;
+  if (captureRateLimitRevision(current) !== guard.expectedRateLimitRevision) return true;
+  if (current.rateLimitBlockedAt !== guard.rateLimitBlockedAt) return true;
 
   const currentUsageAt = readMetadataUsageTimestamp(current.metadata);
   if (currentUsageAt !== guard.cachedUsageAt && currentUsageAt !== undefined && currentUsageAt >= guard.observedAt) {
     return true;
   }
 
-  const blockObservedAt = current.rateLimitBlockedAt ? Date.parse(current.rateLimitBlockedAt) : Number.NaN;
-  return current.rateLimitBlockedAt !== guard.rateLimitBlockedAt
-    && Number.isFinite(blockObservedAt)
-    && blockObservedAt >= guard.observedAt;
+  return false;
 }
 
 function withoutUsageSnapshot(metadata: Record<string, unknown>): Record<string, unknown> {
@@ -631,6 +656,22 @@ function withoutUsageSnapshot(metadata: Record<string, unknown>): Record<string,
   delete preserved.usage;
   delete preserved.usageCachedAt;
   return preserved;
+}
+
+function hasCredentialGenerationChanged(
+  existing: Record<string, unknown>,
+  replacement: Record<string, unknown>,
+): boolean {
+  return !isDeepStrictEqual(
+    toPersistedRecordShape({
+      accessToken: existing.accessToken,
+      refreshToken: existing.refreshToken,
+    }),
+    toPersistedRecordShape({
+      accessToken: replacement.accessToken,
+      refreshToken: replacement.refreshToken,
+    }),
+  );
 }
 
 function readMetadataUsageTimestamp(metadata: Record<string, unknown>): number | undefined {
@@ -708,10 +749,13 @@ function recordAccountSuccess(
 ): AccountRecord {
   const nowMs = Date.now();
   const now = new Date(nowMs).toISOString();
-  const hasNewerRateLimit = input.requestStartedAt !== undefined
-    && existing.rateLimitObservedAt !== undefined
-    && existing.rateLimitObservedAt >= input.requestStartedAt;
-  if (input.kind === "transport" || hasNewerRateLimit) {
+  const clearsUsage = existing.rateLimitResetAt !== undefined
+    || existing.rateLimitBlockedAt !== undefined
+    || existing.rateLimitCooldownUntil !== undefined
+    || readUsageRateLimitBoundary(existing.metadata, nowMs) !== "";
+  const lostRateLimitRace = input.kind === "request"
+    && captureRateLimitRevision(existing) !== input.expectedRateLimitRevision;
+  if (input.kind === "transport" || lostRateLimitRace) {
     return {
       ...existing,
       lastUsedAt: now,
@@ -724,9 +768,13 @@ function recordAccountSuccess(
     failureCount: 0,
     lastUsedAt: now,
     lastErrorAt: undefined,
+    metadata: clearsUsage ? withoutUsageSnapshot(existing.metadata) : existing.metadata,
     rateLimitResetAt: undefined,
     rateLimitBlockedAt: undefined,
     rateLimitCooldownUntil: undefined,
+    rateLimitObservedAt: clearsUsage
+      ? nextRateLimitRevision(existing.rateLimitObservedAt, nowMs)
+      : existing.rateLimitObservedAt,
     authCooldownUntil: undefined,
     consecutiveAuthFailures: 0,
     lastFailureClass: undefined,
@@ -741,14 +789,17 @@ function resetAccountState(
   existing: AccountRecord,
   input: AccountResetStateInput,
 ): AccountRecord {
+  const nowMs = Date.now();
   return {
     ...existing,
     enabled: input.enable ? true : existing.enabled,
     failureCount: 0,
     lastErrorAt: undefined,
+    metadata: withoutUsageSnapshot(existing.metadata),
     rateLimitResetAt: undefined,
     rateLimitBlockedAt: undefined,
     rateLimitCooldownUntil: undefined,
+    rateLimitObservedAt: nextRateLimitRevision(existing.rateLimitObservedAt, nowMs),
     authCooldownUntil: undefined,
     consecutiveAuthFailures: 0,
     lastFailureClass: undefined,
@@ -756,8 +807,39 @@ function resetAccountState(
     lastFailureMessage: undefined,
     lastFailurePhase: undefined,
     reauthRequiredReason: undefined,
-    updatedAt: new Date().toISOString(),
+    updatedAt: new Date(nowMs).toISOString(),
   };
+}
+
+function recoverAccountRateLimitState(
+  existing: AccountRecord,
+  options: { clearUsage?: boolean; nowMs?: number } = {},
+): AccountRecord {
+  const nowMs = options.nowMs ?? Date.now();
+  const recoveringRateLimitFailure = existing.lastFailureClass === "rate_limit"
+    || existing.lastFailureClass === "quota";
+  return {
+    ...existing,
+    metadata: options.clearUsage ? withoutUsageSnapshot(existing.metadata) : existing.metadata,
+    failureCount: recoveringRateLimitFailure ? 0 : existing.failureCount,
+    lastErrorAt: recoveringRateLimitFailure ? undefined : existing.lastErrorAt,
+    rateLimitResetAt: undefined,
+    rateLimitBlockedAt: undefined,
+    rateLimitCooldownUntil: undefined,
+    rateLimitObservedAt: nextRateLimitRevision(existing.rateLimitObservedAt, nowMs),
+    lastFailureClass: recoveringRateLimitFailure ? undefined : existing.lastFailureClass,
+    lastFailureCode: recoveringRateLimitFailure ? undefined : existing.lastFailureCode,
+    lastFailureMessage: recoveringRateLimitFailure ? undefined : existing.lastFailureMessage,
+    lastFailurePhase: recoveringRateLimitFailure ? undefined : existing.lastFailurePhase,
+    updatedAt: new Date(nowMs).toISOString(),
+  };
+}
+
+function nextRateLimitRevision(
+  previous: number | undefined,
+  nowMs = Date.now(),
+): RateLimitRevision {
+  return Math.max(nowMs, (previous ?? 0) + 1) as RateLimitRevision;
 }
 
 function recordAccountFailure(
@@ -786,7 +868,7 @@ function recordAccountFailure(
       ? input.rateLimitCooldownUntil ?? input.rateLimitResetAt
       : existing.rateLimitCooldownUntil,
     rateLimitObservedAt: rateLimitFailure
-      ? Math.max(nowMs, (existing.rateLimitObservedAt ?? 0) + 1)
+      ? nextRateLimitRevision(existing.rateLimitObservedAt, nowMs)
       : existing.rateLimitObservedAt,
     lastFailureClass: preserveExistingReauthFailure
       ? existing.lastFailureClass ?? input.failureClass ?? failureClassFromStatus(input.status)

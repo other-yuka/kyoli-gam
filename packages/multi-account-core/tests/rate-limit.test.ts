@@ -48,6 +48,41 @@ describe("core/rate-limit", () => {
     expect(handlers.retryAfterMsFromResponse(response)).toBe(2345);
   });
 
+  test("preserves usage refresh behavior for legacy account managers", async () => {
+    const now = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const usage: UsageLimits = {
+      five_hour: { utilization: 80, resets_at: null },
+      seven_day: null,
+      seven_day_sonnet: null,
+    };
+    fetchUsage.mockResolvedValue({ ok: true, data: usage });
+    const manager = {
+      markRateLimited: vi.fn(async () => {}),
+      applyUsageCache: vi.fn(async () => {}),
+      getAccountCount: vi.fn(() => 1),
+    };
+
+    await handlers.handleRateLimitResponse(
+      manager,
+      createClient(),
+      createAccount({
+        cachedUsage: {
+          five_hour: { utilization: 100, resets_at: new Date(now + 60_000).toISOString() },
+          seven_day: null,
+          seven_day_sonnet: null,
+        },
+        cachedUsageAt: now - 60_000,
+      }),
+      new Response("", { status: 429, headers: { "retry-after-ms": "5000" } }),
+    );
+
+    expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", 60_000);
+    expect(fetchUsage).toHaveBeenCalledWith("access-1", "acct-id-1");
+    expect(manager.applyUsageCache).toHaveBeenCalledWith("acct-1", usage);
+    nowSpy.mockRestore();
+  });
+
   test("waits for every exhausted cached usage window", async () => {
     const now = 1_700_000_000_000;
     const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
@@ -69,8 +104,10 @@ describe("core/rate-limit", () => {
     fetchUsage.mockResolvedValue({ ok: true, data: usage });
 
     const manager = {
-      markRateLimited: vi.fn(async () => now),
+      markRateLimited: vi.fn(async () => {}),
+      markRateLimitedAtRevision: vi.fn(async () => now),
       applyUsageCache: vi.fn(async () => {}),
+      applyUsageCacheAtRevision: vi.fn(async () => {}),
       getAccountCount: vi.fn(() => 2),
     };
 
@@ -81,14 +118,14 @@ describe("core/rate-limit", () => {
       new Response("", { status: 429, headers: { "retry-after-ms": "5000" } }),
     );
 
-    expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", 5_000, {
+    expect(manager.markRateLimitedAtRevision).toHaveBeenCalledWith("acct-1", 5_000, {
       rateLimitResetMs: 25_000,
     });
     expect(fetchUsage).toHaveBeenCalledWith("access-1", "acct-id-1");
-    expect(manager.applyUsageCache).toHaveBeenCalledWith(
+    expect(manager.applyUsageCacheAtRevision).toHaveBeenCalledWith(
       "acct-1",
       usage,
-      { observedAt: now, expectedRateLimitObservedAt: now },
+      { observedAt: now, expectedRateLimitRevision: now },
     );
     expect(showToast).toHaveBeenCalledTimes(1);
 
@@ -116,8 +153,10 @@ describe("core/rate-limit", () => {
     });
     fetchUsage.mockResolvedValue({ ok: true, data: usage });
     const manager = {
-      markRateLimited: vi.fn(async () => now),
+      markRateLimited: vi.fn(async () => {}),
+      markRateLimitedAtRevision: vi.fn(async () => now),
       applyUsageCache: vi.fn(async () => {}),
+      applyUsageCacheAtRevision: vi.fn(async () => {}),
       getAccountCount: vi.fn(() => 2),
     };
 
@@ -134,13 +173,13 @@ describe("core/rate-limit", () => {
       }),
     );
 
-    expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", 60_000, {
+    expect(manager.markRateLimitedAtRevision).toHaveBeenCalledWith("acct-1", 60_000, {
       rateLimitResetMs: 3_600_000,
     });
-    expect(manager.applyUsageCache).toHaveBeenCalledWith(
+    expect(manager.applyUsageCacheAtRevision).toHaveBeenCalledWith(
       "acct-1",
       usage,
-      { observedAt: now, expectedRateLimitObservedAt: now },
+      { observedAt: now, expectedRateLimitRevision: now },
     );
     nowSpy.mockRestore();
   });
@@ -159,8 +198,10 @@ describe("core/rate-limit", () => {
     }));
     const account = createAccount({ cachedUsageAt: now - 60_000 });
     const manager = {
-      markRateLimited: vi.fn(async () => now),
+      markRateLimited: vi.fn(async () => {}),
+      markRateLimitedAtRevision: vi.fn(async () => now),
       applyUsageCache: vi.fn(async () => {}),
+      applyUsageCacheAtRevision: vi.fn(async () => {}),
       getAccountCount: vi.fn(() => 2),
     };
 
@@ -171,16 +212,16 @@ describe("core/rate-limit", () => {
       new Response("", { status: 429, headers: { "retry-after": "60" } }),
     );
     await vi.waitFor(() => expect(fetchUsage).toHaveBeenCalledTimes(1));
-    const parkedBeforeRefreshResolved = manager.markRateLimited.mock.calls.length === 1;
+    const parkedBeforeRefreshResolved = manager.markRateLimitedAtRevision.mock.calls.length === 1;
     resolveUsage?.({ ok: true, data: usage });
     await handling;
 
     expect(parkedBeforeRefreshResolved).toBe(true);
-    expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", 60_000);
-    expect(manager.applyUsageCache).toHaveBeenCalledWith(
+    expect(manager.markRateLimitedAtRevision).toHaveBeenCalledWith("acct-1", 60_000);
+    expect(manager.applyUsageCacheAtRevision).toHaveBeenCalledWith(
       "acct-1",
       usage,
-      { observedAt: now, expectedRateLimitObservedAt: now },
+      { observedAt: now, expectedRateLimitRevision: now },
     );
     nowSpy.mockRestore();
   });
@@ -197,7 +238,9 @@ describe("core/rate-limit", () => {
     });
     const manager = {
       markRateLimited: vi.fn(async () => {}),
+      markRateLimitedAtRevision: vi.fn(async () => Date.now()),
       applyUsageCache: vi.fn(async () => {}),
+      applyUsageCacheAtRevision: vi.fn(async () => {}),
       getAccountCount: vi.fn(() => 2),
     };
 
@@ -214,7 +257,7 @@ describe("core/rate-limit", () => {
       }),
     );
 
-    expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", 60_000);
+    expect(manager.markRateLimitedAtRevision).toHaveBeenCalledWith("acct-1", 60_000);
     nowSpy.mockRestore();
   });
 
@@ -230,7 +273,9 @@ describe("core/rate-limit", () => {
     });
     const manager = {
       markRateLimited: vi.fn(async () => {}),
+      markRateLimitedAtRevision: vi.fn(async () => Date.now()),
       applyUsageCache: vi.fn(async () => {}),
+      applyUsageCacheAtRevision: vi.fn(async () => {}),
       getAccountCount: vi.fn(() => 2),
     };
     fetchUsage.mockResolvedValue({
@@ -256,7 +301,7 @@ describe("core/rate-limit", () => {
       }),
     );
 
-    expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", 60_000, {
+    expect(manager.markRateLimitedAtRevision).toHaveBeenCalledWith("acct-1", 60_000, {
       usage: {
         five_hour: { utilization: 92, resets_at: null },
         seven_day: null,
@@ -264,7 +309,7 @@ describe("core/rate-limit", () => {
       },
     });
     expect(fetchUsage).not.toHaveBeenCalled();
-    expect(manager.applyUsageCache).not.toHaveBeenCalled();
+    expect(manager.applyUsageCacheAtRevision).not.toHaveBeenCalled();
     nowSpy.mockRestore();
   });
 
@@ -290,7 +335,9 @@ describe("core/rate-limit", () => {
     });
     const manager = {
       markRateLimited: vi.fn(async () => {}),
+      markRateLimitedAtRevision: vi.fn(async () => Date.now()),
       applyUsageCache: vi.fn(async () => {}),
+      applyUsageCacheAtRevision: vi.fn(async () => {}),
       getAccountCount: vi.fn(() => 2),
     };
 
@@ -310,7 +357,7 @@ describe("core/rate-limit", () => {
       }),
     );
 
-    expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", 60_000, {
+    expect(manager.markRateLimitedAtRevision).toHaveBeenCalledWith("acct-1", 60_000, {
       rateLimitResetMs: 3_600_000,
       usage: {
         five_hour: { utilization: 100, resets_at: new Date(now + 3_600_000).toISOString() },
@@ -319,7 +366,7 @@ describe("core/rate-limit", () => {
       },
     });
     expect(fetchUsage).not.toHaveBeenCalled();
-    expect(manager.applyUsageCache).not.toHaveBeenCalled();
+    expect(manager.applyUsageCacheAtRevision).not.toHaveBeenCalled();
     nowSpy.mockRestore();
   });
 
@@ -329,7 +376,9 @@ describe("core/rate-limit", () => {
     const resetSeconds = Math.floor(now / 1000) + 60;
     const manager = {
       markRateLimited: vi.fn(async () => {}),
+      markRateLimitedAtRevision: vi.fn(async () => Date.now()),
       applyUsageCache: vi.fn(async () => {}),
+      applyUsageCacheAtRevision: vi.fn(async () => {}),
       getAccountCount: vi.fn(() => 1),
     };
 
@@ -348,7 +397,7 @@ describe("core/rate-limit", () => {
       }),
     );
 
-    expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", 120_000, {
+    expect(manager.markRateLimitedAtRevision).toHaveBeenCalledWith("acct-1", 120_000, {
       rateLimitResetMs: 60_000,
       usage: {
         five_hour: { utilization: 100, resets_at: new Date(now + 60_000).toISOString() },
@@ -357,7 +406,7 @@ describe("core/rate-limit", () => {
       },
     });
     expect(fetchUsage).not.toHaveBeenCalled();
-    expect(manager.applyUsageCache).not.toHaveBeenCalled();
+    expect(manager.applyUsageCacheAtRevision).not.toHaveBeenCalled();
     nowSpy.mockRestore();
   });
 
@@ -373,7 +422,9 @@ describe("core/rate-limit", () => {
     });
     const manager = {
       markRateLimited: vi.fn(async () => {}),
+      markRateLimitedAtRevision: vi.fn(async () => Date.now()),
       applyUsageCache: vi.fn(async () => {}),
+      applyUsageCacheAtRevision: vi.fn(async () => {}),
       getAccountCount: vi.fn(() => 2),
     };
 
@@ -392,7 +443,7 @@ describe("core/rate-limit", () => {
       }),
     );
 
-    expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", 60_000, {
+    expect(manager.markRateLimitedAtRevision).toHaveBeenCalledWith("acct-1", 60_000, {
       rateLimitResetMs: 12 * 60 * 60 * 1000,
     });
     nowSpy.mockRestore();
@@ -404,7 +455,9 @@ describe("core/rate-limit", () => {
     });
     const manager = {
       markRateLimited: vi.fn(async () => {}),
+      markRateLimitedAtRevision: vi.fn(async () => Date.now()),
       applyUsageCache: vi.fn(async () => {}),
+      applyUsageCacheAtRevision: vi.fn(async () => {}),
       getAccountCount: vi.fn(() => 2),
     };
 
@@ -422,8 +475,9 @@ describe("core/rate-limit", () => {
     );
 
     expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", 24 * 60 * 60 * 1000);
+    expect(manager.markRateLimitedAtRevision).not.toHaveBeenCalled();
     expect(fetchUsage).not.toHaveBeenCalled();
-    expect(manager.applyUsageCache).not.toHaveBeenCalled();
+    expect(manager.applyUsageCacheAtRevision).not.toHaveBeenCalled();
     expect(showToast).toHaveBeenCalledWith(
       expect.anything(),
       "Account 1 blocked non-subscription billing claim (api). Switching...",

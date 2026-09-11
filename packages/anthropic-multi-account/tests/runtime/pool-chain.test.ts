@@ -24,13 +24,13 @@ type MockPoolChainManager = PoolChainAccountManager & {
   getAccountCount: ReturnType<typeof vi.fn>;
   refresh: ReturnType<typeof vi.fn>;
   selectAccount: ReturnType<typeof vi.fn>;
-  markSuccess: ReturnType<typeof vi.fn>;
+  markSuccessAtRevision: ReturnType<typeof vi.fn>;
   markAuthFailure: ReturnType<typeof vi.fn>;
   markRevoked: ReturnType<typeof vi.fn>;
   hasAnyUsableAccount: ReturnType<typeof vi.fn>;
   getMinWaitTime: ReturnType<typeof vi.fn>;
   markRateLimited: ReturnType<typeof vi.fn>;
-  applyUsageCache: ReturnType<typeof vi.fn>;
+  applyUsageCacheAtRevision: ReturnType<typeof vi.fn>;
   getAccounts: ReturnType<typeof vi.fn>;
   isRateLimited: ReturnType<typeof vi.fn>;
   getActiveAccount: ReturnType<typeof vi.fn>;
@@ -57,7 +57,7 @@ function createMockPoolChainManager(accounts: ManagedAccount[]): MockPoolChainMa
 
       return accounts.find((account) => !isRateLimited(account.uuid) && account.enabled && !account.isAuthDisabled) ?? null;
     }),
-    markSuccess: vi.fn(async (uuid: string) => {
+    markSuccessAtRevision: vi.fn(async (uuid: string) => {
       activeUuid = uuid;
       rateLimitedUntil.delete(uuid);
     }),
@@ -68,7 +68,7 @@ function createMockPoolChainManager(accounts: ManagedAccount[]): MockPoolChainMa
     markRateLimited: vi.fn(async (uuid: string, backoffMs?: number) => {
       rateLimitedUntil.set(uuid, Date.now() + (backoffMs ?? 60_000));
     }),
-    applyUsageCache: vi.fn(async () => {}),
+    applyUsageCacheAtRevision: vi.fn(async () => {}),
     getAccounts: vi.fn(() => accounts),
     isRateLimited: vi.fn((account: ManagedAccount) => isRateLimited(account.uuid)),
     getActiveAccount: vi.fn(() => accounts.find((account) => account.uuid === activeUuid) ?? null),
@@ -278,8 +278,8 @@ describe("pool-chain executor integration", () => {
     expect(response.status).toBe(200);
     expect(runtimeFactory.calls).toEqual(["acct-1", "acct-1", "acct-2"]);
     expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", expect.any(Number));
-    expect(manager.markSuccess).toHaveBeenCalledWith("acct-2", expect.any(Number));
-    expect(manager.markSuccess).not.toHaveBeenCalledWith("acct-1", expect.any(Number));
+    expect(manager.markSuccessAtRevision).toHaveBeenCalledWith("acct-2", null);
+    expect(manager.markSuccessAtRevision).not.toHaveBeenCalledWith("acct-1", null);
     expect(cascadeStateManager.getSnapshot()).toBeNull();
   });
 });

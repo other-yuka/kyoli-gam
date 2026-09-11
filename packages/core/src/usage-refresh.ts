@@ -152,8 +152,6 @@ export class UsageRefreshService {
         account.id,
         createAccountRefreshUpdate(account, refreshed, {
           usageObservedAt: usageRefreshStartedAt,
-          rateLimitBlockedAt: account.rateLimitBlockedAt,
-          rateLimitObservedAt: account.rateLimitObservedAt,
           recoverRateLimitState: true,
         }),
       );

@@ -14,6 +14,7 @@ import { isDeepStrictEqual } from "node:util";
 import {
   executeWithAccountFailover,
   CredentialUnavailableError,
+  captureRateLimitRevision,
   classifyCodexFailure,
   classifyCodexJsonEventFailure,
   CODEX_UNKNOWN_RATE_LIMIT_BACKOFF_MS,
@@ -1804,6 +1805,7 @@ async function readOAuthCredential(input: {
   return {
     value: accessToken,
     accountId: account.id,
+    rateLimitRevision: captureRateLimitRevision(account),
     chatgptAccountId,
     selectionDiagnostics: selection?.diagnostics as Record<string, unknown> | undefined,
   };
@@ -1842,6 +1844,7 @@ async function refreshOAuthCredentialForAccount(input: {
   return {
     value: refreshed.accessToken,
     accountId: account.id,
+    rateLimitRevision: captureRateLimitRevision(account),
     chatgptAccountId,
   };
 }

@@ -893,11 +893,15 @@ async function refreshCodexUsageForStatus(
   account: AccountRecord,
 ): Promise<{ ok: true; cachedUsage?: Record<string, unknown>; cachedUsageAt?: number } | { ok: false; message: string; status?: number }> {
   const provider = createCodexChatGPTProvider();
+  const usageObservedAt = Date.now();
   const result = await provider.refreshUsage?.({ account });
   if (!result) return { ok: false, message: "Codex provider does not expose usage refresh." };
   if (!result.ok) return { ok: false, message: result.message, status: result.status };
 
-  const updated = await store.update(account.id, createAccountRefreshUpdate(account, result));
+  const updated = await store.update(account.id, createAccountRefreshUpdate(account, result, {
+    usageObservedAt,
+    recoverRateLimitState: true,
+  }));
   if (!updated) {
     return {
       ok: false,
@@ -1162,6 +1166,7 @@ async function refreshAccountMetadata(
     throw new Error("Account has no access token and cannot be refreshed.");
   }
 
+  const usageObservedAt = Date.now();
   const accountMetadata = await refreshClaudeCodeAccountMetadata(accessToken);
   const updated = await store.update(account.id, createAccountRefreshUpdate(account, {
     credentials,
@@ -1172,6 +1177,9 @@ async function refreshAccountMetadata(
       cachedUsage: accountMetadata.cachedUsage ?? metadata.cachedUsage,
       cachedUsageAt: accountMetadata.cachedUsageAt ?? metadata.cachedUsageAt,
     },
+  }, {
+    usageObservedAt,
+    recoverRateLimitState: true,
   }));
   if (!updated) throw new Error(`Account credentials changed while refreshing: ${account.id}`);
   return updated;

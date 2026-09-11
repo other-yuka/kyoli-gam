@@ -122,10 +122,9 @@ describe("importOpenCodeAccounts", () => {
     });
     expect(synced?.metadata).toMatchObject({
       planTier: "pro",
-      cachedUsage: {
-        five_hour: { utilization: 10 },
-      },
     });
+    expect(synced?.metadata.cachedUsage).toBeUndefined();
+    expect(synced?.metadata.cachedUsageAt).toBeUndefined();
     expect(synced?.failureCount).toBe(0);
     expect(synced?.authCooldownUntil).toBeUndefined();
     expect(synced?.consecutiveAuthFailures).toBe(0);

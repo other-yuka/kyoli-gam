@@ -14,6 +14,7 @@ import type {
   UsageLimits,
 } from "../../src/shared/types";
 import { setupTestEnv, createMockClient, createTestStorage } from "../helpers";
+import { captureRateLimitRevision } from "opencode-multi-account-core";
 
 const originalFetch = globalThis.fetch;
 const originalXdgConfigHome = process.env.XDG_CONFIG_HOME;
@@ -238,8 +239,12 @@ describe("account-manager", () => {
         throw new Error("Expected two accounts");
       }
 
-      await manager.applyUsageCache(first.uuid, createUsage(95));
-      await manager.applyUsageCache(second.uuid, createUsage(10));
+      await manager.applyUsageCacheAtRevision(first.uuid, createUsage(95), {
+        expectedRateLimitRevision: captureRateLimitRevision(first),
+      });
+      await manager.applyUsageCacheAtRevision(second.uuid, createUsage(10), {
+        expectedRateLimitRevision: captureRateLimitRevision(second),
+      });
 
       const selected = await manager.selectAccount();
 
@@ -258,16 +263,16 @@ describe("account-manager", () => {
         throw new Error("Expected two accounts");
       }
 
-      await manager.applyUsageCache(rolledOver.uuid, {
+      await manager.applyUsageCacheAtRevision(rolledOver.uuid, {
         five_hour: { utilization: 95, resets_at: new Date(Date.now() - 60_000).toISOString() },
         seven_day: { utilization: 20, resets_at: new Date(Date.now() + 86_400_000).toISOString() },
         seven_day_sonnet: null,
-      });
-      await manager.applyUsageCache(available.uuid, {
+      }, { expectedRateLimitRevision: captureRateLimitRevision(rolledOver) });
+      await manager.applyUsageCacheAtRevision(available.uuid, {
         five_hour: { utilization: 10, resets_at: null },
         seven_day: null,
         seven_day_sonnet: null,
-      });
+      }, { expectedRateLimitRevision: captureRateLimitRevision(available) });
 
       const selected = await manager.selectAccount();
 
@@ -297,16 +302,16 @@ describe("account-manager", () => {
 
       const activeReset = new Date(Date.now() + 60 * 60 * 1000).toISOString();
       const expiredReset = new Date(Date.now() - 60_000).toISOString();
-      await manager.applyUsageCache(first.uuid, {
+      await manager.applyUsageCacheAtRevision(first.uuid, {
         five_hour: { utilization: 20, resets_at: activeReset },
         seven_day: { utilization: 100, resets_at: expiredReset },
         seven_day_sonnet: null,
-      });
-      await manager.applyUsageCache(second.uuid, {
+      }, { expectedRateLimitRevision: captureRateLimitRevision(first) });
+      await manager.applyUsageCacheAtRevision(second.uuid, {
         five_hour: { utilization: 20, resets_at: activeReset },
         seven_day: null,
         seven_day_sonnet: null,
-      });
+      }, { expectedRateLimitRevision: captureRateLimitRevision(second) });
 
       const selected = await manager.selectAccount();
 
@@ -325,8 +330,12 @@ describe("account-manager", () => {
         throw new Error("Expected two accounts");
       }
 
-      await manager.applyUsageCache(current.uuid, createUsage(60));
-      await manager.applyUsageCache(challenger.uuid, createUsage(40));
+      await manager.applyUsageCacheAtRevision(current.uuid, createUsage(60), {
+        expectedRateLimitRevision: captureRateLimitRevision(current),
+      });
+      await manager.applyUsageCacheAtRevision(challenger.uuid, createUsage(40), {
+        expectedRateLimitRevision: captureRateLimitRevision(challenger),
+      });
 
       const selected = await manager.selectAccount();
 
@@ -346,8 +355,12 @@ describe("account-manager", () => {
         throw new Error("Expected two accounts with uuid");
       }
 
-      await manager.applyUsageCache(first.uuid, createUsage(40));
-      await manager.applyUsageCache(second.uuid, createUsage(20));
+      await manager.applyUsageCacheAtRevision(first.uuid, createUsage(40), {
+        expectedRateLimitRevision: captureRateLimitRevision(first),
+      });
+      await manager.applyUsageCacheAtRevision(second.uuid, createUsage(20), {
+        expectedRateLimitRevision: captureRateLimitRevision(second),
+      });
 
       const otherPid = process.ppid > 0 ? process.ppid : 1;
       await writeClaims({
@@ -549,7 +562,7 @@ describe("account-manager", () => {
         throw new Error("Expected account");
       }
 
-      await manager.markRateLimited(account.uuid, 30_000);
+      const rateLimitRevision = await manager.markRateLimitedAtRevision!(account.uuid, 30_000);
       await manager.markAuthFailure(account.uuid, { ok: false, permanent: false });
 
       const client = createMockClient();
@@ -557,7 +570,7 @@ describe("account-manager", () => {
       const setSpy = vi.spyOn(client.auth, "set");
       const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => 123_456);
 
-      await manager.markSuccess(account.uuid);
+      await manager.markSuccessAtRevision(account.uuid, rateLimitRevision ?? null);
       await manager.refresh();
 
       const updated = manager.getAccounts()[0]!;
@@ -627,7 +640,7 @@ describe("account-manager", () => {
       const setSpy = vi.spyOn(client.auth, "set");
 
       const account = manager.getAccounts()[0]!;
-      await manager.markSuccess(account.uuid!);
+      await manager.markSuccessAtRevision(account.uuid!, captureRateLimitRevision(account));
 
       expect(setSpy.mock.calls.length).toBe(0);
     });

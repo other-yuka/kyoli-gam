@@ -38,7 +38,7 @@ type MockManager = {
   getAccountCount: ReturnType<typeof vi.fn>;
   refresh: ReturnType<typeof vi.fn>;
   selectAccount: ReturnType<typeof vi.fn>;
-  markSuccess: ReturnType<typeof vi.fn>;
+  markSuccessAtRevision: ReturnType<typeof vi.fn>;
   markAuthFailure: ReturnType<typeof vi.fn>;
   markRevoked: ReturnType<typeof vi.fn>;
   hasAnyUsableAccount: ReturnType<typeof vi.fn>;
@@ -53,7 +53,7 @@ function createSingleAccountManager(
     getAccountCount: vi.fn(() => 1),
     refresh: vi.fn(async () => {}),
     selectAccount: vi.fn(async () => account),
-    markSuccess: vi.fn(async () => {}),
+    markSuccessAtRevision: vi.fn(async () => {}),
     markAuthFailure: vi.fn(async () => {}),
     markRevoked: vi.fn(async () => {}),
     hasAnyUsableAccount: vi.fn(() => true),
@@ -73,7 +73,7 @@ function createRotatingManager(accounts: ManagedAccount[]): MockManager {
       selectIndex += 1;
       return account ?? null;
     }),
-    markSuccess: vi.fn(async () => {}),
+    markSuccessAtRevision: vi.fn(async () => {}),
     markAuthFailure: vi.fn(async () => {}),
     markRevoked: vi.fn(async () => {}),
     hasAnyUsableAccount: vi.fn(() => true),
@@ -178,7 +178,7 @@ describe("core/executor", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(manager.markSuccess).toHaveBeenCalledWith("acct-1", expect.any(Number));
+    expect(manager.markSuccessAtRevision).toHaveBeenCalledWith("acct-1", null);
   });
 
   test("preserves the original Request for providers without a response supervisor", async () => {
@@ -269,9 +269,9 @@ describe("core/executor", () => {
 
     expect(runtimeFactory.calls).toEqual(["acct-1", "acct-2"]);
     expect(handleRateLimitResponse).toHaveBeenCalledTimes(1);
-    expect(manager.markSuccess).toHaveBeenCalledTimes(1);
-    expect(manager.markSuccess).toHaveBeenCalledWith("acct-2", expect.any(Number));
-    expect(manager.markSuccess).not.toHaveBeenCalledWith("acct-1", expect.any(Number));
+    expect(manager.markSuccessAtRevision).toHaveBeenCalledTimes(1);
+    expect(manager.markSuccessAtRevision).toHaveBeenCalledWith("acct-2", null);
+    expect(manager.markSuccessAtRevision).not.toHaveBeenCalledWith("acct-1", null);
     expect(body).toContain("resp_ok");
     expect(body).not.toContain("usage_limit_reached");
   });
@@ -339,7 +339,7 @@ describe("core/executor", () => {
     expect(await response.text()).toContain("second exhausted");
     expect(runtimeFactory.calls).toEqual(["acct-1", "acct-2"]);
     expect(handleRateLimitResponse).toHaveBeenCalledTimes(2);
-    expect(manager.markSuccess).not.toHaveBeenCalled();
+    expect(manager.markSuccessAtRevision).not.toHaveBeenCalled();
   });
 
   test.each(["server_is_overloaded", "slow_down", "model_at_capacity"])(
@@ -369,7 +369,7 @@ describe("core/executor", () => {
       expect(await response.text()).toContain("Selected model is at capacity.");
       expect(runtimeFactory.calls).toEqual(["acct-1", "acct-1", "acct-1"]);
       expect(handleRateLimitResponse).not.toHaveBeenCalled();
-      expect(manager.markSuccess).not.toHaveBeenCalled();
+      expect(manager.markSuccessAtRevision).not.toHaveBeenCalled();
     },
   );
 
@@ -442,9 +442,9 @@ describe("core/executor", () => {
     expect(response.status).toBe(200);
     expect(handleRateLimitResponse).toHaveBeenCalledTimes(1);
     expect(handleRateLimitResponse).toHaveBeenCalledWith(manager, client, acct1, expect.any(Response));
-    expect(manager.markSuccess).toHaveBeenCalledTimes(1);
-    expect(manager.markSuccess).toHaveBeenCalledWith("acct-2", expect.any(Number));
-    expect(manager.markSuccess).not.toHaveBeenCalledWith("acct-1", expect.any(Number));
+    expect(manager.markSuccessAtRevision).toHaveBeenCalledTimes(1);
+    expect(manager.markSuccessAtRevision).toHaveBeenCalledWith("acct-2", null);
+    expect(manager.markSuccessAtRevision).not.toHaveBeenCalledWith("acct-1", null);
   });
 
   test("401 -> fresh retry 403 revoked marks account revoked and does not mark success", async () => {
@@ -466,9 +466,9 @@ describe("core/executor", () => {
     expect(response.status).toBe(200);
     expect(manager.markRevoked).toHaveBeenCalledTimes(1);
     expect(manager.markRevoked).toHaveBeenCalledWith("acct-1");
-    expect(manager.markSuccess).toHaveBeenCalledTimes(1);
-    expect(manager.markSuccess).toHaveBeenCalledWith("acct-2", expect.any(Number));
-    expect(manager.markSuccess).not.toHaveBeenCalledWith("acct-1", expect.any(Number));
+    expect(manager.markSuccessAtRevision).toHaveBeenCalledTimes(1);
+    expect(manager.markSuccessAtRevision).toHaveBeenCalledWith("acct-2", null);
+    expect(manager.markSuccessAtRevision).not.toHaveBeenCalledWith("acct-1", null);
   });
 
   test("401 -> fresh retry 403 non-revoked returns 403 without markSuccess", async () => {
@@ -487,7 +487,7 @@ describe("core/executor", () => {
 
     expect(response.status).toBe(403);
     expect(manager.markRevoked).not.toHaveBeenCalled();
-    expect(manager.markSuccess).not.toHaveBeenCalled();
+    expect(manager.markSuccessAtRevision).not.toHaveBeenCalled();
   });
 
   test("401 -> fresh retry 500 consumes outer retry and does not mark success", async () => {
@@ -507,9 +507,9 @@ describe("core/executor", () => {
     const response = await executeWithAccountRotation(manager, runtimeFactory, client, "https://api.example.com");
 
     expect(response.status).toBe(200);
-    expect(manager.markSuccess).toHaveBeenCalledTimes(1);
-    expect(manager.markSuccess).toHaveBeenCalledWith("acct-2", expect.any(Number));
-    expect(manager.markSuccess).not.toHaveBeenCalledWith("acct-1", expect.any(Number));
+    expect(manager.markSuccessAtRevision).toHaveBeenCalledTimes(1);
+    expect(manager.markSuccessAtRevision).toHaveBeenCalledWith("acct-2", null);
+    expect(manager.markSuccessAtRevision).not.toHaveBeenCalledWith("acct-1", null);
   });
 
   test("repeated 401 -> fresh 429 -> switch flow exhausts retry budget", async () => {
@@ -543,7 +543,7 @@ describe("core/executor", () => {
     ).rejects.toThrow("Exhausted 6 retries across all accounts");
 
     expect(handleRateLimitResponse).toHaveBeenCalledTimes(6);
-    expect(manager.markSuccess).not.toHaveBeenCalled();
+    expect(manager.markSuccessAtRevision).not.toHaveBeenCalled();
   });
 
   test("5xx server-retry token refresh error follows auth-failure path", async () => {
@@ -569,9 +569,9 @@ describe("core/executor", () => {
       expect.objectContaining({ ok: false, permanent: true }),
       acct1,
     );
-    expect(manager.markSuccess).toHaveBeenCalledTimes(1);
-    expect(manager.markSuccess).toHaveBeenCalledWith("acct-2", expect.any(Number));
-    expect(manager.markSuccess).not.toHaveBeenCalledWith("acct-1", expect.any(Number));
+    expect(manager.markSuccessAtRevision).toHaveBeenCalledTimes(1);
+    expect(manager.markSuccessAtRevision).toHaveBeenCalledWith("acct-2", null);
+    expect(manager.markSuccessAtRevision).not.toHaveBeenCalledWith("acct-1", null);
   });
 
   test("5xx server-retry network error continues outer retry loop", async () => {
@@ -593,8 +593,8 @@ describe("core/executor", () => {
     expect(response.status).toBe(200);
     expect(runtimeFactory.calls).toEqual(["acct-1", "acct-1", "acct-2"]);
     expect(manager.markAuthFailure).not.toHaveBeenCalled();
-    expect(manager.markSuccess).toHaveBeenCalledTimes(1);
-    expect(manager.markSuccess).toHaveBeenCalledWith("acct-2", expect.any(Number));
-    expect(manager.markSuccess).not.toHaveBeenCalledWith("acct-1", expect.any(Number));
+    expect(manager.markSuccessAtRevision).toHaveBeenCalledTimes(1);
+    expect(manager.markSuccessAtRevision).toHaveBeenCalledWith("acct-2", null);
+    expect(manager.markSuccessAtRevision).not.toHaveBeenCalledWith("acct-1", null);
   });
 });

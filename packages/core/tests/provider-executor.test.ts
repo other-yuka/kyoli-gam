@@ -5,7 +5,7 @@ import {
   type SelectedCredential,
 } from "../src/provider-executor";
 import { StickyAccountPool } from "../src/account-pool";
-import { MemoryAccountStore } from "../src/accounts";
+import { MemoryAccountStore, captureRateLimitRevision } from "../src/accounts";
 
 describe("executeWithAccountFailover", () => {
   it("tries more than three accounts by default", async () => {
@@ -182,7 +182,11 @@ describe("executeWithAccountFailover", () => {
         provider: "claude-code",
         kind: "oauth",
         accounts: new StickyAccountPool(store),
-        configuredCredential: { value: "token", accountId: account.id },
+        configuredCredential: {
+          value: "token",
+          accountId: account.id,
+          rateLimitRevision: captureRateLimitRevision(account),
+        },
         sessionKey: "separate-rate-boundaries",
         maxAttempts: 1,
         missingCredentialResponse: () => new Response("missing", { status: 401 }),
@@ -237,7 +241,11 @@ describe("executeWithAccountFailover", () => {
         provider: "claude-code",
         kind: "oauth",
         accounts: new StickyAccountPool(store),
-        configuredCredential: { value: "token", accountId: account.id },
+        configuredCredential: {
+          value: "token",
+          accountId: account.id,
+          rateLimitRevision: captureRateLimitRevision(account),
+        },
         sessionKey: "success-after-rate-limit",
         maxAttempts: 1,
         missingCredentialResponse: () => new Response("missing", { status: 401 }),
@@ -271,6 +279,61 @@ describe("executeWithAccountFailover", () => {
         rateLimitCooldownUntil: cooldownUntil,
         rateLimitObservedAt: now,
       });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears a same-millisecond rate limit captured by the successful request", async () => {
+    const now = new Date("2026-09-11T00:00:00.000Z").getTime();
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+
+    try {
+      const store = new MemoryAccountStore();
+      const account = await store.create({
+        provider: "claude-code",
+        kind: "oauth",
+        credentials: { accessToken: "token" },
+      });
+      await store.recordFailure(account.id, {
+        status: 429,
+        message: "first rate limit",
+        rateLimitCooldownUntil: new Date(now + 60_000).toISOString(),
+      });
+      const blocked = await store.recordFailure(account.id, {
+        status: 429,
+        message: "second rate limit",
+        rateLimitCooldownUntil: new Date(now + 60_000).toISOString(),
+      });
+      if (!blocked) throw new Error("Expected blocked account");
+
+      const response = await executeWithAccountFailover({
+        provider: "claude-code",
+        kind: "oauth",
+        accounts: new StickyAccountPool(store),
+        configuredCredential: {
+          value: "token",
+          accountId: account.id,
+          rateLimitRevision: captureRateLimitRevision(blocked),
+        },
+        sessionKey: "same-millisecond-success",
+        maxAttempts: 1,
+        missingCredentialResponse: () => new Response("missing", { status: 401 }),
+        failureMessage: (status) => `failed ${status}`,
+        selectCredential: async () => undefined,
+        execute: async () => new Response("ok", { status: 200 }),
+      });
+
+      expect(response.status).toBe(200);
+      await expect(store.get(account.id)).resolves.toMatchObject({
+        failureCount: 0,
+        rateLimitObservedAt: now + 2,
+      });
+      const recovered = await store.get(account.id);
+      expect(recovered?.rateLimitResetAt).toBeUndefined();
+      expect(recovered?.rateLimitBlockedAt).toBeUndefined();
+      expect(recovered?.rateLimitCooldownUntil).toBeUndefined();
     } finally {
       vi.useRealTimers();
     }

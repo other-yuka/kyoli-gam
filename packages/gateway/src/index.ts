@@ -1150,6 +1150,7 @@ async function refreshAccountUsageFromProvider(
   }
 
   let result: Awaited<ReturnType<NonNullable<ProviderAdapter["refreshUsage"]>>>;
+  const usageObservedAt = Date.now();
   try {
     result = await provider.refreshUsage({ account });
   } catch (error) {
@@ -1171,7 +1172,10 @@ async function refreshAccountUsageFromProvider(
     };
   }
 
-  const updated = await accounts.update(account.id, createAccountRefreshUpdate(account, result));
+  const updated = await accounts.update(account.id, createAccountRefreshUpdate(account, result, {
+    usageObservedAt,
+    recoverRateLimitState: true,
+  }));
   if (!updated) {
     return {
       ok: false,

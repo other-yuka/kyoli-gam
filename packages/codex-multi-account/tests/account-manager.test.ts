@@ -13,6 +13,7 @@ import type {
   UsageLimits,
 } from "../src/types";
 import { setupTestEnv, createMockClient, createTestStorage, buildFakeJwt } from "./helpers";
+import { captureRateLimitRevision } from "opencode-multi-account-core";
 
 const originalFetch = globalThis.fetch;
 
@@ -201,8 +202,12 @@ describe("account-manager", () => {
       throw new Error("Expected two accounts");
     }
 
-    await manager.applyUsageCache(first.uuid, createUsage(95));
-    await manager.applyUsageCache(second.uuid, createUsage(10));
+    await manager.applyUsageCacheAtRevision(first.uuid, createUsage(95), {
+      expectedRateLimitRevision: captureRateLimitRevision(first),
+    });
+    await manager.applyUsageCacheAtRevision(second.uuid, createUsage(10), {
+      expectedRateLimitRevision: captureRateLimitRevision(second),
+    });
 
     const selected = await manager.selectAccount();
     expect(selected?.uuid).toBe(second.uuid);
@@ -298,8 +303,8 @@ describe("account-manager", () => {
       throw new Error("Expected account");
     }
 
-    const rateLimitObservedAt = await manager.markRateLimited(account.uuid, 60_000);
-    await manager.markSuccess(account.uuid);
+    const rateLimitRevision = await manager.markRateLimitedAtRevision!(account.uuid, 60_000);
+    await manager.markSuccessAtRevision(account.uuid, rateLimitRevision ?? null);
     await manager.refresh();
     const resetAccount = manager.getAccounts().find((candidate) => candidate.uuid === account.uuid);
     if (!resetAccount) {
@@ -307,17 +312,17 @@ describe("account-manager", () => {
     }
     const usage = createUsage(15);
 
-    await manager.applyUsageCache(account.uuid, usage, {
+    await manager.applyUsageCacheAtRevision(account.uuid, usage, {
       observedAt: now,
-      expectedRateLimitObservedAt: resetAccount.rateLimitObservedAt ?? null,
+      expectedRateLimitRevision: captureRateLimitRevision(resetAccount),
     });
 
-    expect(resetAccount.rateLimitObservedAt).toBe(rateLimitObservedAt);
+    expect(resetAccount.rateLimitObservedAt).toBe((rateLimitRevision ?? 0) + 1);
     const saved = await readStorage();
     expect(saved.accounts.find((candidate) => candidate.uuid === account.uuid)).toMatchObject({
       cachedUsage: usage,
       cachedUsageAt: now,
-      rateLimitObservedAt,
+      rateLimitObservedAt: (rateLimitRevision ?? 0) + 1,
     });
     nowSpy.mockRestore();
   });

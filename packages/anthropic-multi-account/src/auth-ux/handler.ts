@@ -8,6 +8,7 @@ import { createMinimalClient, getAccountLabel } from "../shared/utils";
 import { AccountStore } from "../accounts/store";
 import { loginWithOAuth } from "../oauth/anthropic-oauth";
 import { randomUUID } from "node:crypto";
+import { captureRateLimitRevision } from "opencode-multi-account-core";
 import type { ManagedAccount, OAuthCredentials, PluginClient, StoredAccount } from "../shared/types";
 
 type OAuthCallbackResponse =
@@ -300,7 +301,7 @@ async function checkAccountQuota(
   }
 
   const usageObservedAt = Date.now();
-  const expectedRateLimitObservedAt = freshAccount.rateLimitObservedAt ?? null;
+  const expectedRateLimitRevision = captureRateLimitRevision(freshAccount);
   const usageResult = await fetchUsage(freshAccount.accessToken);
   if (!usageResult.ok) {
     printQuotaError(freshAccount, `Failed to fetch usage: ${usageResult.reason}`);
@@ -308,10 +309,17 @@ async function checkAccountQuota(
   }
 
   if (freshAccount.uuid) {
-    await manager.applyUsageCache(freshAccount.uuid, usageResult.data, {
-      observedAt: usageObservedAt,
-      expectedRateLimitObservedAt,
-    });
+    if (manager.applyUsageCacheAtRevision) {
+      await manager.applyUsageCacheAtRevision(freshAccount.uuid, usageResult.data, {
+        observedAt: usageObservedAt,
+        expectedRateLimitRevision,
+      });
+    } else {
+      await manager.applyUsageCache(freshAccount.uuid, usageResult.data, {
+        observedAt: usageObservedAt,
+        expectedRateLimitObservedAt: expectedRateLimitRevision,
+      });
+    }
   }
 
   let reportAccount = freshAccount;

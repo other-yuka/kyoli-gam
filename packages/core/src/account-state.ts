@@ -62,6 +62,26 @@ export function shouldRecoverRateLimitStateAfterUsage(
     hasNoExhaustedUsageWindow(account.metadata.usage, now);
 }
 
+export function readUsageRateLimitBoundary(
+  metadata: Record<string, unknown>,
+  now = Date.now(),
+): string {
+  const usage = readRecord(metadata.cachedUsage) ?? readRecord(metadata.usage);
+  if (!usage) return "";
+
+  return Object.entries(usage)
+    .filter(([key]) => isAccountWideUsageWindowKey(key))
+    .flatMap(([key, value]) => {
+      const window = readRecord(value);
+      if (!window || readUsagePercent(window) !== 100) return [];
+      const resetAt = readUsageWindowResetAt(window);
+      if (!resetAt || !isQuotaWindowActive(resetAt, now)) return [];
+      return [`${key}:${resetAt}`];
+    })
+    .sort()
+    .join("|");
+}
+
 export function readRateLimitRetryAt(account: AccountRecord): string | undefined {
   const candidates = [account.rateLimitResetAt, account.rateLimitCooldownUntil]
     .map((value) => ({ value, timestamp: readIsoMs(value) }))
@@ -107,11 +127,20 @@ function hasFreshAvailableUsageAfterBlock(account: AccountRecord, now: number): 
 }
 
 function readQuotaUsageWindowKeys(usage: Record<string, unknown>): string[] {
-  const keys = Object.keys(usage).filter((key) => key === "seven_day" || key.startsWith("seven_day_"));
-  for (const key of ["secondary", "credits"]) {
-    if (Object.prototype.hasOwnProperty.call(usage, key)) keys.push(key);
-  }
-  return keys;
+  return Object.keys(usage).filter((key) =>
+    isAccountWideUsageWindowKey(key)
+    && key !== "five_hour"
+    && key !== "primary"
+  );
+}
+
+function isAccountWideUsageWindowKey(key: string): boolean {
+  return key === "five_hour"
+    || key === "primary"
+    || key === "seven_day"
+    || key.startsWith("seven_day_")
+    || key === "secondary"
+    || key === "credits";
 }
 
 function readUsagePercent(window: Record<string, unknown>): number | undefined {

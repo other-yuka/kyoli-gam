@@ -1,5 +1,5 @@
 import type { AccountPool } from "./account-pool";
-import type { AccountRecord } from "./accounts";
+import type { AccountRecord, RateLimitRevision } from "./accounts";
 import type { ProviderId } from "./index";
 import type {
   SupervisedTurnResponse,
@@ -22,6 +22,7 @@ interface AccountExecutionTraceBase {
 export interface SelectedCredential {
   value: string;
   accountId?: string;
+  rateLimitRevision?: RateLimitRevision | null;
   selectionDiagnostics?: Record<string, unknown>;
 }
 
@@ -181,10 +182,9 @@ export async function executeWithAccountFailover(
       route: input.traceRoute,
       model: input.traceModel,
     });
-    const requestStartedAt = Date.now();
     const result = await executeWithSameAccountRetry(input, credential);
     const response = result.response;
-    await recordAccountResult(input, credential.accountId, response, result.failure, requestStartedAt);
+    await recordAccountResult(input, credential, response, result.failure);
     const retryable = shouldRetryWithNextAccount({
       status: response.status,
       accountId: credential.accountId,
@@ -385,11 +385,11 @@ function shouldRetrySameAccount(result: AccountExecutionResult): boolean {
 
 async function recordAccountResult(
   input: ExecuteWithAccountFailoverInput,
-  accountId: string | undefined,
+  credential: SelectedCredential,
   response: Response,
   failure?: AccountFailureSignal,
-  requestStartedAt?: number,
 ): Promise<void> {
+  const accountId = credential.accountId;
   if (!input.accounts || !accountId) return;
 
   if (failure && failure.class !== "neutral") {
@@ -410,7 +410,15 @@ async function recordAccountResult(
   }
 
   if (response.ok) {
-    await input.accounts.recordSuccess(accountId, { requestStartedAt });
+    await input.accounts.recordSuccess(
+      accountId,
+      credential.rateLimitRevision === undefined
+        ? { kind: "transport" }
+        : {
+          kind: "request",
+          expectedRateLimitRevision: credential.rateLimitRevision,
+        },
+    );
     return;
   }
 

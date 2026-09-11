@@ -37,13 +37,13 @@ type MockAccountManager = ExecutorAccountManager & {
   selectAccount: Mock<() => Promise<ManagedAccount | null>>;
   getActiveAccount: Mock<() => ManagedAccount | null>;
   refresh: Mock<() => Promise<void>>;
-  markSuccess: Mock<(uuid: string) => Promise<void>>;
+  markSuccessAtRevision: Mock<(uuid: string) => Promise<void>>;
   markRateLimited: Mock<() => Promise<void>>;
   markAuthFailure: Mock<() => Promise<void>>;
   markRevoked: Mock<() => Promise<void>>;
   hasAnyUsableAccount: Mock<() => boolean>;
   getMinWaitTime: Mock<() => number>;
-  applyUsageCache: Mock<() => Promise<void>>;
+  applyUsageCacheAtRevision: Mock<() => Promise<void>>;
 };
 
 function createMockManager(accounts: ManagedAccount[] = [createAccount()]): MockAccountManager {
@@ -58,13 +58,13 @@ function createMockManager(accounts: ManagedAccount[] = [createAccount()]): Mock
     }),
     getActiveAccount: vi.fn(() => accounts[0] ?? null),
     refresh: vi.fn(() => Promise.resolve()),
-    markSuccess: vi.fn(() => Promise.resolve()),
+    markSuccessAtRevision: vi.fn(() => Promise.resolve()),
     markRateLimited: vi.fn(() => Promise.resolve()),
     markAuthFailure: vi.fn(() => Promise.resolve()),
     markRevoked: vi.fn(() => Promise.resolve()),
     hasAnyUsableAccount: vi.fn(() => true),
     getMinWaitTime: vi.fn(() => 0),
-    applyUsageCache: vi.fn(() => Promise.resolve()),
+    applyUsageCacheAtRevision: vi.fn(() => Promise.resolve()),
   };
 }
 
@@ -130,7 +130,7 @@ describe("executeWithAccountRotation", () => {
         "https://api.example.com/v1/chat",
       );
 
-      expect(manager.markSuccess).toHaveBeenCalledWith("acct-1", expect.any(Number));
+      expect(manager.markSuccessAtRevision).toHaveBeenCalledWith("acct-1", null);
     });
   });
 
@@ -196,7 +196,7 @@ describe("executeWithAccountRotation", () => {
 
       expect(response.status).toBe(200);
       expect(factory.invalidate).toHaveBeenCalledWith("acct-1");
-      expect(manager.markSuccess).toHaveBeenCalledWith("acct-1", expect.any(Number));
+      expect(manager.markSuccessAtRevision).toHaveBeenCalledWith("acct-1", null);
     });
 
     test("if retry also 401, marks auth failure and switches account", async () => {
@@ -317,7 +317,7 @@ describe("executeWithAccountRotation", () => {
       // Non-revoked 403 is returned directly (markSuccess is called, response returned)
       expect(response.status).toBe(403);
       expect(manager.markRevoked).not.toHaveBeenCalled();
-      expect(manager.markSuccess).toHaveBeenCalledWith("acct-1", expect.any(Number));
+      expect(manager.markSuccessAtRevision).toHaveBeenCalledWith("acct-1", null);
     });
   });
 
