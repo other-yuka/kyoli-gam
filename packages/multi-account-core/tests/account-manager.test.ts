@@ -512,6 +512,42 @@ describe("core/account-manager", () => {
     nowSpy.mockRestore();
   });
 
+  test("does not migrate a modern quota reset as a legacy provider cooldown", async () => {
+    const AccountManager = createAccountManagerForProvider({
+      providerAuthId: "anthropic",
+      isTokenExpired: () => false,
+      refreshToken: async () => ({ ok: false, permanent: false }),
+    });
+
+    let now = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const store = new AccountStore();
+    const manager = await AccountManager.create(store, createAuth("seed"));
+    const activeUuid = getUuid(manager.getActiveAccount()?.uuid);
+    const rateLimitRevision = await manager.markRateLimitedAtRevision!(
+      activeUuid,
+      60_000,
+      { rateLimitResetMs: 60 * 60_000 },
+    );
+    if (rateLimitRevision === undefined) throw new Error("Expected a rate-limit revision");
+    await store.mutateAccount(activeUuid, (account) => {
+      account.rateLimitCooldownUntil = undefined;
+    });
+
+    now += 60_001;
+    await manager.applyUsageCacheAtRevision(activeUuid, {
+      five_hour: { utilization: 25, resets_at: null },
+      seven_day: null,
+      seven_day_sonnet: null,
+    }, { expectedRateLimitRevision: rateLimitRevision });
+    await manager.refresh();
+
+    expect(manager.getActiveAccount()?.rateLimitCooldownUntil).toBeUndefined();
+    expect(manager.getActiveAccount()?.rateLimitResetAt).toBeUndefined();
+    expect(manager.getActiveAccount()?.rateLimitObservedAt).toBeGreaterThan(rateLimitRevision);
+    nowSpy.mockRestore();
+  });
+
   test("ignores an older usage fetch that completes after a rate-limit snapshot", async () => {
     const AccountManager = createAccountManagerForProvider({
       providerAuthId: "anthropic",

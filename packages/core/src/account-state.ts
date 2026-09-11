@@ -75,20 +75,23 @@ export function readUsageRateLimitBoundary(
   metadata: Record<string, unknown>,
   now = Date.now(),
 ): string {
-  const usage = readRecord(metadata.cachedUsage) ?? readRecord(metadata.usage);
-  if (!usage) return "";
+  const latestSnapshot = readLatestUsageSnapshot(metadata);
+  const usageSnapshots = latestSnapshot
+    ? [latestSnapshot.usage]
+    : [readRecord(metadata.cachedUsage), readRecord(metadata.usage)]
+      .filter((usage): usage is Record<string, unknown> => Boolean(usage));
 
-  return Object.entries(usage)
-    .filter(([key]) => isAccountWideUsageWindowKey(key))
-    .flatMap(([key, value]) => {
-      const window = readRecord(value);
-      if (!window || readUsagePercent(window) !== 100) return [];
-      const resetAt = readUsageWindowResetAt(window);
-      if (!resetAt || !isQuotaWindowActive(resetAt, now)) return [];
-      return [`${key}:${resetAt}`];
-    })
-    .sort()
-    .join("|");
+  return [...new Set(usageSnapshots.flatMap((usage) =>
+    Object.entries(usage)
+      .filter(([key]) => isAccountWideUsageWindowKey(key))
+      .flatMap(([key, value]) => {
+        const window = readRecord(value);
+        if (!window || readUsagePercent(window) !== 100) return [];
+        const resetAt = readUsageWindowResetAt(window);
+        if (!resetAt || !isQuotaWindowActive(resetAt, now)) return [];
+        return [`${key}:${resetAt}`];
+      }),
+  ))].sort().join("|");
 }
 
 export function readRateLimitRetryAt(account: AccountRecord): string | undefined {

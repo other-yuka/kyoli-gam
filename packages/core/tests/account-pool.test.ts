@@ -1,5 +1,12 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { CLAUDE_CODE_CACHED_USAGE_FORMAT, MemoryAccountStore } from "../src/accounts";
+import {
+  CLAUDE_CODE_CACHED_USAGE_FORMAT,
+  MemoryAccountStore,
+  SQLiteAccountStore,
+} from "../src/accounts";
 import { StickyAccountPool } from "../src/account-pool";
 import { summarizeAccountStatus, listFailedAccounts } from "../src/account-status";
 import { MemoryStickySessionStore } from "../src/sticky-sessions";
@@ -340,6 +347,73 @@ describe("StickyAccountPool", () => {
       vi.useRealTimers();
     }
   });
+
+  it.each(["memory", "sqlite"] as const)(
+    "keeps an indeterminate canonical and legacy usage pair blocked in the %s store",
+    async (kind) => {
+      vi.useFakeTimers();
+      const now = new Date("2026-09-11T00:00:00.000Z").getTime();
+      vi.setSystemTime(now);
+      const dir = kind === "sqlite" ? mkdtempSync(join(tmpdir(), "kyoli-account-usage-conflict-")) : undefined;
+
+      try {
+        const store = kind === "sqlite"
+          ? new SQLiteAccountStore(join(dir!, "kyoli.db"))
+          : new MemoryAccountStore();
+        const account = await store.create({
+          provider: "claude-code",
+          kind: "oauth",
+          name: "usage-conflict",
+          metadata: {
+            cachedUsage: {
+              format: CLAUDE_CODE_CACHED_USAGE_FORMAT,
+              five_hour: { utilization: 20, resets_at: null },
+            },
+            usageCachedAt: now,
+            usage: {
+              five_hour: {
+                utilization: 100,
+                resets_at: new Date(now + 120_000).toISOString(),
+              },
+            },
+          },
+        });
+        await store.recordFailure(account.id, {
+          status: 429,
+          message: "rate limited",
+          failureClass: "rate_limit",
+          failureCode: "rate_limit",
+          rateLimitCooldownUntil: new Date(now + 60_000).toISOString(),
+        });
+        const pool = new StickyAccountPool(store);
+
+        vi.setSystemTime(now + 60_001);
+        expect(await pool.select({
+          provider: "claude-code",
+          kind: "oauth",
+          sessionKey: "before-legacy-reset",
+        })).toBeUndefined();
+        await expect(store.get(account.id)).resolves.toMatchObject({
+          failureCount: 1,
+          rateLimitBlockedAt: expect.any(String),
+        });
+
+        vi.setSystemTime(now + 120_001);
+        expect((await pool.select({
+          provider: "claude-code",
+          kind: "oauth",
+          sessionKey: "after-legacy-reset",
+        }))?.id).toBe(account.id);
+        await expect(store.get(account.id)).resolves.toMatchObject({
+          failureCount: 0,
+          rateLimitBlockedAt: undefined,
+        });
+      } finally {
+        vi.useRealTimers();
+        if (dir) rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("recovers a cooldown-only rate limit after its retry window expires", async () => {
     vi.useFakeTimers();

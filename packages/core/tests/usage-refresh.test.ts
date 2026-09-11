@@ -234,6 +234,60 @@ describe("UsageRefreshService", () => {
     });
   });
 
+  it("removes usage windows omitted from an authoritative refresh snapshot", async () => {
+    const now = Date.now();
+    const store = new MemoryAccountStore();
+    const account = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      metadata: {
+        cachedUsageAt: now - 10_000,
+        cachedUsage: {
+          format: "percent-v1",
+          five_hour: { utilization: 10, resets_at: null },
+          seven_day_sonnet: {
+            utilization: 100,
+            resets_at: new Date(now + 7 * 24 * 60 * 60 * 1000).toISOString(),
+          },
+        },
+      },
+    });
+    const provider = createUsageProvider(async ({ account: staleAccount }) => ({
+      ok: true,
+      metadata: {
+        ...staleAccount.metadata,
+        cachedUsageAt: now,
+        cachedUsage: {
+          format: "percent-v1",
+          five_hour: { utilization: 20, resets_at: null },
+          seven_day: { utilization: 30, resets_at: null },
+        },
+      },
+    }), "claude-code");
+    const service = new UsageRefreshService({
+      accounts: store,
+      providers: [provider],
+      intervalMs: 0,
+    });
+
+    await expect(service.refreshOnce()).resolves.toMatchObject({
+      checked: 1,
+      refreshed: 1,
+      failed: 0,
+    });
+    await expect(store.get(account.id)).resolves.toMatchObject({
+      metadata: {
+        cachedUsageAt: now,
+        cachedUsage: {
+          format: "percent-v1",
+          five_hour: { utilization: 20, resets_at: null },
+          seven_day: { utilization: 30, resets_at: null },
+        },
+      },
+    });
+    expect((await store.get(account.id))?.metadata.cachedUsage).not.toHaveProperty("seven_day_sonnet");
+  });
+
   it("does not let an older usage refresh overwrite a newer rate-limit snapshot", async () => {
     vi.useFakeTimers();
     const now = new Date("2026-09-11T00:00:00.000Z").getTime();

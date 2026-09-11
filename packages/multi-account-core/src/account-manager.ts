@@ -1146,6 +1146,9 @@ function getExhaustedAccountWideUsageResetAt(usage: UsageLimits, now: number): n
 }
 
 function getLegacyProviderCooldownUntil(account: StoredAccount, now: number): number | undefined {
+  // The split cooldown/reset fields and revision token were introduced together.
+  // A revision therefore identifies a modern reset that must not be reclassified.
+  if (account.rateLimitObservedAt !== undefined) return undefined;
   const legacyResetAt = account.rateLimitResetAt;
   if (!legacyResetAt || legacyResetAt <= now) return undefined;
 

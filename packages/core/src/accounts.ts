@@ -99,7 +99,7 @@ export function createAccountRefreshUpdate(
       ? { credentialsPatch: changedRecordFields(account.credentials, refreshed.credentials) }
       : {}),
     ...(refreshed.metadata
-      ? { metadataMergePatch: changedRecordFields(account.metadata, refreshed.metadata) }
+      ? { metadataMergePatch: changedMetadataFields(account.metadata, refreshed.metadata) }
       : {}),
     ...(options.usageObservedAt !== undefined
       ? {
@@ -719,16 +719,38 @@ function readFiniteNumber(value: unknown): number | undefined {
 function changedRecordFields(
   previous: Record<string, unknown>,
   refreshed: Record<string, unknown>,
+  includeRemoved = false,
 ): Record<string, unknown> {
   const changed: Record<string, unknown> = {};
+  if (includeRemoved) {
+    for (const key of Object.keys(previous)) {
+      if (!Object.prototype.hasOwnProperty.call(refreshed, key)) changed[key] = undefined;
+    }
+  }
   for (const [key, value] of Object.entries(refreshed)) {
     const previousValue = previous[key];
     if (isRecordValue(previousValue) && isRecordValue(value)) {
-      const nested = changedRecordFields(previousValue, value);
+      const nested = changedRecordFields(previousValue, value, includeRemoved);
       if (Object.keys(nested).length > 0) changed[key] = nested;
     } else if (!isDeepStrictEqual(previousValue, value)) {
       changed[key] = value;
     }
+  }
+  return changed;
+}
+
+function changedMetadataFields(
+  previous: Record<string, unknown>,
+  refreshed: Record<string, unknown>,
+): Record<string, unknown> {
+  const changed = changedRecordFields(previous, refreshed);
+  for (const key of ["cachedUsage", "usage"]) {
+    const previousSnapshot = previous[key];
+    const refreshedSnapshot = refreshed[key];
+    if (!isRecordValue(previousSnapshot) || !isRecordValue(refreshedSnapshot)) continue;
+
+    const snapshotChanges = changedRecordFields(previousSnapshot, refreshedSnapshot, true);
+    if (Object.keys(snapshotChanges).length > 0) changed[key] = snapshotChanges;
   }
   return changed;
 }
