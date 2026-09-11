@@ -1301,6 +1301,88 @@ describe("createClaudeCodeProvider", () => {
     expect((refreshed?.metadata?.cachedUsage as { five_hour?: { utilization: number } }).five_hour?.utilization).toBe(15);
   });
 
+  it("does not timestamp retained usage as a new provider observation", async () => {
+    const oldUsageAt = Date.now() - 60 * 60 * 1000;
+    const reportedUsageAt = Date.now();
+    const store = new MemoryAccountStore();
+    const account = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+      },
+      metadata: {
+        cachedUsageAt: oldUsageAt,
+        cachedUsage: {
+          format: "percent-v1",
+          five_hour: { utilization: 20, resets_at: null },
+        },
+      },
+    });
+    const provider = createTestClaudeCodeProvider({
+      accounts: new StickyAccountPool(store),
+      baseUrl: "https://example.test",
+      usageRefresh: async () => ({
+        planTier: "max",
+        cachedUsageAt: reportedUsageAt,
+      }),
+    });
+
+    const refreshed = await provider.refreshUsage?.({ account });
+
+    expect(refreshed).toMatchObject({
+      ok: true,
+      metadata: {
+        planTier: "max",
+        cachedUsageAt: oldUsageAt,
+        cachedUsage: {
+          five_hour: { utilization: 20 },
+        },
+      },
+    });
+  });
+
+  it("does not attach a retained timestamp to newly returned usage", async () => {
+    const oldUsageAt = Date.now() - 60 * 60 * 1000;
+    const store = new MemoryAccountStore();
+    const account = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+      },
+      metadata: {
+        cachedUsageAt: oldUsageAt,
+        cachedUsage: {
+          format: "percent-v1",
+          five_hour: { utilization: 90, resets_at: null },
+        },
+      },
+    });
+    const provider = createTestClaudeCodeProvider({
+      accounts: new StickyAccountPool(store),
+      baseUrl: "https://example.test",
+      usageRefresh: async () => ({
+        cachedUsage: {
+          five_hour: { utilization: 15, resets_at: null },
+        },
+      }),
+    });
+
+    const refreshed = await provider.refreshUsage?.({ account });
+
+    expect(refreshed?.ok).toBe(true);
+    expect(refreshed?.metadata?.cachedUsageAt).toBeUndefined();
+    expect(refreshed?.metadata?.cachedUsage).toMatchObject({
+      format: "percent-v1",
+      five_hour: { utilization: 15 },
+    });
+  });
+
   it("fails over after upstream rate limits an OAuth account", async () => {
     const store = new MemoryAccountStore();
     const first = await store.create({

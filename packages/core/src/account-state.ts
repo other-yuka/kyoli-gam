@@ -65,8 +65,10 @@ export function shouldRecoverRateLimitStateAfterUsage(
     return false;
   }
   if (isCurrentlyRateLimitCoolingDown(account, now)) return false;
-  return hasNoExhaustedUsageWindow(account.metadata.cachedUsage, now) ||
-    hasNoExhaustedUsageWindow(account.metadata.usage, now);
+  const blockedAt = readIsoMs(account.rateLimitBlockedAt);
+  const usageSnapshot = readLatestUsageSnapshot(account.metadata);
+  if (blockedAt === undefined || !usageSnapshot || usageSnapshot.observedAt <= blockedAt) return false;
+  return hasNoExhaustedUsageWindow(usageSnapshot.usage, now);
 }
 
 export function readUsageRateLimitBoundary(
@@ -114,11 +116,9 @@ function hasFreshAvailableUsageAfterBlock(account: AccountRecord, now: number): 
   const blockedAt = readIsoMs(account.rateLimitBlockedAt);
   if (blockedAt === undefined) return false;
 
-  const cachedUsageAt = readNumber(account.metadata.cachedUsageAt);
-  if (!cachedUsageAt || cachedUsageAt <= blockedAt) return false;
-
-  const usage = readRecord(account.metadata.cachedUsage) ?? readRecord(account.metadata.usage);
-  if (!usage) return false;
+  const usageSnapshot = readLatestUsageSnapshot(account.metadata);
+  if (!usageSnapshot || usageSnapshot.observedAt <= blockedAt) return false;
+  const { usage } = usageSnapshot;
 
   const keys = account.lastFailureClass === "quota"
     ? readQuotaUsageWindowKeys(usage)
@@ -134,6 +134,25 @@ function hasFreshAvailableUsageAfterBlock(account: AccountRecord, now: number): 
     const resetAt = readUsageWindowResetAt(window);
     return (resetAt != null && !isQuotaWindowActive(resetAt, now)) || utilization < 100;
   });
+}
+
+function readLatestUsageSnapshot(
+  metadata: Record<string, unknown>,
+): { usage: Record<string, unknown>; observedAt: number } | undefined {
+  const cachedUsage = readRecord(metadata.cachedUsage);
+  const cachedUsageAt = readNumber(metadata.cachedUsageAt);
+  const legacyUsage = readRecord(metadata.usage);
+  const legacyUsageAt = readNumber(metadata.usageCachedAt);
+  const cachedSnapshot = cachedUsage && cachedUsageAt !== undefined
+    ? { usage: cachedUsage, observedAt: cachedUsageAt }
+    : undefined;
+  const legacySnapshot = legacyUsage && legacyUsageAt !== undefined
+    ? { usage: legacyUsage, observedAt: legacyUsageAt }
+    : undefined;
+
+  if (!cachedSnapshot) return legacySnapshot;
+  if (!legacySnapshot || cachedSnapshot.observedAt >= legacySnapshot.observedAt) return cachedSnapshot;
+  return legacySnapshot;
 }
 
 function readQuotaUsageWindowKeys(usage: Record<string, unknown>): string[] {

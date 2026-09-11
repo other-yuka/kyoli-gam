@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  CLAUDE_CODE_CACHED_USAGE_FORMAT,
   MemoryAccountStore,
   SQLiteAccountStore,
   SQLiteRequestLogStore,
@@ -505,7 +506,8 @@ describe("AccountStore state reset", () => {
         rateLimitResetAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
         rateLimitCooldownUntil: new Date(Date.now() - 1).toISOString(),
       });
-      const usageObservedAt = Date.now();
+      const blockedAt = Date.parse(blocked!.rateLimitBlockedAt!);
+      const usageObservedAt = Math.max(Date.now(), blockedAt + 1);
       const refreshed = {
         metadata: {
           ...blocked!.metadata,
@@ -543,6 +545,138 @@ describe("AccountStore state reset", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it.each(["memory", "sqlite"] as const)(
+    "does not recover rate-limit state from usage observed before the block in the %s store",
+    async (kind) => {
+      const now = new Date("2026-09-11T00:00:00.000Z").getTime();
+      const dir = kind === "sqlite" ? mkdtempSync(join(tmpdir(), "kyoli-account-stale-usage-")) : undefined;
+      vi.useFakeTimers();
+      vi.setSystemTime(now);
+
+      try {
+        const store = kind === "sqlite"
+          ? new SQLiteAccountStore(join(dir!, "kyoli.db"))
+          : new MemoryAccountStore();
+        const staleUsageAt = now - 60_000;
+        const account = await store.create({
+          provider: "claude-code",
+          kind: "oauth",
+          metadata: {
+            cachedUsageAt: staleUsageAt,
+            cachedUsage: {
+              format: CLAUDE_CODE_CACHED_USAGE_FORMAT,
+              five_hour: { utilization: 20, resets_at: null },
+            },
+          },
+        });
+        const resetAt = new Date(now + 60 * 60 * 1000).toISOString();
+        const cooldownUntil = new Date(now - 1).toISOString();
+        const blocked = await store.recordFailure(account.id, {
+          status: 429,
+          message: "rate limited",
+          failureClass: "rate_limit",
+          rateLimitResetAt: resetAt,
+          rateLimitCooldownUntil: cooldownUntil,
+        });
+        if (!blocked) throw new Error("Expected blocked account");
+
+        const updated = await store.update(account.id, createAccountRefreshUpdate(blocked, {
+          metadata: {
+            ...blocked.metadata,
+            planTier: "max",
+          },
+        }, {
+          usageObservedAt: now + 1,
+          recoverRateLimitState: true,
+        }));
+
+        expect(updated).toMatchObject({
+          failureCount: 1,
+          rateLimitBlockedAt: blocked.rateLimitBlockedAt,
+          rateLimitResetAt: resetAt,
+          rateLimitCooldownUntil: cooldownUntil,
+          metadata: {
+            planTier: "max",
+            cachedUsageAt: staleUsageAt,
+          },
+        });
+      } finally {
+        vi.useRealTimers();
+        if (dir) rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each(["memory", "sqlite"] as const)(
+    "uses the latest usage snapshot when legacy and canonical caches coexist in the %s store",
+    async (kind) => {
+      const now = new Date("2026-09-11T00:00:00.000Z").getTime();
+      const dir = kind === "sqlite" ? mkdtempSync(join(tmpdir(), "kyoli-account-latest-usage-")) : undefined;
+      vi.useFakeTimers();
+      vi.setSystemTime(now);
+
+      try {
+        const store = kind === "sqlite"
+          ? new SQLiteAccountStore(join(dir!, "kyoli.db"))
+          : new MemoryAccountStore();
+        const account = await store.create({
+          provider: "claude-code",
+          kind: "oauth",
+          metadata: {
+            usageCachedAt: now - 60_000,
+            usage: {
+              five_hour: { utilization: 20, resets_at: null },
+            },
+          },
+        });
+        const resetAt = new Date(now + 60 * 60 * 1000).toISOString();
+        const cooldownUntil = new Date(now - 1).toISOString();
+        const blocked = await store.recordFailure(account.id, {
+          status: 429,
+          message: "rate limited",
+          failureClass: "rate_limit",
+          rateLimitResetAt: resetAt,
+          rateLimitCooldownUntil: cooldownUntil,
+        });
+        if (!blocked) throw new Error("Expected blocked account");
+        const refreshedUsageAt = now + 1;
+
+        const updated = await store.update(account.id, createAccountRefreshUpdate(blocked, {
+          metadata: {
+            ...blocked.metadata,
+            cachedUsageAt: refreshedUsageAt,
+            cachedUsage: {
+              format: CLAUDE_CODE_CACHED_USAGE_FORMAT,
+              five_hour: {
+                utilization: 100,
+                resets_at: new Date(now + 2 * 60 * 60 * 1000).toISOString(),
+              },
+            },
+          },
+        }, {
+          usageObservedAt: refreshedUsageAt,
+          recoverRateLimitState: true,
+        }));
+
+        expect(updated).toMatchObject({
+          failureCount: 1,
+          rateLimitBlockedAt: blocked.rateLimitBlockedAt,
+          rateLimitResetAt: resetAt,
+          rateLimitCooldownUntil: cooldownUntil,
+          metadata: {
+            cachedUsageAt: refreshedUsageAt,
+            cachedUsage: {
+              five_hour: { utilization: 100 },
+            },
+          },
+        });
+      } finally {
+        vi.useRealTimers();
+        if (dir) rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("puts transient 401/403 failures into auth cooldown without disabling the account", async () => {
     const store = new MemoryAccountStore();
@@ -789,11 +923,11 @@ describe("AccountStore state reset", () => {
           five_hour: { utilization: 20, resets_at: null },
         };
         const availableUpdate = createAccountRefreshUpdate(blocked, {
-          metadata: { cachedUsageAt: now, cachedUsage: availableUsage },
-        }, { usageObservedAt: now, recoverRateLimitState: true });
+          metadata: { cachedUsageAt: now + 1, cachedUsage: availableUsage },
+        }, { usageObservedAt: now + 1, recoverRateLimitState: true });
         const exhaustedUpdate = createAccountRefreshUpdate(blocked, {
           metadata: {
-            cachedUsageAt: now + 1,
+            cachedUsageAt: now + 2,
             cachedUsage: {
               five_hour: {
                 utilization: 100,
@@ -801,7 +935,7 @@ describe("AccountStore state reset", () => {
               },
             },
           },
-        }, { usageObservedAt: now + 1, recoverRateLimitState: true });
+        }, { usageObservedAt: now + 2, recoverRateLimitState: true });
 
         await store.update(account.id, availableUpdate);
         await store.update(account.id, exhaustedUpdate);
@@ -915,10 +1049,10 @@ describe("AccountStore state reset", () => {
       if (!blocked) throw new Error("Expected blocked account");
       const availableUpdate = createAccountRefreshUpdate(blocked, {
         metadata: {
-          cachedUsageAt: now,
+          cachedUsageAt: now + 1,
           cachedUsage: { five_hour: { utilization: 20, resets_at: null } },
         },
-      }, { usageObservedAt: now, recoverRateLimitState: true });
+      }, { usageObservedAt: now + 1, recoverRateLimitState: true });
 
       await store.recordFailure(account.id, {
         status: 401,

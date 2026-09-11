@@ -905,12 +905,16 @@ async function refreshClaudeCodeUsageForAccount(input: {
     };
   }
 
-  const cachedUsage = refreshed.cachedUsage === undefined
+  const hasRefreshedUsage = refreshed.cachedUsage !== undefined;
+  const cachedUsage = !hasRefreshedUsage
     ? metadata.cachedUsage
     : {
       ...refreshed.cachedUsage,
       format: CLAUDE_CODE_CACHED_USAGE_FORMAT,
     };
+  const cachedUsageAt = hasRefreshedUsage
+    ? refreshed.cachedUsageAt
+    : metadata.cachedUsageAt;
 
   return {
     ok: true,
@@ -920,7 +924,7 @@ async function refreshClaudeCodeUsageForAccount(input: {
       email: refreshed.email ?? metadata.email,
       planTier: refreshed.planTier ?? metadata.planTier,
       cachedUsage,
-      cachedUsageAt: refreshed.cachedUsageAt ?? metadata.cachedUsageAt,
+      cachedUsageAt,
     },
   };
 }
