@@ -1928,6 +1928,8 @@ describe("createClaudeCodeProvider", () => {
     expect(firstUpdated?.lastFailureCode).toBe("non_subscription_billing_claim");
     expect(firstUpdated?.metadata.rateLimitClaim).toBe("api");
     expect(firstUpdated?.rateLimitBlockedAt).toBeTruthy();
+    expect(Date.parse(firstUpdated!.rateLimitCooldownUntil!) - Date.now())
+      .toBeGreaterThan(23 * 60 * 60 * 1000);
     expect(secondUpdated?.lastUsedAt).toBeTruthy();
   });
 

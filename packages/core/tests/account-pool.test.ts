@@ -6,6 +6,7 @@ import {
   CLAUDE_CODE_CACHED_USAGE_FORMAT,
   MemoryAccountStore,
   SQLiteAccountStore,
+  createAccountRefreshUpdate,
 } from "../src/accounts";
 import { StickyAccountPool } from "../src/account-pool";
 import { summarizeAccountStatus, listFailedAccounts } from "../src/account-status";
@@ -342,6 +343,70 @@ describe("StickyAccountPool", () => {
         provider: "claude-code",
         kind: "oauth",
         sessionKey: "after-usage-reset",
+      }))?.id).toBe(account.id);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps exhausted usage without a reset blocked until a fresh snapshot arrives", async () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-09-11T00:00:00.000Z").getTime();
+    vi.setSystemTime(now);
+
+    try {
+      const store = new MemoryAccountStore();
+      const account = await store.create({
+        provider: "claude-code",
+        kind: "oauth",
+        name: "unknown-reset",
+        metadata: {
+          cachedUsageAt: now,
+          cachedUsage: {
+            format: CLAUDE_CODE_CACHED_USAGE_FORMAT,
+            five_hour: {
+              utilization: 100,
+              resets_at: new Date(now + 60_000).toISOString(),
+            },
+            seven_day: { utilization: 100, resets_at: null },
+          },
+        },
+      });
+      await store.recordFailure(account.id, {
+        status: 429,
+        message: "quota exhausted",
+        failureClass: "quota",
+        rateLimitResetAt: new Date(now + 60_000).toISOString(),
+        rateLimitCooldownUntil: new Date(now + 60_000).toISOString(),
+      });
+      const pool = new StickyAccountPool(store);
+
+      vi.setSystemTime(now + 60_001);
+      expect(await pool.select({
+        provider: "claude-code",
+        kind: "oauth",
+        sessionKey: "before-fresh-usage",
+      })).toBeUndefined();
+
+      const blocked = await store.get(account.id);
+      if (!blocked) throw new Error("Expected blocked account");
+      const observedAt = now + 60_002;
+      await store.update(account.id, createAccountRefreshUpdate(blocked, {
+        metadata: {
+          ...blocked.metadata,
+          cachedUsageAt: observedAt,
+          cachedUsage: {
+            format: CLAUDE_CODE_CACHED_USAGE_FORMAT,
+            five_hour: { utilization: 20, resets_at: null },
+            seven_day: { utilization: 30, resets_at: null },
+          },
+        },
+      }, { usageObservedAt: observedAt, recoverRateLimitState: true }));
+
+      expect((await pool.select({
+        provider: "claude-code",
+        kind: "oauth",
+        sessionKey: "after-fresh-usage",
       }))?.id).toBe(account.id);
     } finally {
       vi.useRealTimers();

@@ -809,10 +809,29 @@ function recordAccountSuccess(
   const lostRateLimitRace = input.kind === "request"
     && input.expectedRateLimitRevision !== undefined
     && captureRateLimitRevision(existing) !== input.expectedRateLimitRevision;
-  if (input.kind === "transport" || lostRateLimitRace) {
+  if (input.kind === "transport") {
     return {
       ...existing,
       lastUsedAt: now,
+      updatedAt: now,
+    };
+  }
+  if (lostRateLimitRace) {
+    return {
+      ...existing,
+      ...(clearsUsage
+        ? {}
+        : {
+          failureCount: 0,
+          lastErrorAt: undefined,
+          lastFailureClass: undefined,
+          lastFailureCode: undefined,
+          lastFailureMessage: undefined,
+          lastFailurePhase: undefined,
+        }),
+      lastUsedAt: now,
+      authCooldownUntil: undefined,
+      consecutiveAuthFailures: 0,
       updatedAt: now,
     };
   }

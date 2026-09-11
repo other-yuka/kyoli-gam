@@ -312,8 +312,7 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       return readAccountWideUsageTiers(usage).some((tier) => {
         const utilization = normalizeUsagePercent(tier.utilization);
         return utilization === 100
-          && tier.resetAt != null
-          && Date.parse(tier.resetAt) > now;
+          && isQuotaWindowActive(tier.resetAt, now);
       });
     }
 
@@ -730,8 +729,6 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
           if (invalidateUsageSnapshots && clearsUsage) {
             account.cachedUsage = undefined;
             account.cachedUsageAt = undefined;
-          }
-          if (invalidateUsageSnapshots && clearsUsage) {
             account.rateLimitObservedAt = nextRateLimitRevision(account.rateLimitObservedAt, now);
           }
           clearedRateLimit = true;
@@ -860,7 +857,7 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       const observedAt = options.observedAt ?? Date.now();
       await this.store.mutateAccount(uuid, (account) => {
         const now = Date.now();
-        if ((account.cachedUsageAt ?? 0) > observedAt) return;
+        if (account.cachedUsageAt !== undefined && account.cachedUsageAt >= observedAt) return;
         if (!canApplyUsage(account, observedAt)) return;
         const previousUsageResetAt = account.cachedUsage
           ? getExhaustedAccountWideUsageResetAt(account.cachedUsage, now)
@@ -1132,6 +1129,11 @@ function nextRateLimitRevision(
 }
 
 function getExhaustedAccountWideUsageResetAt(usage: UsageLimits, now: number): number | undefined {
+  const resetTimes = getExhaustedAccountWideUsageResetTimes(usage, now);
+  return resetTimes.length > 0 ? Math.max(...resetTimes) : undefined;
+}
+
+function getExhaustedAccountWideUsageResetTimes(usage: UsageLimits, now: number): number[] {
   const resetTimes = [usage.five_hour, usage.seven_day]
     .flatMap((tier) => {
       if (tier == null || normalizeUsagePercent(tier.utilization) !== 100 || tier.resets_at == null) {
@@ -1142,7 +1144,7 @@ function getExhaustedAccountWideUsageResetAt(usage: UsageLimits, now: number): n
     })
     .filter((resetAt) => Number.isFinite(resetAt) && resetAt > now);
 
-  return resetTimes.length > 0 ? Math.max(...resetTimes) : undefined;
+  return resetTimes;
 }
 
 function getLegacyProviderCooldownUntil(account: StoredAccount, now: number): number | undefined {
@@ -1152,10 +1154,10 @@ function getLegacyProviderCooldownUntil(account: StoredAccount, now: number): nu
   const legacyResetAt = account.rateLimitResetAt;
   if (!legacyResetAt || legacyResetAt <= now) return undefined;
 
-  const usageResetAt = account.cachedUsage
-    ? getExhaustedAccountWideUsageResetAt(account.cachedUsage, now)
-    : undefined;
-  return usageResetAt === legacyResetAt ? undefined : legacyResetAt;
+  const usageResetTimes = account.cachedUsage
+    ? getExhaustedAccountWideUsageResetTimes(account.cachedUsage, now)
+    : [];
+  return usageResetTimes.includes(legacyResetAt) ? undefined : legacyResetAt;
 }
 
 function readFutureResetAt(resetMs: number | undefined, now: number): number | undefined {

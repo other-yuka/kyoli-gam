@@ -88,7 +88,8 @@ export function readUsageRateLimitBoundary(
         const window = readRecord(value);
         if (!window || readUsagePercent(window) !== 100) return [];
         const resetAt = readUsageWindowResetAt(window);
-        if (!resetAt || !isQuotaWindowActive(resetAt, now)) return [];
+        if (!resetAt) return [`${key}:unknown`];
+        if (!isQuotaWindowActive(resetAt, now)) return [];
         return [`${key}:${resetAt}`];
       }),
   ))].sort().join("|");
@@ -123,9 +124,11 @@ function hasFreshAvailableUsageAfterBlock(account: AccountRecord, now: number): 
   if (!usageSnapshot || usageSnapshot.observedAt <= blockedAt) return false;
   const { usage } = usageSnapshot;
 
-  const keys = account.lastFailureClass === "quota"
-    ? readQuotaUsageWindowKeys(usage)
-    : ["five_hour", "primary"];
+  if (account.lastFailureClass === "quota") {
+    return hasNoExhaustedUsageWindow(usage, now);
+  }
+
+  const keys = ["five_hour", "primary"];
   const windows = keys
     .map((key) => readRecord(usage[key]))
     .filter((window): window is Record<string, unknown> => Boolean(window));
@@ -157,14 +160,6 @@ function readLatestUsageSnapshot(
   if (!cachedSnapshot) return legacySnapshot;
   if (!legacySnapshot || cachedSnapshot.observedAt >= legacySnapshot.observedAt) return cachedSnapshot;
   return legacySnapshot;
-}
-
-function readQuotaUsageWindowKeys(usage: Record<string, unknown>): string[] {
-  return Object.keys(usage).filter((key) =>
-    isAccountWideUsageWindowKey(key)
-    && key !== "five_hour"
-    && key !== "primary"
-  );
 }
 
 function isAccountWideUsageWindowKey(key: string): boolean {

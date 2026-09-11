@@ -81,6 +81,7 @@ const CLAUDE_CODE_BROWSER_ACCESS =
 const CLAUDE_CODE_TIMEOUT_SECONDS = templateHeaders["x-stainless-timeout"] ?? "600";
 const STAINLESS_PACKAGE_VERSION = "0.81.0";
 const TOKEN_EXPIRY_BUFFER_MS = 60_000;
+const NON_SUBSCRIPTION_BILLING_BACKOFF_SECONDS = 24 * 60 * 60;
 const BILLABLE_BETA_PREFIXES = ["extended-cache-ttl-"];
 const CONTEXT_1M_BETA = "context-1m-2025-08-07";
 const CONTEXT_MANAGEMENT_BETA = "context-management-2025-06-27";
@@ -619,7 +620,10 @@ function inferClaudeCodeBillingClaimFailure(response: Response): AccountFailureS
     metadata: readClaudeCodeRateLimitMetadata(response.headers),
     phase: "startup",
     resetAt,
-    retryAfterSeconds: readClaudeCodeRetryAfterSeconds(response.headers) ?? 60,
+    retryAfterSeconds: Math.max(
+      readClaudeCodeRetryAfterSeconds(response.headers) ?? 0,
+      NON_SUBSCRIPTION_BILLING_BACKOFF_SECONDS,
+    ),
     retryScope: "next_account",
   };
 }

@@ -356,18 +356,25 @@ describe("core/account-manager", () => {
 
     const manager = await AccountManager.create(new AccountStore(), createAuth("seed"));
     const activeUuid = getUuid(manager.getActiveAccount()?.uuid);
+    const firstObservedAt = Date.now();
 
     await manager.applyUsageCacheAtRevision(activeUuid, {
       five_hour: { utilization: 100, resets_at: new Date(Date.now() + 60_000).toISOString() },
       seven_day: null,
       seven_day_sonnet: null,
-    }, { expectedRateLimitRevision: captureRateLimitRevision(manager.getActiveAccount()!) });
+    }, {
+      observedAt: firstObservedAt,
+      expectedRateLimitRevision: captureRateLimitRevision(manager.getActiveAccount()!),
+    });
     await manager.refresh();
     await manager.applyUsageCacheAtRevision(activeUuid, {
       five_hour: { utilization: 0, resets_at: new Date(Date.now() + 3_600_000).toISOString() },
       seven_day: { utilization: 40, resets_at: new Date(Date.now() + 86_400_000).toISOString() },
       seven_day_sonnet: null,
-    }, { expectedRateLimitRevision: captureRateLimitRevision(manager.getActiveAccount()!) });
+    }, {
+      observedAt: firstObservedAt + 1,
+      expectedRateLimitRevision: captureRateLimitRevision(manager.getActiveAccount()!),
+    });
     await manager.refresh();
 
     expect(manager.getActiveAccount()?.rateLimitResetAt).toBe(undefined);
@@ -437,6 +444,49 @@ describe("core/account-manager", () => {
     nowSpy.mockRestore();
   });
 
+  test("recognizes any legacy exhausted window reset as quota-owned", async () => {
+    const AccountManager = createAccountManagerForProvider({
+      providerAuthId: "anthropic",
+      isTokenExpired: () => false,
+      refreshToken: async () => ({ ok: false, permanent: false }),
+    });
+
+    let now = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const store = new AccountStore();
+    const manager = await AccountManager.create(store, createAuth("seed"));
+    const activeUuid = getUuid(manager.getActiveAccount()?.uuid);
+    const fiveHourResetAt = now + 5 * 60 * 60 * 1000;
+    const sevenDayResetAt = now + 7 * 24 * 60 * 60 * 1000;
+    await store.mutateAccount(activeUuid, (account) => {
+      account.rateLimitResetAt = fiveHourResetAt;
+      account.cachedUsage = {
+        five_hour: {
+          utilization: 100,
+          resets_at: new Date(fiveHourResetAt).toISOString(),
+        },
+        seven_day: {
+          utilization: 100,
+          resets_at: new Date(sevenDayResetAt).toISOString(),
+        },
+        seven_day_sonnet: null,
+      };
+      account.cachedUsageAt = now;
+    });
+
+    now += 60 * 60 * 1000;
+    await manager.applyUsageCacheAtRevision(activeUuid, {
+      five_hour: { utilization: 20, resets_at: null },
+      seven_day: { utilization: 30, resets_at: null },
+      seven_day_sonnet: null,
+    }, { expectedRateLimitRevision: null });
+    await manager.refresh();
+
+    expect(manager.getActiveAccount()?.rateLimitCooldownUntil).toBeUndefined();
+    expect(manager.getActiveAccount()?.rateLimitResetAt).toBeUndefined();
+    nowSpy.mockRestore();
+  });
+
   test("a non-exhausted provider snapshot replaces a stale exhausted usage window", async () => {
     const AccountManager = createAccountManagerForProvider({
       providerAuthId: "anthropic",
@@ -474,6 +524,41 @@ describe("core/account-manager", () => {
     now += 60_001;
     manager.clearExpiredRateLimits();
     expect(manager.isRateLimited(manager.getActiveAccount()!)).toBe(false);
+    nowSpy.mockRestore();
+  });
+
+  test("keeps exhausted usage without a reset blocked until a fresh snapshot arrives", async () => {
+    const AccountManager = createAccountManagerForProvider({
+      providerAuthId: "anthropic",
+      isTokenExpired: () => false,
+      refreshToken: async () => ({ ok: false, permanent: false }),
+    });
+
+    let now = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const manager = await AccountManager.create(new AccountStore(), createAuth("seed"));
+    const activeUuid = getUuid(manager.getActiveAccount()?.uuid);
+    const rateLimitRevision = await manager.markRateLimitedAtRevision!(activeUuid, 60_000, {
+      usage: {
+        five_hour: {
+          utilization: 100,
+          resets_at: new Date(now + 60_000).toISOString(),
+        },
+        seven_day: { utilization: 100, resets_at: null },
+        seven_day_sonnet: null,
+      },
+    });
+    if (rateLimitRevision === undefined) throw new Error("Expected a rate-limit revision");
+
+    now += 60_001;
+    await expect(manager.selectAccount()).resolves.toBeNull();
+    await manager.applyUsageCacheAtRevision(activeUuid, {
+      five_hour: { utilization: 20, resets_at: null },
+      seven_day: { utilization: 30, resets_at: null },
+      seven_day_sonnet: null,
+    }, { observedAt: now, expectedRateLimitRevision: rateLimitRevision });
+
+    await expect(manager.selectAccount()).resolves.toMatchObject({ uuid: activeUuid });
     nowSpy.mockRestore();
   });
 
@@ -781,6 +866,49 @@ describe("core/account-manager", () => {
     });
     expect(manager.getActiveAccount()?.rateLimitResetAt).toBeUndefined();
     expect(manager.getActiveAccount()?.rateLimitCooldownUntil).toBeUndefined();
+    nowSpy.mockRestore();
+  });
+
+  test("accepts only the first usage result observed in the same millisecond", async () => {
+    const AccountManager = createAccountManagerForProvider({
+      providerAuthId: "anthropic",
+      isTokenExpired: () => false,
+      refreshToken: async () => ({ ok: false, permanent: false }),
+    });
+
+    const now = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const manager = await AccountManager.create(new AccountStore(), createAuth("seed"));
+    const activeUuid = getUuid(manager.getActiveAccount()?.uuid);
+    const expectedRateLimitRevision = captureRateLimitRevision(manager.getActiveAccount()!);
+    const availableUsage = {
+      five_hour: { utilization: 20, resets_at: null },
+      seven_day: null,
+      seven_day_sonnet: null,
+    };
+
+    await manager.applyUsageCacheAtRevision(activeUuid, availableUsage, {
+      observedAt: now,
+      expectedRateLimitRevision,
+    });
+    await manager.applyUsageCacheAtRevision(activeUuid, {
+      five_hour: {
+        utilization: 100,
+        resets_at: new Date(now + 60 * 60 * 1000).toISOString(),
+      },
+      seven_day: null,
+      seven_day_sonnet: null,
+    }, {
+      observedAt: now,
+      expectedRateLimitRevision,
+    });
+    await manager.refresh();
+
+    expect(manager.getActiveAccount()).toMatchObject({
+      cachedUsage: availableUsage,
+      cachedUsageAt: now,
+    });
+    expect(manager.getActiveAccount()?.rateLimitResetAt).toBeUndefined();
     nowSpy.mockRestore();
   });
 

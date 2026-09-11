@@ -256,8 +256,10 @@ export function createRateLimitHandlers(dependencies: RateLimitDependencies) {
       rateLimitRevision = rateLimitOptions === undefined
         ? await markRateLimitedAtRevision(account.uuid, cooldownMs)
         : await markRateLimitedAtRevision(account.uuid, cooldownMs, rateLimitOptions);
-    } else {
+    } else if (rateLimitOptions === undefined) {
       await manager.markRateLimited(account.uuid, waitMs);
+    } else {
+      await manager.markRateLimited(account.uuid, waitMs, rateLimitOptions);
     }
 
     const shouldFetchUsage = (!supportsRevisionGuards || rateLimitRevision !== undefined)

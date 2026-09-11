@@ -128,7 +128,9 @@ describe("core/rate-limit", () => {
       new Response("", { status: 429, headers: { "retry-after-ms": "5000" } }),
     );
 
-    expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", 60_000);
+    expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", 60_000, {
+      rateLimitResetMs: 60_000,
+    });
     expect(fetchUsage).toHaveBeenCalledWith("access-1", "acct-id-1");
     expect(manager.applyUsageCache).toHaveBeenCalledWith("acct-1", usage);
     nowSpy.mockRestore();

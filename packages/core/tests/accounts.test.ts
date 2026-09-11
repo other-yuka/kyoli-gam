@@ -1170,6 +1170,47 @@ describe("AccountStore state reset", () => {
     },
   );
 
+  it("clears auth backoff on a stale-revision request success without clearing a newer rate limit", async () => {
+    const store = new MemoryAccountStore();
+    const account = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: { accessToken: "token" },
+    });
+    const authFailed = await store.recordFailure(account.id, {
+      status: 401,
+      message: "temporary auth failure",
+      failureClass: "auth",
+      failureCode: "invalid_token",
+    });
+    if (!authFailed) throw new Error("Expected auth failure state");
+    const staleRevision = captureRateLimitRevision(authFailed);
+    const resetAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    await store.recordFailure(account.id, {
+      status: 429,
+      message: "newer rate limit",
+      failureClass: "rate_limit",
+      failureCode: "rate_limit",
+      rateLimitResetAt: resetAt,
+      rateLimitCooldownUntil: resetAt,
+    });
+
+    const succeeded = await store.recordSuccess(account.id, {
+      kind: "request",
+      expectedRateLimitRevision: staleRevision,
+    });
+
+    expect(succeeded).toMatchObject({
+      failureCount: 2,
+      consecutiveAuthFailures: 0,
+      authCooldownUntil: undefined,
+      lastFailureClass: "rate_limit",
+      lastFailureCode: "rate_limit",
+      rateLimitResetAt: resetAt,
+      rateLimitCooldownUntil: resetAt,
+    });
+  });
+
   it.each(["memory", "sqlite"] as const)(
     "preserves legacy request-success recovery in the %s store",
     async (kind) => {
