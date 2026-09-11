@@ -915,24 +915,44 @@ async function refreshClaudeCodeUsageForAccount(input: {
 }
 
 function readClaudeCodeRateLimitResetAt(headers: Headers): string | undefined {
+  const claim = headers.get("anthropic-ratelimit-unified-representative-claim")?.toLowerCase();
+  const utilization = claim ? claudeClaimUtilization(headers, claim) : undefined;
   const reset = headers.get("anthropic-ratelimit-unified-reset");
-  if (reset) {
+  if (reset && utilization === 100) {
     const seconds = Number.parseInt(reset, 10);
-    if (Number.isFinite(seconds) && seconds > 0) {
-      return new Date(seconds * 1000).toISOString();
-    }
+    if (Number.isFinite(seconds) && seconds > 0) return new Date(seconds * 1000).toISOString();
   }
 
   const retryAfter = headers.get("retry-after");
-  if (!retryAfter) return undefined;
-
-  const retryAfterSeconds = Number.parseInt(retryAfter, 10);
-  if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0) {
-    return new Date(Date.now() + retryAfterSeconds * 1000).toISOString();
+  if (retryAfter) {
+    const retryAfterSeconds = Number.parseInt(retryAfter, 10);
+    if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0) {
+      return new Date(Date.now() + retryAfterSeconds * 1000).toISOString();
+    }
+    const retryAfterDate = new Date(retryAfter);
+    if (!Number.isNaN(retryAfterDate.getTime())) return retryAfterDate.toISOString();
   }
 
-  const retryAfterDate = new Date(retryAfter);
-  return Number.isNaN(retryAfterDate.getTime()) ? undefined : retryAfterDate.toISOString();
+  const hasRateLimitSignal = Boolean(
+    headers.get("anthropic-ratelimit-unified-status")
+      || headers.get("anthropic-ratelimit-unified-5h-utilization")
+      || headers.get("anthropic-ratelimit-unified-7d-utilization")
+      || claim,
+  );
+  return hasRateLimitSignal ? new Date(Date.now() + 60_000).toISOString() : undefined;
+}
+
+function claudeClaimUtilization(headers: Headers, claim: string): number | undefined {
+  const raw = claim === "five_hour"
+    ? headers.get("anthropic-ratelimit-unified-5h-utilization")
+    : claim === "seven_day"
+      ? headers.get("anthropic-ratelimit-unified-7d-utilization")
+      : claim.startsWith("seven_day_")
+        ? headers.get(`anthropic-ratelimit-unified-7d_${claim.slice("seven_day_".length)}-utilization`)
+        : undefined;
+  const parsed = readUtilization(raw);
+  if (parsed === undefined) return undefined;
+  return parsed <= 1 ? parsed * 100 : parsed;
 }
 
 function readClaudeCodeRateLimitMetadata(headers: Headers): Record<string, unknown> {
@@ -957,15 +977,17 @@ function parseClaudeCodeRateLimitHeaders(headers: Headers): {
   const status = headers.get("anthropic-ratelimit-unified-status");
   const util5h = readUtilization(headers.get("anthropic-ratelimit-unified-5h-utilization"));
   const util7d = readUtilization(headers.get("anthropic-ratelimit-unified-7d-utilization"));
-  const claim = headers.get("anthropic-ratelimit-unified-representative-claim") ?? "unknown";
+  const claim = (headers.get("anthropic-ratelimit-unified-representative-claim") ?? "unknown").toLowerCase();
   const resetAt = readClaudeCodeRateLimitResetAt(headers);
+  const unifiedResetAt = readUnifiedResetAt(headers);
+  const claimResetAt = claudeClaimUtilization(headers, claim) === 100 ? unifiedResetAt : undefined;
   const cachedUsage: Record<string, unknown> = {};
 
   if (util5h !== undefined) {
-    cachedUsage.five_hour = { utilization: util5h, resets_at: resetAt ?? null };
+    cachedUsage.five_hour = { utilization: util5h, resets_at: claim === "five_hour" ? claimResetAt ?? null : null };
   }
   if (util7d !== undefined) {
-    cachedUsage.seven_day = { utilization: util7d, resets_at: resetAt ?? null };
+    cachedUsage.seven_day = { utilization: util7d, resets_at: claim === "seven_day" ? claimResetAt ?? null : null };
   }
 
   for (const [name, value] of headers.entries()) {
@@ -975,7 +997,7 @@ function parseClaudeCodeRateLimitHeaders(headers: Headers): {
     if (utilization === undefined) continue;
     cachedUsage[`seven_day_${match[1].toLowerCase()}`] = {
       utilization,
-      resets_at: resetAt ?? null,
+      resets_at: claim === `seven_day_${match[1].toLowerCase()}` ? claimResetAt ?? null : null,
     };
   }
 
@@ -987,6 +1009,12 @@ function parseClaudeCodeRateLimitHeaders(headers: Headers): {
     resetAt,
     status: status ?? "unknown",
   };
+}
+
+function readUnifiedResetAt(headers: Headers): string | undefined {
+  const reset = headers.get("anthropic-ratelimit-unified-reset");
+  const seconds = reset ? Number.parseInt(reset, 10) : Number.NaN;
+  return Number.isFinite(seconds) && seconds > 0 ? new Date(seconds * 1000).toISOString() : undefined;
 }
 
 function resolvePacingOptions(
@@ -1277,7 +1305,7 @@ function describeClaudeCodeRateLimit(headers: Headers): string {
   return parts.join(". ");
 }
 
-function readUtilization(value: string | null): number | undefined {
+function readUtilization(value: string | null | undefined): number | undefined {
   if (!value) return undefined;
   const parsed = Number.parseFloat(value);
   return Number.isFinite(parsed) ? parsed : undefined;

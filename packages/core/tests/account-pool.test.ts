@@ -469,6 +469,38 @@ describe("StickyAccountPool", () => {
     expect(selected?.id).not.toBe(saturated.id);
   });
 
+  it("does not soft-skip Claude usage after that tier has rolled over", async () => {
+    const store = new MemoryAccountStore();
+    const rolledOver = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      name: "rolled-over",
+      metadata: {
+        cachedUsage: {
+          five_hour: { utilization: 0.96, resets_at: new Date(Date.now() - 60_000).toISOString() },
+          seven_day: { utilization: 0.2, resets_at: new Date(Date.now() + 86_400_000).toISOString() },
+        },
+      },
+    });
+    const available = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      name: "available",
+      metadata: { cachedUsage: { five_hour: { utilization: 0.1, resets_at: null } } },
+    });
+    const pool = new StickyAccountPool(store, { strategy: "round-robin", softQuotaThresholdPercent: 90 });
+
+    const result = await pool.selectWithDiagnostics({
+      provider: "claude-code",
+      kind: "oauth",
+      sessionKey: "rollover-session",
+    });
+
+    expect(result.diagnostics.softQuotaSkippedAccountIds).not.toContain(rolledOver.id);
+    expect(result.account?.id).toBe(rolledOver.id);
+    expect(result.account?.id).not.toBe(available.id);
+  });
+
   it("uses a conservative default soft quota threshold for fresh selection", async () => {
     const store = new MemoryAccountStore();
     const exhausted = await store.create({

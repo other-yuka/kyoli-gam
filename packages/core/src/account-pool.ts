@@ -5,7 +5,12 @@ import type {
   AccountSuccessInput,
   AccountUpdateInput,
 } from "./accounts";
-import { scoreQuotaResetPace, type QuotaRoutingWindow } from "opencode-multi-account-core";
+import {
+  isQuotaWindowActive,
+  normalizeUsagePercent,
+  scoreQuotaResetPace,
+  type QuotaRoutingWindow,
+} from "opencode-multi-account-core";
 import {
   isCurrentlyAuthCoolingDown,
   isCurrentlyRateLimited,
@@ -361,7 +366,7 @@ function exceedsSoftQuota(
   if (options.softQuotaThresholdPercent >= 100) return false;
 
   return readUsageTiers(account).some((tier) =>
-    tier.utilization >= options.softQuotaThresholdPercent
+    isQuotaWindowActive(tier.resetAt) && tier.utilization >= options.softQuotaThresholdPercent
   );
 }
 
@@ -383,8 +388,9 @@ function scoreAccount(
 
 function getMaxUtilization(account: AccountRecord): number {
   const tiers = readUsageTiers(account);
-  if (tiers.length === 0) return 65;
-  return Math.min(100, Math.max(0, Math.max(...tiers.map((tier) => tier.utilization))));
+  const active = tiers.filter((tier) => tier.hasUtilization);
+  if (active.length === 0) return 65;
+  return Math.min(100, Math.max(0, Math.max(...active.map((tier) => tier.utilization))));
 }
 
 function accountSelectionSnapshot(account: AccountRecord): AccountSelectionAccountSnapshot {
@@ -407,7 +413,11 @@ function accountSelectionSnapshot(account: AccountRecord): AccountSelectionAccou
 function readUsageUtilization(account: AccountRecord, key: string): number | undefined {
   const usage = readRecord(account.metadata.cachedUsage) ?? readRecord(account.metadata.usage);
   const window = readRecord(usage?.[key]);
-  return window ? readNumber(window.utilization) : undefined;
+  if (!window) return undefined;
+  const resetAt = readUsageWindowResetAt(window);
+  return isQuotaWindowActive(resetAt)
+    ? normalizeAccountUsagePercent(account, readNumber(window.utilization))
+    : undefined;
 }
 
 function readUsageTiers(account: AccountRecord): UsageTier[] {
@@ -419,12 +429,14 @@ function readUsageTiers(account: AccountRecord): UsageTier[] {
     .map(([key, value]) => ({ key, tier: readRecord(value) }))
     .filter((item): item is { key: string; tier: Record<string, unknown> } => Boolean(item.tier))
     .map(({ key, tier }) => {
-      const utilization = readNumber(tier.utilization);
+      const rawUtilization = readNumber(tier.utilization);
+      const resetAt = readUsageWindowResetAt(tier);
+      const utilization = normalizeAccountUsagePercent(account, rawUtilization);
       return {
         key,
         utilization: utilization ?? 0,
-        hasUtilization: utilization !== undefined,
-        resetAt: readUsageWindowResetAt(tier),
+        hasUtilization: utilization !== undefined && isQuotaWindowActive(resetAt),
+        resetAt,
       };
     });
 }
@@ -438,6 +450,12 @@ function readUsageWindowResetAt(tier: Record<string, unknown>): string | undefin
     readString(tier.resetAt) ??
     readString(tier.resets_at) ??
     readString(tier.resetsAt);
+}
+
+function normalizeAccountUsagePercent(account: AccountRecord, value: number | undefined): number | undefined {
+  if (account.provider === "claude-code") return normalizeUsagePercent(value);
+  if (value === undefined || !Number.isFinite(value)) return undefined;
+  return Math.max(0, Math.min(100, value));
 }
 
 function readPlanWeight(

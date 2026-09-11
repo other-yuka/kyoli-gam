@@ -89,6 +89,39 @@ describe("core/rate-limit", () => {
     nowSpy.mockRestore();
   });
 
+  test("ignores non-exhausted cached resets, including Claude ratio utilization", async () => {
+    const now = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const account = createAccount({
+      cachedUsage: {
+        five_hour: { utilization: 0.92, resets_at: new Date(now + 3_600_000).toISOString() },
+        seven_day: { utilization: 34, resets_at: new Date(now + 86_400_000).toISOString() },
+        seven_day_sonnet: null,
+      },
+    });
+    const manager = {
+      markRateLimited: vi.fn(async () => {}),
+      applyUsageCache: vi.fn(async () => {}),
+      getAccountCount: vi.fn(() => 2),
+    };
+
+    await handlers.handleRateLimitResponse(
+      manager,
+      createClient(),
+      account,
+      new Response("", {
+        status: 429,
+        headers: {
+          "anthropic-ratelimit-unified-representative-claim": "unknown",
+          "retry-after": "60",
+        },
+      }),
+    );
+
+    expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", 60_000);
+    nowSpy.mockRestore();
+  });
+
   test("quarantines non-subscription billing claims without refreshing usage", async () => {
     const account = createAccount({
       cachedUsageAt: Date.now() - 50_000,

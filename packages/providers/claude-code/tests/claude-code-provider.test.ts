@@ -1310,6 +1310,7 @@ describe("createClaudeCodeProvider", () => {
     expect(upstreamAuths).toEqual(["Bearer first-access", "Bearer second-access"]);
     expect(firstUpdated?.failureCount).toBe(1);
     expect(firstUpdated?.rateLimitResetAt).toBeTruthy();
+    expect(new Date(firstUpdated!.rateLimitResetAt!).getTime()).toBeLessThan(Date.now() + 120_000);
     expect(firstUpdated?.metadata.rateLimitClaim).toBe("five_hour");
     expect(firstUpdated?.metadata.rateLimitStatus).toBe("rejected");
     expect((firstUpdated?.metadata.cachedUsage as { five_hour?: { utilization: number } }).five_hour?.utilization).toBe(0.92);
@@ -1651,7 +1652,7 @@ describe("createClaudeCodeProvider", () => {
 
   it("enriches exhausted Claude Code 429 responses with rate limit header details", async () => {
     const store = new MemoryAccountStore();
-    await store.create({
+    const account = await store.create({
       provider: "claude-code",
       kind: "oauth",
       credentials: {
@@ -1670,7 +1671,7 @@ describe("createClaudeCodeProvider", () => {
         new Response(JSON.stringify({ error: { message: "Error" } }), {
           status: 429,
           headers: {
-            "anthropic-ratelimit-unified-5h-utilization": "0.98",
+            "anthropic-ratelimit-unified-5h-utilization": "1",
             "anthropic-ratelimit-unified-7d-utilization": "0.42",
             "anthropic-ratelimit-unified-representative-claim": "five_hour",
             "anthropic-ratelimit-unified-reset": String(Math.floor(Date.now() / 1000) + 3600),
@@ -1703,7 +1704,14 @@ describe("createClaudeCodeProvider", () => {
     const payload = await response.json() as { error?: { message?: string } };
     expect(response.status).toBe(429);
     expect(payload.error?.message).toContain("Limiting window: five_hour");
-    expect(payload.error?.message).toContain("5h utilization: 98%");
+    expect(payload.error?.message).toContain("5h utilization: 100%");
+    const updated = await store.get(account.id);
+    const cachedUsage = updated?.metadata.cachedUsage as {
+      five_hour?: { resets_at?: string | null };
+      seven_day?: { resets_at?: string | null };
+    } | undefined;
+    expect(cachedUsage?.five_hour?.resets_at).toBeTruthy();
+    expect(cachedUsage?.seven_day?.resets_at).toBeNull();
   });
 
   it("returns 401 when no OAuth account is available", async () => {

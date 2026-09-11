@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readClaims, writeClaim, isClaimedByOther, type ClaimsMap } from "./claims";
 import { getConfig } from "./config";
-import { scoreQuotaResetPace, type QuotaRoutingWindow } from "./routing";
+import { isQuotaWindowActive, normalizeUsagePercent, scoreQuotaResetPace, type QuotaRoutingWindow } from "./routing";
 import { getClearedOAuthBody } from "./utils";
 import type { AccountStore, DiskCredentials } from "./account-store";
 import type {
@@ -243,7 +243,10 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       const usage = account.cachedUsage;
       if (!usage) return false;
 
-      return readUsageTiers(usage).some((tier) => tier.utilization >= threshold);
+      return readUsageTiers(usage).some((tier) =>
+        isQuotaWindowActive(tier.resetAt) && normalizeUsagePercent(tier.utilization) !== undefined
+          && normalizeUsagePercent(tier.utilization)! >= threshold,
+      );
     }
 
     hasAnyUsableAccount(): boolean {
@@ -263,7 +266,7 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
 
       const now = Date.now();
       return readUsageTiers(usage).some((tier) =>
-        tier.utilization >= 100
+        normalizeUsagePercent(tier.utilization) === 100
         && tier.resetAt != null
         && Date.parse(tier.resetAt) > now,
       );
@@ -686,7 +689,7 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
         const now = Date.now();
         const exhaustedTierResetTimes = readUsageTiers(usage)
           .flatMap((tier) => {
-            if (tier.utilization < 100 || tier.resetAt == null) {
+            if (normalizeUsagePercent(tier.utilization) !== 100 || tier.resetAt == null || !isQuotaWindowActive(tier.resetAt, now)) {
               return [];
             }
             return [Date.parse(tier.resetAt)];

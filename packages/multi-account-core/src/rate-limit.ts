@@ -1,3 +1,4 @@
+import { isQuotaWindowActive, normalizeUsagePercent } from "./routing";
 import type { ManagedAccount, PluginClient, PluginConfig, UsageLimits } from "./types";
 
 const USAGE_FETCH_COOLDOWN_MS = 30_000;
@@ -64,11 +65,11 @@ export function createRateLimitHandlers(dependencies: RateLimitDependencies) {
     const now = Date.now();
     const candidates: number[] = [];
 
-    if (usage.five_hour?.resets_at) {
+    if (usage.five_hour?.resets_at && normalizeUsagePercent(usage.five_hour.utilization) === 100 && isQuotaWindowActive(usage.five_hour.resets_at, now)) {
       const ms = Date.parse(usage.five_hour.resets_at) - now;
       if (ms > 0) candidates.push(ms);
     }
-    if (usage.seven_day?.resets_at) {
+    if (usage.seven_day?.resets_at && normalizeUsagePercent(usage.seven_day.utilization) === 100 && isQuotaWindowActive(usage.seven_day.resets_at, now)) {
       const ms = Date.parse(usage.seven_day.resets_at) - now;
       if (ms > 0) candidates.push(ms);
     }
