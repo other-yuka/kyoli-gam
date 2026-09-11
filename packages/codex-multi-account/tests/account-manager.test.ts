@@ -45,7 +45,7 @@ function createAuth(id: string): OAuthCredentials {
 
 function createUsage(utilization: number): UsageLimits {
   return {
-    five_hour: { utilization, resets_at: "2026-01-01T00:00:00Z" },
+    five_hour: { utilization, resets_at: new Date(Date.now() + 60 * 60 * 1000).toISOString() },
     seven_day: null,
     seven_day_sonnet: null,
   };

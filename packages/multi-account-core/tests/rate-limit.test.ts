@@ -89,12 +89,12 @@ describe("core/rate-limit", () => {
     nowSpy.mockRestore();
   });
 
-  test("ignores non-exhausted cached resets, including Claude ratio utilization", async () => {
+  test("ignores non-exhausted cached resets", async () => {
     const now = 1_700_000_000_000;
     const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
     const account = createAccount({
       cachedUsage: {
-        five_hour: { utilization: 0.92, resets_at: new Date(now + 3_600_000).toISOString() },
+        five_hour: { utilization: 92, resets_at: new Date(now + 3_600_000).toISOString() },
         seven_day: { utilization: 34, resets_at: new Date(now + 86_400_000).toISOString() },
         seven_day_sonnet: null,
       },
@@ -119,6 +119,85 @@ describe("core/rate-limit", () => {
     );
 
     expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", 60_000);
+    nowSpy.mockRestore();
+  });
+
+  test("prefers a provider non-exhausted claim over a stale exhausted cache", async () => {
+    const now = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const account = createAccount({
+      cachedUsage: {
+        five_hour: { utilization: 100, resets_at: new Date(now + 12 * 60 * 60 * 1000).toISOString() },
+        seven_day: { utilization: 40, resets_at: null },
+        seven_day_sonnet: null,
+      },
+    });
+    const manager = {
+      markRateLimited: vi.fn(async () => {}),
+      applyUsageCache: vi.fn(async () => {}),
+      getAccountCount: vi.fn(() => 2),
+    };
+    fetchUsage.mockResolvedValue({
+      ok: true,
+      data: {
+        five_hour: { utilization: 80, resets_at: new Date(now + 30_000).toISOString() },
+        seven_day: null,
+        seven_day_sonnet: null,
+      },
+    });
+
+    await handlers.handleRateLimitResponse(
+      manager,
+      createClient(),
+      account,
+      new Response("", {
+        status: 429,
+        headers: {
+          "anthropic-ratelimit-unified-5h-utilization": "0.92",
+          "anthropic-ratelimit-unified-representative-claim": "five_hour",
+          "retry-after": "60",
+        },
+      }),
+    );
+
+    expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", 60_000);
+    expect(fetchUsage).not.toHaveBeenCalled();
+    expect(manager.applyUsageCache).not.toHaveBeenCalled();
+    nowSpy.mockRestore();
+  });
+
+  test("keeps an exhausted cache when an unknown provider claim has malformed utilization", async () => {
+    const now = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const account = createAccount({
+      cachedUsage: {
+        five_hour: { utilization: 100, resets_at: new Date(now + 12 * 60 * 60 * 1000).toISOString() },
+        seven_day: { utilization: 40, resets_at: null },
+        seven_day_sonnet: null,
+      },
+    });
+    const manager = {
+      markRateLimited: vi.fn(async () => {}),
+      applyUsageCache: vi.fn(async () => {}),
+      getAccountCount: vi.fn(() => 2),
+    };
+
+    await handlers.handleRateLimitResponse(
+      manager,
+      createClient(),
+      account,
+      new Response("", {
+        status: 429,
+        headers: {
+          "anthropic-ratelimit-unified-5h-utilization": "0.92junk",
+          "anthropic-ratelimit-unified-7d-utilization": "-1",
+          "anthropic-ratelimit-unified-representative-claim": "unknown",
+          "retry-after": "60",
+        },
+      }),
+    );
+
+    expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", 12 * 60 * 60 * 1000);
     nowSpy.mockRestore();
   });
 

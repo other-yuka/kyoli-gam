@@ -58,6 +58,38 @@ export function createRateLimitHandlers(dependencies: RateLimitDependencies) {
       || normalized.startsWith("sdk");
   }
 
+  function hasNonExhaustedClaudeQuota(response: Response): boolean {
+    const utilizationHeaders = [...response.headers.entries()]
+      .filter(([name]) => name.startsWith("anthropic-ratelimit-unified-") && name.endsWith("-utilization"));
+    if (utilizationHeaders.length === 0) return false;
+
+    const claim = response.headers.get("anthropic-ratelimit-unified-representative-claim")?.toLowerCase();
+    if (claim && claim !== "unknown") {
+      const claimedHeader = claim === "five_hour"
+        ? "anthropic-ratelimit-unified-5h-utilization"
+        : claim === "seven_day"
+          ? "anthropic-ratelimit-unified-7d-utilization"
+          : claim.startsWith("seven_day_")
+            ? `anthropic-ratelimit-unified-7d_${claim.slice("seven_day_".length)}-utilization`
+            : undefined;
+      if (claimedHeader) {
+        const claimed = readClaudeUtilization(response.headers.get(claimedHeader));
+        return claimed !== undefined && claimed < 100;
+      }
+    }
+
+    const utilizations = utilizationHeaders.map(([, value]) => readClaudeUtilization(value));
+    if (utilizations.some((value) => value === undefined)) return false;
+    return utilizations.length > 0 && utilizations.every((value) => value !== undefined && value < 100);
+  }
+
+  function readClaudeUtilization(value: string | null): number | undefined {
+    if (value == null || value.trim() === "") return undefined;
+    const parsed = Number(value.trim());
+    if (!Number.isFinite(parsed) || parsed < 0 || parsed > 100) return undefined;
+    return parsed <= 1 ? parsed * 100 : parsed;
+  }
+
   function getResetMsFromUsage(account: ManagedAccount): number | null {
     const usage = account.cachedUsage;
     if (!usage) return null;
@@ -97,9 +129,12 @@ export function createRateLimitHandlers(dependencies: RateLimitDependencies) {
 
     const nonSubscriptionClaim = response.headers.get("anthropic-ratelimit-unified-representative-claim");
     const shouldQuarantineBillingClaim = isNonSubscriptionBillingClaim(nonSubscriptionClaim);
+    const hasNonExhaustedQuota = hasNonExhaustedClaudeQuota(response);
     const resetMs = shouldQuarantineBillingClaim
       ? Math.max(retryAfterMsFromResponse(response), NON_SUBSCRIPTION_BILLING_BACKOFF_MS)
-      : getResetMsFromUsage(account) ?? retryAfterMsFromResponse(response);
+      : hasNonExhaustedQuota
+        ? retryAfterMsFromResponse(response)
+        : getResetMsFromUsage(account) ?? retryAfterMsFromResponse(response);
     await manager.markRateLimited(account.uuid, resetMs);
 
     if (shouldQuarantineBillingClaim) {
@@ -113,7 +148,7 @@ export function createRateLimitHandlers(dependencies: RateLimitDependencies) {
       return;
     }
 
-    const shouldFetchUsage = account.accessToken
+    const shouldFetchUsage = !hasNonExhaustedQuota && account.accessToken
       && (!account.cachedUsageAt || Date.now() - account.cachedUsageAt > USAGE_FETCH_COOLDOWN_MS);
 
     if (shouldFetchUsage) {

@@ -10,10 +10,16 @@ export interface QuotaResetPaceOptions {
   targetAtResetPercent?: number;
 }
 
+/** Normalize a value that is already expressed as a percentage. */
 export function normalizeUsagePercent(value: number | null | undefined): number | undefined {
   if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
-  const percent = value <= 1 ? value * 100 : value;
-  return Math.max(0, Math.min(100, percent));
+  return Math.max(0, Math.min(100, value));
+}
+
+/** Normalize provider values that may be either a ratio or a percentage. */
+export function normalizeRatioUsagePercent(value: number | null | undefined): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  return normalizeUsagePercent(value >= 0 && value < 1 ? value * 100 : value);
 }
 
 export function isQuotaWindowActive(resetAt: string | null | undefined, now = Date.now()): boolean {

@@ -387,6 +387,41 @@ describe("StickyAccountPool", () => {
     expect((await store.get(limited.id))?.rateLimitBlockedAt).toBeDefined();
   });
 
+  it("keeps a fresh exhausted usage window blocked until its reset", async () => {
+    const store = new MemoryAccountStore();
+    const limited = await store.create({ provider: "codex", kind: "oauth", name: "limited" });
+    await store.recordFailure(limited.id, {
+      status: 429,
+      message: "rate limited",
+      failureClass: "rate_limit",
+      failureCode: "rate_limit",
+      failurePhase: "startup",
+    });
+    const ready = await store.create({ provider: "codex", kind: "oauth", name: "ready" });
+    await store.update(limited.id, {
+      metadata: {
+        cachedUsageAt: Date.now() + 1_000,
+        cachedUsage: {
+          five_hour: {
+            utilization: 100,
+            resets_at: new Date(Date.now() + 60_000).toISOString(),
+          },
+        },
+      },
+    });
+    const pool = new StickyAccountPool(store);
+
+    const selected = await pool.select({
+      provider: "codex",
+      kind: "oauth",
+      sessionKey: "fresh-exhausted-session",
+      preferredAccountId: limited.id,
+    });
+
+    expect(selected?.id).toBe(ready.id);
+    expect((await store.get(limited.id))?.rateLimitBlockedAt).toBeDefined();
+  });
+
   it("preserves quota failures separately from rate limits", async () => {
     const store = new MemoryAccountStore();
     const limited = await store.create({ provider: "codex", kind: "oauth", name: "quota" });
@@ -499,6 +534,35 @@ describe("StickyAccountPool", () => {
     expect(result.diagnostics.softQuotaSkippedAccountIds).not.toContain(rolledOver.id);
     expect(result.account?.id).toBe(rolledOver.id);
     expect(result.account?.id).not.toBe(available.id);
+  });
+
+  it("keeps a one-percent Claude usage value distinct from a ratio cache", async () => {
+    const store = new MemoryAccountStore();
+    const lowUsage = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      name: "one-percent",
+      metadata: { cachedUsage: { five_hour: { utilization: 1, resets_at: null } } },
+    });
+    const exhausted = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      name: "exhausted",
+      metadata: { cachedUsage: { five_hour: { utilization: 100, resets_at: null } } },
+    });
+    const pool = new StickyAccountPool(store, {
+      strategy: "weighted",
+      softQuotaThresholdPercent: 90,
+    });
+
+    const result = await pool.selectWithDiagnostics({
+      provider: "claude-code",
+      kind: "oauth",
+      sessionKey: "one-percent-session",
+    });
+
+    expect(result.account?.id).toBe(lowUsage.id);
+    expect(result.diagnostics.softQuotaSkippedAccountIds).toContain(exhausted.id);
   });
 
   it("uses a conservative default soft quota threshold for fresh selection", async () => {

@@ -47,7 +47,7 @@ function createAuth(id: string): OAuthCredentials {
 
 function createUsage(utilization: number): UsageLimits {
   return {
-    five_hour: { utilization, resets_at: "2026-01-01T00:00:00Z" },
+    five_hour: { utilization, resets_at: new Date(Date.now() + 60 * 60 * 1000).toISOString() },
     seven_day: null,
     seven_day_sonnet: null,
   };
@@ -244,6 +244,73 @@ describe("account-manager", () => {
       const selected = await manager.selectAccount();
 
       expect(selected?.uuid).toBe(second.uuid);
+    });
+
+    test("does not let a rolled-over usage window suppress an account", async () => {
+      await configureSelection("hybrid", false);
+      await updateConfigField("soft_quota_threshold_percent", 90);
+      const stored = createTestStorage(2);
+      const manager = await createManagerFromStorage(stored);
+      const accounts = manager.getAccounts();
+      const rolledOver = accounts[0];
+      const available = accounts[1];
+      if (!rolledOver?.uuid || !available?.uuid) {
+        throw new Error("Expected two accounts");
+      }
+
+      await manager.applyUsageCache(rolledOver.uuid, {
+        five_hour: { utilization: 95, resets_at: new Date(Date.now() - 60_000).toISOString() },
+        seven_day: { utilization: 20, resets_at: new Date(Date.now() + 86_400_000).toISOString() },
+        seven_day_sonnet: null,
+      });
+      await manager.applyUsageCache(available.uuid, {
+        five_hour: { utilization: 10, resets_at: null },
+        seven_day: null,
+        seven_day_sonnet: null,
+      });
+
+      const selected = await manager.selectAccount();
+
+      expect(selected?.uuid).toBe(rolledOver.uuid);
+    });
+
+    test("ignores expired quota windows in hybrid reset pacing", async () => {
+      await configureSelection("hybrid", false);
+      const stored = createTestStorage(3);
+      const disabled = stored.accounts[2];
+      if (!disabled?.uuid) {
+        throw new Error("Expected disabled account");
+      }
+      disabled.enabled = false;
+      stored.activeAccountUuid = disabled.uuid;
+      const selectionTimestamp = Date.now() - 60_000;
+      for (const account of stored.accounts.slice(0, 2)) {
+        account.lastUsed = selectionTimestamp;
+      }
+      const manager = await createManagerFromStorage(stored);
+      const accounts = manager.getAccounts();
+      const first = accounts[0];
+      const second = accounts[1];
+      if (!first?.uuid || !second?.uuid) {
+        throw new Error("Expected two accounts");
+      }
+
+      const activeReset = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+      const expiredReset = new Date(Date.now() - 60_000).toISOString();
+      await manager.applyUsageCache(first.uuid, {
+        five_hour: { utilization: 20, resets_at: activeReset },
+        seven_day: { utilization: 100, resets_at: expiredReset },
+        seven_day_sonnet: null,
+      });
+      await manager.applyUsageCache(second.uuid, {
+        five_hour: { utilization: 20, resets_at: activeReset },
+        seven_day: null,
+        seven_day_sonnet: null,
+      });
+
+      const selected = await manager.selectAccount();
+
+      expect(selected?.uuid).toBe(first.uuid);
     });
 
     test("gives stickiness bonus to current account", async () => {

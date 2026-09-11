@@ -1,4 +1,9 @@
 import type { AccountRecord } from "./accounts";
+import {
+  isQuotaWindowActive,
+  normalizeRatioUsagePercent,
+  normalizeUsagePercent,
+} from "opencode-multi-account-core";
 
 export type AccountAvailabilityState =
   | "ready"
@@ -36,7 +41,7 @@ export function shouldRecoverRateLimitBlock(account: AccountRecord, now = Date.n
   const resetAt = readIsoMs(account.rateLimitResetAt);
   if (resetAt !== undefined && resetAt <= now) return true;
 
-  return hasFreshAvailableUsageAfterBlock(account);
+  return hasFreshAvailableUsageAfterBlock(account, now);
 }
 
 export function readRateLimitRetryAt(account: AccountRecord): string | undefined {
@@ -46,14 +51,14 @@ export function readRateLimitRetryAt(account: AccountRecord): string | undefined
 function hasUnrecoveredRateLimitBlock(account: AccountRecord, now: number): boolean {
   if (!account.rateLimitBlockedAt) return false;
   if (account.lastFailureClass !== "rate_limit" && account.lastFailureClass !== "quota") return false;
-  if (hasFreshAvailableUsageAfterBlock(account)) return false;
+  if (hasFreshAvailableUsageAfterBlock(account, now)) return false;
 
   const cooldownUntil = readIsoMs(account.rateLimitCooldownUntil);
   if (cooldownUntil !== undefined && cooldownUntil > now) return true;
   return !account.rateLimitResetAt;
 }
 
-function hasFreshAvailableUsageAfterBlock(account: AccountRecord): boolean {
+function hasFreshAvailableUsageAfterBlock(account: AccountRecord, now: number): boolean {
   const blockedAt = readIsoMs(account.rateLimitBlockedAt);
   if (blockedAt === undefined) return false;
 
@@ -72,8 +77,10 @@ function hasFreshAvailableUsageAfterBlock(account: AccountRecord): boolean {
   if (windows.length === 0) return false;
 
   return windows.some((window) => {
-    const utilization = readUsagePercent(window);
-    return utilization !== undefined && utilization < 100;
+    const utilization = readUsagePercent(window, account);
+    if (utilization === undefined) return false;
+    const resetAt = readUsageWindowResetAt(window);
+    return (resetAt != null && !isQuotaWindowActive(resetAt, now)) || utilization < 100;
   });
 }
 
@@ -85,10 +92,19 @@ function readQuotaUsageWindowKeys(usage: Record<string, unknown>): string[] {
   return keys;
 }
 
-function readUsagePercent(window: Record<string, unknown>): number | undefined {
+function readUsagePercent(window: Record<string, unknown>, account: AccountRecord): number | undefined {
   const raw = readNumber(window.utilization) ?? readNumber(window.used_percent) ?? readNumber(window.usedPercent);
   if (raw === undefined) return undefined;
-  return raw <= 1 ? raw * 100 : raw;
+  return account.provider === "claude-code"
+    ? normalizeRatioUsagePercent(raw)
+    : normalizeUsagePercent(raw);
+}
+
+function readUsageWindowResetAt(window: Record<string, unknown>): string | undefined {
+  return readString(window.reset_at)
+    ?? readString(window.resetAt)
+    ?? readString(window.resets_at)
+    ?? readString(window.resetsAt);
 }
 
 function readIsoMs(value: string | undefined): number | undefined {
@@ -110,4 +126,8 @@ function readNumber(value: unknown): number | undefined {
   if (!trimmed) return undefined;
   const parsed = Number(trimmed);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }

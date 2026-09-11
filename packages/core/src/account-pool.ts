@@ -7,7 +7,7 @@ import type {
 } from "./accounts";
 import {
   isQuotaWindowActive,
-  normalizeUsagePercent,
+  normalizeRatioUsagePercent,
   scoreQuotaResetPace,
   type QuotaRoutingWindow,
 } from "opencode-multi-account-core";
@@ -453,7 +453,7 @@ function readUsageWindowResetAt(tier: Record<string, unknown>): string | undefin
 }
 
 function normalizeAccountUsagePercent(account: AccountRecord, value: number | undefined): number | undefined {
-  if (account.provider === "claude-code") return normalizeUsagePercent(value);
+  if (account.provider === "claude-code") return normalizeRatioUsagePercent(value);
   if (value === undefined || !Number.isFinite(value)) return undefined;
   return Math.max(0, Math.min(100, value));
 }

@@ -8,6 +8,11 @@ import type {
   ProviderId,
   ProviderUsageRefreshResult,
 } from "./index";
+import {
+  isQuotaWindowActive,
+  normalizeRatioUsagePercent,
+  normalizeUsagePercent,
+} from "opencode-multi-account-core";
 
 export interface UsageRefreshServiceOptions {
   accounts: AccountStore;
@@ -195,11 +200,11 @@ function shouldRecoverAccountState(account: AccountRecord): boolean {
   if (!account.rateLimitResetAt && !account.rateLimitCooldownUntil && account.lastFailureClass !== "quota") {
     return false;
   }
-  return hasNoExhaustedUsageWindow(account.metadata.cachedUsage) ||
-    hasNoExhaustedUsageWindow(account.metadata.usage);
+  return hasNoExhaustedUsageWindow(account.metadata.cachedUsage, account.provider) ||
+    hasNoExhaustedUsageWindow(account.metadata.usage, account.provider);
 }
 
-function hasNoExhaustedUsageWindow(value: unknown): boolean {
+function hasNoExhaustedUsageWindow(value: unknown, provider: ProviderId): boolean {
   const usage = readRecord(value);
   if (!usage) return false;
   const windows = [
@@ -208,9 +213,23 @@ function hasNoExhaustedUsageWindow(value: unknown): boolean {
     ...Object.entries(usage)
       .filter(([key]) => key.startsWith("seven_day_"))
       .map(([, window]) => window),
-  ].map((window) => readNumber(readRecord(window)?.utilization))
-    .filter((utilization): utilization is number => utilization !== undefined);
-  return windows.length > 0 && windows.every((utilization) => utilization < 100);
+  ].map((window) => {
+    const record = readRecord(window);
+    const rawUtilization = readNumber(record?.utilization);
+    const utilization = rawUtilization === undefined
+      ? undefined
+      : provider === "claude-code"
+        ? normalizeRatioUsagePercent(rawUtilization)
+        : normalizeUsagePercent(rawUtilization);
+    return {
+      utilization,
+      resetAt: readUsageWindowResetAt(record),
+    };
+  }).filter((window): window is { utilization: number; resetAt: string | undefined } => window.utilization !== undefined);
+  return windows.length > 0 && windows.every((window) =>
+    window.utilization < 100
+    || (window.resetAt != null && !isQuotaWindowActive(window.resetAt)),
+  );
 }
 
 function readRecord(value: unknown): Record<string, unknown> | undefined {
@@ -224,4 +243,16 @@ function readNumber(value: unknown): number | undefined {
   if (typeof value !== "string") return undefined;
   const parsed = Number(value.trim());
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function readUsageWindowResetAt(window: Record<string, unknown> | undefined): string | undefined {
+  if (!window) return undefined;
+  return readString(window.reset_at)
+    ?? readString(window.resetAt)
+    ?? readString(window.resets_at)
+    ?? readString(window.resetsAt);
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }

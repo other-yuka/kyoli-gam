@@ -29,6 +29,7 @@ interface StickyBinding {
 
 type ManagedUsageTier = QuotaRoutingWindow & {
   utilization: number;
+  hasUtilization: boolean;
   resetAt: string | null;
 };
 
@@ -244,8 +245,7 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       if (!usage) return false;
 
       return readUsageTiers(usage).some((tier) =>
-        isQuotaWindowActive(tier.resetAt) && normalizeUsagePercent(tier.utilization) !== undefined
-          && normalizeUsagePercent(tier.utilization)! >= threshold,
+        tier.hasUtilization && tier.utilization >= threshold,
       );
     }
 
@@ -265,11 +265,12 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       if (!usage) return false;
 
       const now = Date.now();
-      return readUsageTiers(usage).some((tier) =>
-        normalizeUsagePercent(tier.utilization) === 100
-        && tier.resetAt != null
-        && Date.parse(tier.resetAt) > now,
-      );
+      return readUsageTiers(usage).some((tier) => {
+        const utilization = normalizeUsagePercent(tier.utilization);
+        return utilization === 100
+          && tier.resetAt != null
+          && Date.parse(tier.resetAt) > now;
+      });
     }
 
     clearExpiredRateLimits(): void {
@@ -312,7 +313,7 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       const candidates: number[] = [];
 
       for (const tier of readUsageTiers(usage)) {
-        if (tier.utilization >= 100 && tier.resetAt != null) {
+        if (tier.hasUtilization && tier.utilization >= 100 && tier.resetAt != null) {
           const ms = Date.parse(tier.resetAt) - now;
           if (ms > 0) candidates.push(ms);
         }
@@ -556,7 +557,9 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
     private calculateHybridScore(account: ManagedAccount, isActive: boolean, claims: ClaimsMap): number {
       const maxUtilization = Math.min(100, Math.max(0, this.getMaxUtilization(account)));
       const usageScore = ((100 - maxUtilization) / 100) * 450;
-      const resetPaceScore = scoreQuotaResetPace(readRoutingUsageTiers(account.cachedUsage));
+      const resetPaceScore = scoreQuotaResetPace(
+        readRoutingUsageTiers(account.cachedUsage).filter((tier) => tier.hasUtilization),
+      );
 
       const maxFailures = Math.max(1, getProviderConfig().max_consecutive_auth_failures);
       const healthScore = Math.max(0, ((maxFailures - account.consecutiveAuthFailures) / maxFailures) * 250);
@@ -575,6 +578,7 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       if (!usage) return 65;
 
       const utilizations = readUsageTiers(usage)
+        .filter((tier) => tier.hasUtilization)
         .map((tier) => tier.utilization);
 
       return utilizations.length > 0 ? Math.max(...utilizations) : 65;
@@ -689,7 +693,8 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
         const now = Date.now();
         const exhaustedTierResetTimes = readUsageTiers(usage)
           .flatMap((tier) => {
-            if (normalizeUsagePercent(tier.utilization) !== 100 || tier.resetAt == null || !isQuotaWindowActive(tier.resetAt, now)) {
+            const utilization = normalizeUsagePercent(tier.utilization);
+            if (utilization !== 100 || tier.resetAt == null || !isQuotaWindowActive(tier.resetAt, now)) {
               return [];
             }
             return [Date.parse(tier.resetAt)];
@@ -912,7 +917,13 @@ function readUsageTiers(usage: UsageLimits | undefined): ManagedUsageTier[] {
   ].flatMap(({ key, tier }) =>
     tier == null
       ? []
-      : [{ key, utilization: tier.utilization, resetAt: tier.resets_at }]
+      : [{
+        key,
+        utilization: tier.utilization,
+        hasUtilization: normalizeUsagePercent(tier.utilization) !== undefined
+          && isQuotaWindowActive(tier.resets_at),
+        resetAt: tier.resets_at,
+      }]
   );
 }
 
@@ -924,6 +935,8 @@ function readRoutingUsageTiers(usage: UsageLimits | undefined): ManagedUsageTier
     : [{
       key: "seven_day_sonnet",
       utilization: usage.seven_day_sonnet.utilization,
+      hasUtilization: normalizeUsagePercent(usage.seven_day_sonnet.utilization) !== undefined
+        && isQuotaWindowActive(usage.seven_day_sonnet.resets_at),
       resetAt: usage.seven_day_sonnet.resets_at,
     }];
 

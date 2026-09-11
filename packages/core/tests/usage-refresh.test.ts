@@ -333,6 +333,41 @@ describe("UsageRefreshService", () => {
     expect((await store.get(exhausted.id))?.rateLimitResetAt).toBeDefined();
     expect((await store.get(recovered.id))?.rateLimitResetAt).toBeUndefined();
   });
+
+  it("recovers a blocked account when its exhausted usage window has rolled over", async () => {
+    const store = new MemoryAccountStore();
+    const account = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      metadata: { cachedUsageAt: Date.now() - 10_000 },
+    });
+    await store.recordFailure(account.id, {
+      status: 429,
+      message: "limited",
+      failureClass: "rate_limit",
+      failureCode: "rate_limit",
+      failurePhase: "startup",
+      rateLimitResetAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const provider = createUsageProvider(async () => ({
+      ok: true,
+      metadata: {
+        cachedUsageAt: Date.now(),
+        cachedUsage: {
+          five_hour: { utilization: 100, resets_at: new Date(Date.now() - 60_000).toISOString() },
+          seven_day: { utilization: 20, resets_at: null },
+        },
+      },
+    }));
+    const service = new UsageRefreshService({
+      accounts: store,
+      providers: [provider],
+      intervalMs: 1,
+    });
+
+    expect(await service.refreshOnce()).toMatchObject({ checked: 1, refreshed: 1 });
+    expect((await store.get(account.id))?.rateLimitResetAt).toBeUndefined();
+  });
 });
 
 function createUsageProvider(refreshUsage: ProviderAdapter["refreshUsage"]): ProviderAdapter {

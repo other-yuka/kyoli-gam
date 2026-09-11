@@ -935,6 +935,7 @@ function readClaudeCodeRateLimitResetAt(headers: Headers): string | undefined {
 
   const hasRateLimitSignal = Boolean(
     headers.get("anthropic-ratelimit-unified-status")
+      || reset
       || headers.get("anthropic-ratelimit-unified-5h-utilization")
       || headers.get("anthropic-ratelimit-unified-7d-utilization")
       || claim,
@@ -984,10 +985,16 @@ function parseClaudeCodeRateLimitHeaders(headers: Headers): {
   const cachedUsage: Record<string, unknown> = {};
 
   if (util5h !== undefined) {
-    cachedUsage.five_hour = { utilization: util5h, resets_at: claim === "five_hour" ? claimResetAt ?? null : null };
+    cachedUsage.five_hour = {
+      utilization: normalizeClaudeCodeHeaderUtilization(util5h),
+      resets_at: claim === "five_hour" ? claimResetAt ?? null : null,
+    };
   }
   if (util7d !== undefined) {
-    cachedUsage.seven_day = { utilization: util7d, resets_at: claim === "seven_day" ? claimResetAt ?? null : null };
+    cachedUsage.seven_day = {
+      utilization: normalizeClaudeCodeHeaderUtilization(util7d),
+      resets_at: claim === "seven_day" ? claimResetAt ?? null : null,
+    };
   }
 
   for (const [name, value] of headers.entries()) {
@@ -996,7 +1003,7 @@ function parseClaudeCodeRateLimitHeaders(headers: Headers): {
     const utilization = readUtilization(value);
     if (utilization === undefined) continue;
     cachedUsage[`seven_day_${match[1].toLowerCase()}`] = {
-      utilization,
+      utilization: normalizeClaudeCodeHeaderUtilization(utilization),
       resets_at: claim === `seven_day_${match[1].toLowerCase()}` ? claimResetAt ?? null : null,
     };
   }
@@ -1009,6 +1016,11 @@ function parseClaudeCodeRateLimitHeaders(headers: Headers): {
     resetAt,
     status: status ?? "unknown",
   };
+}
+
+function normalizeClaudeCodeHeaderUtilization(value: number): number {
+  const percent = value >= 0 && value <= 1 ? value * 100 : value;
+  return Math.max(0, Math.min(100, percent));
 }
 
 function readUnifiedResetAt(headers: Headers): string | undefined {

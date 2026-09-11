@@ -1313,9 +1313,83 @@ describe("createClaudeCodeProvider", () => {
     expect(new Date(firstUpdated!.rateLimitResetAt!).getTime()).toBeLessThan(Date.now() + 120_000);
     expect(firstUpdated?.metadata.rateLimitClaim).toBe("five_hour");
     expect(firstUpdated?.metadata.rateLimitStatus).toBe("rejected");
-    expect((firstUpdated?.metadata.cachedUsage as { five_hour?: { utilization: number } }).five_hour?.utilization).toBe(0.92);
-    expect((firstUpdated?.metadata.cachedUsage as { seven_day_sonnet?: { utilization: number } }).seven_day_sonnet?.utilization).toBe(0.71);
+    expect((firstUpdated?.metadata.cachedUsage as { five_hour?: { utilization: number } }).five_hour?.utilization).toBe(92);
+    expect((firstUpdated?.metadata.cachedUsage as { seven_day_sonnet?: { utilization: number } }).seven_day_sonnet?.utilization).toBe(71);
     expect(secondUpdated?.lastUsedAt).toBeTruthy();
+  });
+
+  it("keeps a unified reset-only rate-limit signal recoverable", async () => {
+    const store = new MemoryAccountStore();
+    const first = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: {
+        accessToken: "first-access",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-first",
+      },
+    });
+    const second = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: {
+        accessToken: "second-access",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-second",
+      },
+    });
+    const upstreamAuths: string[] = [];
+
+    const provider = createTestClaudeCodeProvider({
+      accounts: new StickyAccountPool(store),
+      baseUrl: "https://example.test",
+      usageRefresh: async () => ({ cachedUsageAt: Date.now() }),
+      fetch: async (_input, init) => {
+        const authorization = new Headers(init?.headers).get("authorization") ?? "";
+        upstreamAuths.push(authorization);
+
+        if (authorization === "Bearer first-access") {
+          return new Response(JSON.stringify({ error: { message: "rate limited" } }), {
+            status: 429,
+            headers: {
+              "anthropic-ratelimit-unified-reset": String(Math.floor(Date.now() / 1000) + 3600),
+              "content-type": "application/json",
+            },
+          });
+        }
+
+        return new Response(JSON.stringify({ id: "msg_second", type: "message" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    const response = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-code/claude-sonnet-4-5",
+          max_tokens: 1024,
+          messages: [{ role: "user", content: "hello" }],
+        }),
+      }),
+      route: "/v1/messages",
+      sessionKey: "unified-reset-only",
+      body: {
+        model: "claude-code/claude-sonnet-4-5",
+        max_tokens: 1024,
+        messages: [{ role: "user", content: "hello" }],
+      },
+      model: "claude-code/claude-sonnet-4-5",
+    });
+
+    const firstUpdated = await store.get(first.id);
+    expect(response.status).toBe(200);
+    expect(upstreamAuths).toEqual(["Bearer first-access", "Bearer second-access"]);
+    expect(firstUpdated?.rateLimitResetAt).toBeTruthy();
+    expect(new Date(firstUpdated!.rateLimitResetAt!).getTime()).toBeLessThan(Date.now() + 120_000);
   });
 
   it("fails over when a Claude stream starts with a rate limit error", async () => {
@@ -1707,9 +1781,10 @@ describe("createClaudeCodeProvider", () => {
     expect(payload.error?.message).toContain("5h utilization: 100%");
     const updated = await store.get(account.id);
     const cachedUsage = updated?.metadata.cachedUsage as {
-      five_hour?: { resets_at?: string | null };
+      five_hour?: { utilization?: number; resets_at?: string | null };
       seven_day?: { resets_at?: string | null };
     } | undefined;
+    expect(cachedUsage?.five_hour?.utilization).toBe(100);
     expect(cachedUsage?.five_hour?.resets_at).toBeTruthy();
     expect(cachedUsage?.seven_day?.resets_at).toBeNull();
   });
