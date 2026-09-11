@@ -17,6 +17,7 @@ import {
   addExcludedBeta,
   ensureOauthBeta,
   extractRejectedBetas,
+  filterModelBetas,
   getExcludedBetas,
   getModelBetas,
   isUnexpectedBetaError,
@@ -427,10 +428,10 @@ export class AccountRuntimeFactory {
     modelId: string,
     excludedBetas: Set<string>,
   ): HeadersInit {
-    const mergedBetas = deduplicateBetas(ensureOauthBeta([
+    const mergedBetas = deduplicateBetas(ensureOauthBeta(filterModelBetas(modelId, [
       ...getModelBetas(modelId, excludedBetas),
       ...excludeBetas(splitBetaValues(incomingHeaders["anthropic-beta"]), excludedBetas),
-    ])).join(",");
+    ]))).join(",");
 
     const outbound: Record<string, string> = {
       ...incomingHeaders,

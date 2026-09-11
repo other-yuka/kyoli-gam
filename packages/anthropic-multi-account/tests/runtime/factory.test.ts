@@ -122,6 +122,31 @@ describe("runtime-factory", () => {
     expect(body.tools[0]?.name).toMatch(/^tool_[a-f0-9]+$/);
   });
 
+  test("filters the tool-change beta for Sonnet while preserving custom betas", async () => {
+    const uuid = await seedAccount();
+    const factory = new AccountRuntimeFactory(store, client);
+    const runtime = await factory.getRuntime(uuid);
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response("ok"));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await runtime.fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "anthropic-beta": "mid-conversation-tool-changes-2026-07-01,caller-beta",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-5",
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    });
+
+    const [, init] = fetchMock.mock.calls[0] ?? [];
+    const betas = toHeaders(init?.headers).get("anthropic-beta")?.split(",") ?? [];
+    expect(betas).not.toContain("mid-conversation-tool-changes-2026-07-01");
+    expect(betas).toContain("caller-beta");
+  });
+
   test("runtime.fetch blocks non-subscription Claude Code billing claims", async () => {
     const uuid = await seedAccount();
     const factory = new AccountRuntimeFactory(store, client);

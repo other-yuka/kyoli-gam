@@ -665,6 +665,74 @@ describe("createClaudeCodeProvider", () => {
     expect(userId.session_id).toBe(upstreamSessionId);
   });
 
+  it("filters the tool-change beta by model family in the upstream request", async () => {
+    const upstreamBetasByModel = new Map<string, string>();
+    const store = new MemoryAccountStore();
+    await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+      },
+    });
+
+    const provider = createTestClaudeCodeProvider({
+      accounts: new StickyAccountPool(store),
+      baseUrl: "https://example.test",
+      trustClientFingerprint: true,
+      usageRefresh: async () => ({ cachedUsageAt: Date.now() }),
+      fetch: async (_input, init) => {
+        const headers = new Headers(init?.headers);
+        const body = JSON.parse(String(init?.body)) as { model: string };
+        upstreamBetasByModel.set(body.model, headers.get("anthropic-beta") ?? "");
+        return new Response(JSON.stringify({ id: "msg_test", type: "message" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    for (const model of [
+      "claude-sonnet-5",
+      "claude-sonnet-4-6",
+      "claude-haiku-4-5",
+      "claude-opus-4-8",
+      "claude-opus-5",
+      "claude-fable-5",
+    ]) {
+      const response = await provider.handleRequest({
+        request: new Request("http://127.0.0.1:2021/v1/messages", {
+          method: "POST",
+          headers: {
+            "anthropic-beta": "mid-conversation-tool-changes-2026-07-01,caller-beta",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            model,
+            max_tokens: 1024,
+            messages: [{ role: "user", content: "hello" }],
+          }),
+        }),
+        route: "/v1/messages",
+        sessionKey: `beta-filter-${model}`,
+        body: { model, max_tokens: 1024, messages: [{ role: "user", content: "hello" }] },
+        model,
+      });
+      expect(response.status).toBe(200);
+    }
+
+    for (const model of ["claude-sonnet-5", "claude-sonnet-4-6", "claude-haiku-4-5"]) {
+      const betas = upstreamBetasByModel.get(model) ?? "";
+      expect(betas).not.toContain("mid-conversation-tool-changes-2026-07-01");
+      expect(betas).toContain("caller-beta");
+    }
+    for (const model of ["claude-opus-4-8", "claude-opus-5", "claude-fable-5"]) {
+      expect(upstreamBetasByModel.get(model)).toContain("mid-conversation-tool-changes-2026-07-01");
+    }
+  });
+
 
 
   it("rejects suspended Fable aliases before upstream routing", async () => {

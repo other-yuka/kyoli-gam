@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { resolveClaudeCodeModelAlias } from "@kyoli-gam/provider-claude-code/opencode";
-import { ensureOauthBeta, getModelBetas } from "./betas";
+import { ensureOauthBeta, filterModelBetas, getModelBetas } from "./betas";
 import { claudeCodeIntegration } from "../claude-code";
 import { ANTHROPIC_OAUTH_ADAPTER } from "../shared/constants";
 import {
@@ -161,10 +161,10 @@ export function buildRequestHeaders(
 ): HeadersInit {
   const incomingHeaders = getMergedIncomingHeaders(input, init);
   const sessionId = resolveSessionId(incomingHeaders);
-  const mergedBetas = dedupeHeaderValues(ensureOauthBeta([
+  const mergedBetas = dedupeHeaderValues(ensureOauthBeta(filterModelBetas(modelId, [
     ...getModelBetas(modelId, excludedBetas),
     ...excludeBetas(splitHeaderValues(incomingHeaders["anthropic-beta"]), excludedBetas),
-  ])).join(",");
+  ]))).join(",");
 
   const outboundHeaders: Record<string, string> = {
     ...incomingHeaders,
