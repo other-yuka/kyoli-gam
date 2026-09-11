@@ -46,6 +46,13 @@ export function shouldRecoverRateLimitBlock(account: AccountRecord, now = Date.n
 
   const resetAt = readIsoMs(account.rateLimitResetAt);
   if (resetAt !== undefined && resetAt <= now) return true;
+  const cooldownUntil = readIsoMs(account.rateLimitCooldownUntil);
+  if (
+    cooldownUntil !== undefined
+    && cooldownUntil <= now
+    && resetAt === undefined
+    && readUsageRateLimitBoundary(account.metadata, now) === ""
+  ) return true;
 
   return hasFreshAvailableUsageAfterBlock(account, now);
 }
@@ -95,7 +102,10 @@ export function readRateLimitRetryAt(account: AccountRecord): string | undefined
 function hasUnrecoveredRateLimitBlock(account: AccountRecord, now: number): boolean {
   if (!account.rateLimitBlockedAt) return false;
   if (account.lastFailureClass !== "rate_limit" && account.lastFailureClass !== "quota") return false;
-  if (isCurrentlyRateLimitCoolingDown(account, now)) return true;
+  const cooldownUntil = readIsoMs(account.rateLimitCooldownUntil);
+  if (cooldownUntil !== undefined && cooldownUntil > now) return true;
+  if (readUsageRateLimitBoundary(account.metadata, now) !== "") return true;
+  if (cooldownUntil !== undefined) return false;
   if (hasFreshAvailableUsageAfterBlock(account, now)) return false;
   return !account.rateLimitResetAt;
 }

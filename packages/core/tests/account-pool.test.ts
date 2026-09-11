@@ -293,6 +293,90 @@ describe("StickyAccountPool", () => {
     expect(updated?.lastErrorAt).toBeUndefined();
   });
 
+  it("recovers a cooldown-only rate limit after its retry window expires", async () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-09-11T00:00:00.000Z").getTime();
+    vi.setSystemTime(now);
+
+    try {
+      const store = new MemoryAccountStore();
+      const account = await store.create({ provider: "claude-code", kind: "oauth", name: "cooldown" });
+      await store.recordFailure(account.id, {
+        status: 429,
+        message: "rate limited",
+        failureClass: "rate_limit",
+        failureCode: "rate_limit",
+        rateLimitCooldownUntil: new Date(now + 60_000).toISOString(),
+      });
+      const pool = new StickyAccountPool(store);
+
+      expect(await pool.select({
+        provider: "claude-code",
+        kind: "oauth",
+        sessionKey: "during-cooldown",
+      })).toBeUndefined();
+
+      vi.setSystemTime(now + 60_001);
+      const selected = await pool.select({
+        provider: "claude-code",
+        kind: "oauth",
+        sessionKey: "after-cooldown",
+      });
+      const recovered = await store.get(account.id);
+
+      expect(selected?.id).toBe(account.id);
+      expect(recovered?.failureCount).toBe(0);
+      expect(recovered?.rateLimitBlockedAt).toBeUndefined();
+      expect(recovered?.rateLimitCooldownUntil).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps an expired cooldown blocked while an exhausted usage window is active", async () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-09-11T00:00:00.000Z").getTime();
+    vi.setSystemTime(now);
+
+    try {
+      const store = new MemoryAccountStore();
+      const account = await store.create({ provider: "claude-code", kind: "oauth", name: "quota" });
+      await store.recordFailure(account.id, {
+        status: 429,
+        message: "rate limited",
+        failureClass: "rate_limit",
+        failureCode: "rate_limit",
+        rateLimitCooldownUntil: new Date(now + 60_000).toISOString(),
+        metadata: {
+          cachedUsageAt: now,
+          cachedUsage: {
+            five_hour: {
+              utilization: 100,
+              resets_at: new Date(now + 120_000).toISOString(),
+            },
+          },
+        },
+      });
+      const pool = new StickyAccountPool(store);
+
+      vi.setSystemTime(now + 60_001);
+      expect(await pool.select({
+        provider: "claude-code",
+        kind: "oauth",
+        sessionKey: "before-quota-reset",
+      })).toBeUndefined();
+
+      vi.setSystemTime(now + 120_001);
+      expect((await pool.select({
+        provider: "claude-code",
+        kind: "oauth",
+        sessionKey: "after-quota-reset",
+      }))?.id).toBe(account.id);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps active rate-limited accounts out of selection", async () => {
     const store = new MemoryAccountStore();
     const limited = await store.create({ provider: "codex", kind: "oauth", name: "limited" });

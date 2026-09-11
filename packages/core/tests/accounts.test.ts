@@ -749,6 +749,33 @@ describe("AccountStore state reset", () => {
     },
   );
 
+  it.each(["memory", "sqlite"] as const)(
+    "preserves legacy request-success recovery in the %s store",
+    async (kind) => {
+      const dir = kind === "sqlite" ? mkdtempSync(join(tmpdir(), "kyoli-account-legacy-success-")) : undefined;
+      try {
+        const store = kind === "sqlite"
+          ? new SQLiteAccountStore(join(dir!, "kyoli.db"))
+          : new MemoryAccountStore();
+        const account = await store.create({ provider: "claude-code", kind: "oauth" });
+        await store.recordFailure(account.id, {
+          status: 429,
+          message: "rate limited",
+          failureClass: "rate_limit",
+          rateLimitCooldownUntil: new Date(Date.now() + 60_000).toISOString(),
+        });
+
+        const recovered = await store.recordSuccess(account.id, { kind: "request" });
+
+        expect(recovered?.failureCount).toBe(0);
+        expect(recovered?.rateLimitBlockedAt).toBeUndefined();
+        expect(recovered?.rateLimitCooldownUntil).toBeUndefined();
+      } finally {
+        if (dir) rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("records transport success without clearing rate-limit state", async () => {
     const store = new MemoryAccountStore();
     const account = await store.create({

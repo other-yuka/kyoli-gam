@@ -117,10 +117,10 @@ export interface AccountResetStateInput {
   enable?: boolean;
 }
 
-export type AccountSuccessInput =
-  | { kind: "transport" }
-  | { kind: "request"; expectedRateLimitRevision: RateLimitRevision | null }
-  | { kind?: "manual"; expectedRateLimitRevision?: never };
+export interface AccountSuccessInput {
+  kind?: "request" | "transport";
+  expectedRateLimitRevision?: RateLimitRevision | null;
+}
 
 export function captureRateLimitRevision(
   account: Pick<AccountRecord, "rateLimitObservedAt">,
@@ -754,6 +754,7 @@ function recordAccountSuccess(
     || existing.rateLimitCooldownUntil !== undefined
     || readUsageRateLimitBoundary(existing.metadata, nowMs) !== "";
   const lostRateLimitRace = input.kind === "request"
+    && input.expectedRateLimitRevision !== undefined
     && captureRateLimitRevision(existing) !== input.expectedRateLimitRevision;
   if (input.kind === "transport" || lostRateLimitRace) {
     return {
