@@ -327,6 +327,34 @@ describe("core/account-manager", () => {
     nowSpy.mockRestore();
   });
 
+  test("persists a rate-limit usage snapshot in the cooldown mutation", async () => {
+    const AccountManager = createAccountManagerForProvider({
+      providerAuthId: "anthropic",
+      isTokenExpired: () => false,
+      refreshToken: async () => ({ ok: false, permanent: false }),
+    });
+
+    const store = new AccountStore();
+    const manager = await AccountManager.create(store, createAuth("seed"));
+    const activeUuid = getUuid(manager.getActiveAccount()?.uuid);
+    const mutateAccount = vi.spyOn(store, "mutateAccount");
+    const usage = {
+      five_hour: { utilization: 100, resets_at: new Date(Date.now() + 60_000).toISOString() },
+      seven_day: null,
+      seven_day_sonnet: null,
+    };
+
+    await manager.markRateLimited(activeUuid, 60_000, usage);
+    await manager.refresh();
+
+    expect(mutateAccount).toHaveBeenCalledTimes(1);
+    expect(manager.getActiveAccount()).toMatchObject({
+      cachedUsage: usage,
+      cachedUsageAt: expect.any(Number),
+      rateLimitResetAt: expect.any(Number),
+    });
+  });
+
   test("keeps Sonnet-only exhaustion out of account-wide availability", async () => {
     const AccountManager = createAccountManagerForProvider({
       providerAuthId: "anthropic",

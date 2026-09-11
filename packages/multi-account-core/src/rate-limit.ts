@@ -17,8 +17,7 @@ export interface RateLimitDependencies {
 }
 
 export interface RateLimitAccountManager {
-  markRateLimited(uuid: string, backoffMs?: number): Promise<void>;
-  applyUsageCache(uuid: string, usage: UsageLimits): Promise<void>;
+  markRateLimited(uuid: string, backoffMs?: number, usage?: UsageLimits): Promise<void>;
   getAccountCount(): number;
 }
 
@@ -191,10 +190,9 @@ export function createRateLimitHandlers(dependencies: RateLimitDependencies) {
       : hasNonExhaustedQuota
         ? retryAfterMs
         : Math.max(providerResetMs ?? cachedResetMs ?? 0, retryAfterMs);
-    if (providerReset) {
-      const providerUsage = claudeUsageFromResponse(response, providerReset.resetAt);
-      if (providerUsage) await manager.applyUsageCache(account.uuid, providerUsage);
-    }
+    let usageToPersist = providerReset
+      ? claudeUsageFromResponse(response, providerReset.resetAt) ?? undefined
+      : undefined;
     if (shouldQuarantineBillingClaim) {
       await manager.markRateLimited(account.uuid, resetMs);
       if (manager.getAccountCount() > 1) {
@@ -213,11 +211,15 @@ export function createRateLimitHandlers(dependencies: RateLimitDependencies) {
     if (shouldFetchUsage) {
       const usage = await fetchUsageLimits(account.accessToken!, account.accountId);
       if (usage) {
-        await manager.applyUsageCache(account.uuid, usage);
+        usageToPersist = usage;
       }
     }
 
-    await manager.markRateLimited(account.uuid, resetMs);
+    if (usageToPersist) {
+      await manager.markRateLimited(account.uuid, resetMs, usageToPersist);
+    } else {
+      await manager.markRateLimited(account.uuid, resetMs);
+    }
 
     if (manager.getAccountCount() > 1) {
       void showToast(

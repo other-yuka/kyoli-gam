@@ -81,9 +81,9 @@ describe("core/rate-limit", () => {
       new Response("", { status: 429, headers: { "retry-after-ms": "5000" } }),
     );
 
-    expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", 25_000);
+    expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", 25_000, usage);
     expect(fetchUsage).toHaveBeenCalledWith("access-1", "acct-id-1");
-    expect(manager.applyUsageCache).toHaveBeenCalledWith("acct-1", usage);
+    expect(manager.applyUsageCache).not.toHaveBeenCalled();
     expect(showToast).toHaveBeenCalledTimes(1);
 
     nowSpy.mockRestore();
@@ -128,10 +128,8 @@ describe("core/rate-limit", () => {
       }),
     );
 
-    expect(manager.applyUsageCache).toHaveBeenCalledWith("acct-1", usage);
-    expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", 3_600_000);
-    expect(manager.applyUsageCache.mock.invocationCallOrder[0])
-      .toBeLessThan(manager.markRateLimited.mock.invocationCallOrder[0]!);
+    expect(manager.applyUsageCache).not.toHaveBeenCalled();
+    expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", 3_600_000, usage);
     nowSpy.mockRestore();
   });
 
@@ -254,13 +252,13 @@ describe("core/rate-limit", () => {
       }),
     );
 
-    expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", 3_600_000);
-    expect(fetchUsage).not.toHaveBeenCalled();
-    expect(manager.applyUsageCache).toHaveBeenCalledWith("acct-1", {
+    expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", 3_600_000, {
       five_hour: { utilization: 100, resets_at: new Date(now + 3_600_000).toISOString() },
       seven_day: { utilization: 42, resets_at: null },
       seven_day_sonnet: null,
     });
+    expect(fetchUsage).not.toHaveBeenCalled();
+    expect(manager.applyUsageCache).not.toHaveBeenCalled();
     nowSpy.mockRestore();
   });
 
@@ -289,13 +287,13 @@ describe("core/rate-limit", () => {
       }),
     );
 
-    expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", 120_000);
-    expect(fetchUsage).not.toHaveBeenCalled();
-    expect(manager.applyUsageCache).toHaveBeenCalledWith("acct-1", {
+    expect(manager.markRateLimited).toHaveBeenCalledWith("acct-1", 120_000, {
       five_hour: { utilization: 100, resets_at: new Date(now + 60_000).toISOString() },
       seven_day: null,
       seven_day_sonnet: null,
     });
+    expect(fetchUsage).not.toHaveBeenCalled();
+    expect(manager.applyUsageCache).not.toHaveBeenCalled();
     nowSpy.mockRestore();
   });
 

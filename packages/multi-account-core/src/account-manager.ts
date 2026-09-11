@@ -69,7 +69,7 @@ export interface AccountManagerInstance {
   clearExpiredRateLimits(): void;
   getMinWaitTime(): number;
   selectAccount(stickyKey?: string): Promise<ManagedAccount | null>;
-  markRateLimited(uuid: string, backoffMs?: number): Promise<void>;
+  markRateLimited(uuid: string, backoffMs?: number, usage?: UsageLimits): Promise<void>;
   markRevoked(uuid: string): Promise<void>;
   markSuccess(uuid: string): Promise<void>;
   markAuthFailure(uuid: string, result: TokenRefreshResult, expected?: DiskCredentials): Promise<void>;
@@ -592,11 +592,16 @@ export function createAccountManagerForProvider(dependencies: AccountManagerDepe
       account.lastUsed = Date.now();
     }
 
-    async markRateLimited(uuid: string, backoffMs?: number): Promise<void> {
+    async markRateLimited(uuid: string, backoffMs?: number, usage?: UsageLimits): Promise<void> {
       const effectiveBackoff = backoffMs ?? getProviderConfig().rate_limit_min_backoff_ms;
-      this.last429Map.set(uuid, Date.now());
+      const now = Date.now();
+      this.last429Map.set(uuid, now);
       await this.store.mutateAccount(uuid, (account) => {
-        account.rateLimitResetAt = Date.now() + effectiveBackoff;
+        if (usage) {
+          account.cachedUsage = usage;
+          account.cachedUsageAt = now;
+        }
+        account.rateLimitResetAt = now + effectiveBackoff;
       });
     }
 
