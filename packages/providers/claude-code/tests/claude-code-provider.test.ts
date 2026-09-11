@@ -532,6 +532,7 @@ describe("createClaudeCodeProvider", () => {
     });
 
     expect(metadata.planTier).toBe("max");
+    expect(metadata.cachedUsage?.format).toBe("percent-v1");
     expect((metadata.cachedUsage as { seven_day_opus?: { utilization: number } }).seven_day_opus?.utilization)
       .toBe(88);
     expect((metadata.cachedUsage as { seven_day_haiku?: { utilization: number } }).seven_day_haiku?.utilization)
@@ -1296,7 +1297,90 @@ describe("createClaudeCodeProvider", () => {
 
     expect(refreshed?.ok).toBe(true);
     expect(refreshed?.metadata?.planTier).toBe("max");
+    expect((refreshed?.metadata?.cachedUsage as { format?: string }).format).toBe("percent-v1");
     expect((refreshed?.metadata?.cachedUsage as { five_hour?: { utilization: number } }).five_hour?.utilization).toBe(15);
+  });
+
+  it("does not timestamp retained usage as a new provider observation", async () => {
+    const oldUsageAt = Date.now() - 60 * 60 * 1000;
+    const reportedUsageAt = Date.now();
+    const store = new MemoryAccountStore();
+    const account = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+      },
+      metadata: {
+        cachedUsageAt: oldUsageAt,
+        cachedUsage: {
+          format: "percent-v1",
+          five_hour: { utilization: 20, resets_at: null },
+        },
+      },
+    });
+    const provider = createTestClaudeCodeProvider({
+      accounts: new StickyAccountPool(store),
+      baseUrl: "https://example.test",
+      usageRefresh: async () => ({
+        planTier: "max",
+        cachedUsageAt: reportedUsageAt,
+      }),
+    });
+
+    const refreshed = await provider.refreshUsage?.({ account });
+
+    expect(refreshed).toMatchObject({
+      ok: true,
+      metadata: {
+        planTier: "max",
+        cachedUsageAt: oldUsageAt,
+        cachedUsage: {
+          five_hour: { utilization: 20 },
+        },
+      },
+    });
+  });
+
+  it("retains the previous usage pair when new usage has no observation timestamp", async () => {
+    const oldUsageAt = Date.now() - 60 * 60 * 1000;
+    const store = new MemoryAccountStore();
+    const account = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: {
+        accessToken: "access-test",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-test",
+      },
+      metadata: {
+        cachedUsageAt: oldUsageAt,
+        cachedUsage: {
+          format: "percent-v1",
+          five_hour: { utilization: 90, resets_at: null },
+        },
+      },
+    });
+    const provider = createTestClaudeCodeProvider({
+      accounts: new StickyAccountPool(store),
+      baseUrl: "https://example.test",
+      usageRefresh: async () => ({
+        cachedUsage: {
+          five_hour: { utilization: 15, resets_at: null },
+        },
+      }),
+    });
+
+    const refreshed = await provider.refreshUsage?.({ account });
+
+    expect(refreshed?.ok).toBe(true);
+    expect(refreshed?.metadata?.cachedUsageAt).toBe(oldUsageAt);
+    expect(refreshed?.metadata?.cachedUsage).toMatchObject({
+      format: "percent-v1",
+      five_hour: { utilization: 90 },
+    });
   });
 
   it("fails over after upstream rate limits an OAuth account", async () => {
@@ -1377,12 +1461,290 @@ describe("createClaudeCodeProvider", () => {
     expect(response.status).toBe(200);
     expect(upstreamAuths).toEqual(["Bearer first-access", "Bearer second-access"]);
     expect(firstUpdated?.failureCount).toBe(1);
-    expect(firstUpdated?.rateLimitResetAt).toBeTruthy();
+    expect(firstUpdated?.rateLimitResetAt).toBeUndefined();
+    expect(firstUpdated?.rateLimitCooldownUntil).toBeTruthy();
+    expect(new Date(firstUpdated!.rateLimitCooldownUntil!).getTime()).toBeLessThan(Date.now() + 120_000);
     expect(firstUpdated?.metadata.rateLimitClaim).toBe("five_hour");
     expect(firstUpdated?.metadata.rateLimitStatus).toBe("rejected");
-    expect((firstUpdated?.metadata.cachedUsage as { five_hour?: { utilization: number } }).five_hour?.utilization).toBe(0.92);
-    expect((firstUpdated?.metadata.cachedUsage as { seven_day_sonnet?: { utilization: number } }).seven_day_sonnet?.utilization).toBe(0.71);
+    expect((firstUpdated?.metadata.cachedUsage as { format?: string }).format).toBe("percent-v1");
+    expect((firstUpdated?.metadata.cachedUsage as { five_hour?: { utilization: number } }).five_hour?.utilization).toBe(92);
+    expect((firstUpdated?.metadata.cachedUsage as { seven_day_sonnet?: { utilization: number } }).seven_day_sonnet?.utilization).toBe(71);
     expect(secondUpdated?.lastUsedAt).toBeTruthy();
+  });
+
+  it("keeps a unified reset-only rate-limit signal recoverable", async () => {
+    const store = new MemoryAccountStore();
+    const first = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: {
+        accessToken: "first-access",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-first",
+      },
+    });
+    const second = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: {
+        accessToken: "second-access",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        refreshToken: "refresh-second",
+      },
+    });
+    const upstreamAuths: string[] = [];
+
+    const provider = createTestClaudeCodeProvider({
+      accounts: new StickyAccountPool(store),
+      baseUrl: "https://example.test",
+      usageRefresh: async () => ({ cachedUsageAt: Date.now() }),
+      fetch: async (_input, init) => {
+        const authorization = new Headers(init?.headers).get("authorization") ?? "";
+        upstreamAuths.push(authorization);
+
+        if (authorization === "Bearer first-access") {
+          return new Response(JSON.stringify({ error: { message: "rate limited" } }), {
+            status: 429,
+            headers: {
+              "anthropic-ratelimit-unified-reset": String(Math.floor(Date.now() / 1000) + 3600),
+              "content-type": "application/json",
+            },
+          });
+        }
+
+        return new Response(JSON.stringify({ id: "msg_second", type: "message" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    const response = await provider.handleRequest({
+      request: new Request("http://127.0.0.1:2021/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-code/claude-sonnet-4-5",
+          max_tokens: 1024,
+          messages: [{ role: "user", content: "hello" }],
+        }),
+      }),
+      route: "/v1/messages",
+      sessionKey: "unified-reset-only",
+      body: {
+        model: "claude-code/claude-sonnet-4-5",
+        max_tokens: 1024,
+        messages: [{ role: "user", content: "hello" }],
+      },
+      model: "claude-code/claude-sonnet-4-5",
+    });
+
+    const firstUpdated = await store.get(first.id);
+    expect(response.status).toBe(200);
+    expect(upstreamAuths).toEqual(["Bearer first-access", "Bearer second-access"]);
+    expect(firstUpdated?.rateLimitResetAt).toBeUndefined();
+    expect(firstUpdated?.rateLimitCooldownUntil).toBeTruthy();
+    expect(new Date(firstUpdated!.rateLimitCooldownUntil!).getTime()).toBeLessThan(Date.now() + 120_000);
+  });
+
+  it.each([
+    {
+      label: "unified reset",
+      utilization: "1.04",
+      resetAfterSeconds: 3600,
+      retryAfterSeconds: 60,
+    },
+    {
+      label: "Retry-After",
+      utilization: "1",
+      resetAfterSeconds: 60,
+      retryAfterSeconds: 120,
+    },
+  ])("preserves the later $label boundary for an exhausted unknown Claude claim", async ({
+    resetAfterSeconds,
+    retryAfterSeconds,
+    utilization,
+  }) => {
+    vi.useFakeTimers();
+    const now = new Date("2026-09-11T00:00:00.000Z").getTime();
+    vi.setSystemTime(now);
+
+    try {
+      const resetSeconds = Math.floor(now / 1000) + resetAfterSeconds;
+      const expectedQuotaResetAt = new Date(resetSeconds * 1000).toISOString();
+      const expectedCooldownAt = new Date(now + retryAfterSeconds * 1000).toISOString();
+      const store = new MemoryAccountStore();
+      const first = await store.create({
+        provider: "claude-code",
+        kind: "oauth",
+        credentials: {
+          accessToken: "first-access",
+          expiresAt: Date.now() + 60 * 60 * 1000,
+          refreshToken: "refresh-first",
+        },
+      });
+      const second = await store.create({
+        provider: "claude-code",
+        kind: "oauth",
+        credentials: {
+          accessToken: "second-access",
+          expiresAt: Date.now() + 60 * 60 * 1000,
+          refreshToken: "refresh-second",
+        },
+      });
+      const upstreamAuths: string[] = [];
+
+      const provider = createTestClaudeCodeProvider({
+        accounts: new StickyAccountPool(store),
+        baseUrl: "https://example.test",
+        fetch: async (_input, init) => {
+          const authorization = new Headers(init?.headers).get("authorization") ?? "";
+          upstreamAuths.push(authorization);
+
+          if (authorization === "Bearer first-access") {
+            return new Response(JSON.stringify({ error: { message: "rate limited" } }), {
+              status: 429,
+              headers: {
+                "anthropic-ratelimit-unified-5h-utilization": utilization,
+                "anthropic-ratelimit-unified-7d-utilization": "0.42",
+                "anthropic-ratelimit-unified-representative-claim": "mystery_window",
+                "anthropic-ratelimit-unified-reset": String(resetSeconds),
+                "anthropic-ratelimit-unified-status": "rejected",
+                "content-type": "application/json",
+                "retry-after": String(retryAfterSeconds),
+              },
+            });
+          }
+
+          return new Response(JSON.stringify({ id: "msg_second", type: "message" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        },
+      });
+
+      const response = await provider.handleRequest(createMessagesContext("unknown-claim"));
+      const firstUpdated = await store.get(first.id);
+      const cachedUsage = firstUpdated?.metadata.cachedUsage as {
+        five_hour?: { utilization?: number; resets_at?: string | null };
+        seven_day?: { utilization?: number; resets_at?: string | null };
+      } | undefined;
+
+      expect(response.status).toBe(200);
+      expect(upstreamAuths).toEqual(["Bearer first-access", "Bearer second-access"]);
+      expect(firstUpdated?.rateLimitResetAt).toBe(expectedQuotaResetAt);
+      expect(firstUpdated?.rateLimitCooldownUntil).toBe(expectedCooldownAt);
+      expect(firstUpdated?.metadata.rateLimitClaim).toBe("mystery_window");
+      expect(cachedUsage?.five_hour).toEqual({ utilization: 100, resets_at: expectedQuotaResetAt });
+      expect(cachedUsage?.seven_day).toEqual({ utilization: 42, resets_at: null });
+
+      vi.setSystemTime(now + Math.min(resetAfterSeconds, retryAfterSeconds) * 1000 + 1);
+      const stillBlocked = await new StickyAccountPool(store).select({
+        provider: "claude-code",
+        kind: "oauth",
+        sessionKey: "after-shorter-unknown-claim-boundary",
+      });
+      expect(stillBlocked?.id).toBe(second.id);
+
+      vi.setSystemTime(now + Math.max(resetAfterSeconds, retryAfterSeconds) * 1000 + 1);
+      const recovered = await new StickyAccountPool(store).select({
+        provider: "claude-code",
+        kind: "oauth",
+        sessionKey: "after-unknown-claim-reset",
+      });
+      expect(recovered?.id).toBe(first.id);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    {
+      label: "utilization",
+      utilization: "1junk",
+      unifiedResetSuffix: "",
+      expectedCachedUsage: undefined,
+    },
+    {
+      label: "unified reset",
+      utilization: "1",
+      unifiedResetSuffix: "junk",
+      expectedCachedUsage: {
+        format: "percent-v1",
+        five_hour: {
+          utilization: 100,
+          resets_at: null,
+        },
+      },
+    },
+  ])("rejects malformed Claude rate-limit $label headers", async ({
+    utilization,
+    unifiedResetSuffix,
+    expectedCachedUsage,
+  }) => {
+    vi.useFakeTimers();
+    const now = new Date("2026-09-11T00:00:00.000Z").getTime();
+    vi.setSystemTime(now);
+
+    try {
+      const resetSeconds = Math.floor(now / 1000) + 3600;
+      const retryAt = new Date(now + 60_000).toISOString();
+      const store = new MemoryAccountStore();
+      const first = await store.create({
+        provider: "claude-code",
+        kind: "oauth",
+        credentials: {
+          accessToken: "first-access",
+          expiresAt: now + 60 * 60 * 1000,
+          refreshToken: "refresh-first",
+        },
+      });
+      await store.create({
+        provider: "claude-code",
+        kind: "oauth",
+        credentials: {
+          accessToken: "second-access",
+          expiresAt: now + 60 * 60 * 1000,
+          refreshToken: "refresh-second",
+        },
+      });
+
+      const provider = createTestClaudeCodeProvider({
+        accounts: new StickyAccountPool(store),
+        baseUrl: "https://example.test",
+        fetch: async (_input, init) => {
+          const authorization = new Headers(init?.headers).get("authorization");
+          if (authorization === "Bearer first-access") {
+            return new Response(JSON.stringify({ error: { message: "rate limited" } }), {
+              status: 429,
+              headers: {
+                "anthropic-ratelimit-unified-5h-utilization": utilization,
+                "anthropic-ratelimit-unified-representative-claim": "five_hour",
+                "anthropic-ratelimit-unified-reset": `${resetSeconds}${unifiedResetSuffix}`,
+                "anthropic-ratelimit-unified-status": "rejected",
+                "content-type": "application/json",
+                "retry-after": "60",
+              },
+            });
+          }
+
+          return new Response(JSON.stringify({ id: "msg_second", type: "message" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        },
+      });
+
+      const response = await provider.handleRequest(createMessagesContext(`malformed-${unifiedResetSuffix || "usage"}`));
+      const firstUpdated = await store.get(first.id);
+
+      expect(response.status).toBe(200);
+      expect(firstUpdated?.rateLimitResetAt).toBeUndefined();
+      expect(firstUpdated?.rateLimitCooldownUntil).toBe(retryAt);
+      expect(firstUpdated?.metadata.cachedUsage).toEqual(expectedCachedUsage);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("fails over when a Claude stream starts with a rate limit error", async () => {
@@ -1471,7 +1833,8 @@ describe("createClaudeCodeProvider", () => {
     expect(await response.json()).toMatchObject({ id: "msg_second" });
     expect(upstreamAuths).toEqual(["Bearer first-access", "Bearer second-access"]);
     expect(firstUpdated?.failureCount).toBe(1);
-    expect(firstUpdated?.rateLimitResetAt).toBeTruthy();
+    expect(firstUpdated?.rateLimitResetAt).toBeUndefined();
+    expect(firstUpdated?.rateLimitCooldownUntil).toBeTruthy();
     expect(firstUpdated?.metadata.rateLimitClaim).toBe("five_hour");
     expect(firstUpdated?.metadata.rateLimitStatus).toBe("rejected");
     expect(secondUpdated?.lastUsedAt).toBeTruthy();
@@ -1565,6 +1928,8 @@ describe("createClaudeCodeProvider", () => {
     expect(firstUpdated?.lastFailureCode).toBe("non_subscription_billing_claim");
     expect(firstUpdated?.metadata.rateLimitClaim).toBe("api");
     expect(firstUpdated?.rateLimitBlockedAt).toBeTruthy();
+    expect(Date.parse(firstUpdated!.rateLimitCooldownUntil!) - Date.now())
+      .toBeGreaterThan(23 * 60 * 60 * 1000);
     expect(secondUpdated?.lastUsedAt).toBeTruthy();
   });
 
@@ -1639,6 +2004,7 @@ describe("createClaudeCodeProvider", () => {
     expect(response.status).toBe(200);
     expect(firstUpdated?.lastFailureClass).toBe("rate_limit");
     expect(firstUpdated?.rateLimitResetAt).toBeUndefined();
+    expect(firstUpdated?.rateLimitCooldownUntil).toBeTruthy();
     expect(firstUpdated?.rateLimitBlockedAt).toBeTruthy();
   });
 
@@ -1719,7 +2085,7 @@ describe("createClaudeCodeProvider", () => {
 
   it("enriches exhausted Claude Code 429 responses with rate limit header details", async () => {
     const store = new MemoryAccountStore();
-    await store.create({
+    const account = await store.create({
       provider: "claude-code",
       kind: "oauth",
       credentials: {
@@ -1738,7 +2104,7 @@ describe("createClaudeCodeProvider", () => {
         new Response(JSON.stringify({ error: { message: "Error" } }), {
           status: 429,
           headers: {
-            "anthropic-ratelimit-unified-5h-utilization": "0.98",
+            "anthropic-ratelimit-unified-5h-utilization": "1",
             "anthropic-ratelimit-unified-7d-utilization": "0.42",
             "anthropic-ratelimit-unified-representative-claim": "five_hour",
             "anthropic-ratelimit-unified-reset": String(Math.floor(Date.now() / 1000) + 3600),
@@ -1771,7 +2137,15 @@ describe("createClaudeCodeProvider", () => {
     const payload = await response.json() as { error?: { message?: string } };
     expect(response.status).toBe(429);
     expect(payload.error?.message).toContain("Limiting window: five_hour");
-    expect(payload.error?.message).toContain("5h utilization: 98%");
+    expect(payload.error?.message).toContain("5h utilization: 100%");
+    const updated = await store.get(account.id);
+    const cachedUsage = updated?.metadata.cachedUsage as {
+      five_hour?: { utilization?: number; resets_at?: string | null };
+      seven_day?: { resets_at?: string | null };
+    } | undefined;
+    expect(cachedUsage?.five_hour?.utilization).toBe(100);
+    expect(cachedUsage?.five_hour?.resets_at).toBeTruthy();
+    expect(cachedUsage?.seven_day?.resets_at).toBeNull();
   });
 
   it("returns 401 when no OAuth account is available", async () => {

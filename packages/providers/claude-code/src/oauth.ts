@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { CLAUDE_CODE_CACHED_USAGE_FORMAT } from "@kyoli-gam/core";
 import { detectClaudeCodeOAuthConfig } from "./oauth-config";
 import type { ClaudeCodeOAuthConfig } from "./oauth-config";
 
@@ -26,6 +27,7 @@ export interface ClaudeCodeOAuthTokens {
 }
 
 export interface ClaudeCodeUsageLimits {
+  format?: typeof CLAUDE_CODE_CACHED_USAGE_FORMAT;
   five_hour?: ClaudeCodeUsageLimit | null;
   seven_day?: ClaudeCodeUsageLimit | null;
   [key: `seven_day_${string}`]: ClaudeCodeUsageLimit | null | undefined;
@@ -320,6 +322,7 @@ function normalizeUsageLimits(payload: unknown): ClaudeCodeUsageLimits {
   if (!record) return {};
 
   const usage: ClaudeCodeUsageLimits = {
+    format: CLAUDE_CODE_CACHED_USAGE_FORMAT,
     five_hour: normalizeUsageLimit(record.five_hour),
     seven_day: normalizeUsageLimit(record.seven_day),
   };

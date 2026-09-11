@@ -36,6 +36,7 @@ type AccountStatus = "active" | "rate-limited" | "auth-disabled" | "disabled";
 export function getAccountStatus(account: ManagedAccount): AccountStatus {
   if (account.isAuthDisabled) return "auth-disabled";
   if (!account.enabled) return "disabled";
+  if (account.rateLimitCooldownUntil && account.rateLimitCooldownUntil > Date.now()) return "rate-limited";
   if (account.cachedUsage) {
     const now = Date.now();
     const usage = account.cachedUsage;

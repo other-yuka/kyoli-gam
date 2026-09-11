@@ -33,13 +33,13 @@ type MockAccountManager = ExecutorAccountManager & {
   selectAccount: ReturnType<typeof vi.fn>;
   getActiveAccount: ReturnType<typeof vi.fn>;
   refresh: ReturnType<typeof vi.fn>;
-  markSuccess: ReturnType<typeof vi.fn>;
+  markSuccessAtRevision: ReturnType<typeof vi.fn>;
   markRateLimited: ReturnType<typeof vi.fn>;
   markAuthFailure: ReturnType<typeof vi.fn>;
   markRevoked: ReturnType<typeof vi.fn>;
   hasAnyUsableAccount: ReturnType<typeof vi.fn>;
   getMinWaitTime: ReturnType<typeof vi.fn>;
-  applyUsageCache: ReturnType<typeof vi.fn>;
+  applyUsageCacheAtRevision: ReturnType<typeof vi.fn>;
 };
 
 function createMockManager(accounts: ManagedAccount[] = [createAccount()]): MockAccountManager {
@@ -54,13 +54,13 @@ function createMockManager(accounts: ManagedAccount[] = [createAccount()]): Mock
     }),
     getActiveAccount: vi.fn(() => accounts[0] ?? null),
     refresh: vi.fn(() => Promise.resolve()),
-    markSuccess: vi.fn(() => Promise.resolve()),
+    markSuccessAtRevision: vi.fn(() => Promise.resolve()),
     markRateLimited: vi.fn(() => Promise.resolve()),
     markAuthFailure: vi.fn(() => Promise.resolve()),
     markRevoked: vi.fn(() => Promise.resolve()),
     hasAnyUsableAccount: vi.fn(() => true),
     getMinWaitTime: vi.fn(() => 0),
-    applyUsageCache: vi.fn(() => Promise.resolve()),
+    applyUsageCacheAtRevision: vi.fn(() => Promise.resolve()),
   };
 }
 
@@ -107,7 +107,7 @@ describe("executeWithAccountRotation", () => {
     expect(response.status).toBe(200);
     const body = await response.json();
     expect(body.ok).toBe(true);
-    expect(manager.markSuccess).toHaveBeenCalledWith("acct-1");
+    expect(manager.markSuccessAtRevision).toHaveBeenCalledWith("acct-1", null);
   });
 
   test("on 429 calls markRateLimited and retries another account", async () => {
@@ -149,7 +149,7 @@ describe("executeWithAccountRotation", () => {
 
     expect(response.status).toBe(200);
     expect(factory.invalidate).toHaveBeenCalledWith("acct-1");
-    expect(manager.markSuccess).toHaveBeenCalledWith("acct-1");
+    expect(manager.markSuccessAtRevision).toHaveBeenCalledWith("acct-1", null);
   });
 
   test("throws Anthropic auth failure error when all accounts fail 401", async () => {
@@ -217,7 +217,7 @@ describe("executeWithAccountRotation", () => {
 
     expect(response.status).toBe(403);
     expect(manager.markRevoked).not.toHaveBeenCalled();
-    expect(manager.markSuccess).toHaveBeenCalledWith("acct-1");
+    expect(manager.markSuccessAtRevision).toHaveBeenCalledWith("acct-1", null);
   });
 
   test("retries server errors and returns success", async () => {

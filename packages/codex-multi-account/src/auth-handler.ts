@@ -28,6 +28,7 @@ import {
 import { OAUTH_ISSUER, OPENAI_CLIENT_ID } from "./constants";
 import type { ManagedAccount, OAuthCredentials, PluginClient, StoredAccount, TokenResponse } from "./types";
 import { TokenResponseSchema } from "./types";
+import { captureRateLimitRevision } from "opencode-multi-account-core";
 
 type OAuthCallbackResponse =
   | ({ type: "success" } & { refresh: string; access: string; expires: number; accountId?: string })
@@ -481,6 +482,8 @@ async function handleCheckQuotas(manager: AccountManager, client?: PluginClient)
       continue;
     }
 
+    const usageObservedAt = Date.now();
+    const expectedRateLimitRevision = captureRateLimitRevision(freshAccount);
     const usageResult = await fetchUsage(freshAccount.accessToken, freshAccount.accountId);
     if (!usageResult.ok) {
       printQuotaError(freshAccount, `Failed to fetch usage: ${usageResult.reason}`);
@@ -488,7 +491,17 @@ async function handleCheckQuotas(manager: AccountManager, client?: PluginClient)
     }
 
     if (freshAccount.uuid) {
-      await manager.applyUsageCache(freshAccount.uuid, usageResult.data);
+      if (manager.applyUsageCacheAtRevision) {
+        await manager.applyUsageCacheAtRevision(freshAccount.uuid, usageResult.data, {
+          observedAt: usageObservedAt,
+          expectedRateLimitRevision,
+        });
+      } else {
+        await manager.applyUsageCache(freshAccount.uuid, usageResult.data, {
+          observedAt: usageObservedAt,
+          expectedRateLimitObservedAt: expectedRateLimitRevision,
+        });
+      }
     }
 
     // Determine plan: JWT profile first, WHAM plan_type as fallback
@@ -608,7 +621,12 @@ async function handleResetCreditForAccount(
       creditId: credit.id,
     });
 
-    await manager.markSuccess(freshAccount.uuid);
+    const expectedRateLimitRevision = captureRateLimitRevision(freshAccount);
+    if (manager.markSuccessAtRevision) {
+      await manager.markSuccessAtRevision(freshAccount.uuid, expectedRateLimitRevision);
+    } else {
+      await manager.markSuccess(freshAccount.uuid);
+    }
     await manager.refresh();
 
     console.log(`\n✅ Reset credit redeemed for ${getAccountLabel(freshAccount)}.`);
@@ -619,7 +637,7 @@ async function handleResetCreditForAccount(
     console.log("");
 
     await showResetCreditToast(client, "success", `${getAccountLabel(freshAccount)} reset credit redeemed`);
-    await refreshAndPrintQuotaAfterReset(manager, freshAccount, chatgptAccountId);
+    await refreshAndPrintQuotaAfterReset(manager, freshAccount.uuid, chatgptAccountId);
   } catch (error) {
     const message = error instanceof CodexRateLimitResetError
       ? `${error.message} (HTTP ${error.status})`
@@ -679,18 +697,31 @@ function formatResetCreditDate(value: string): string {
 
 async function refreshAndPrintQuotaAfterReset(
   manager: AccountManager,
-  account: ManagedAccount,
+  accountUuid: string,
   chatgptAccountId: string,
 ): Promise<void> {
-  if (!account.accessToken || !account.uuid) return;
+  const account = manager.getAccounts().find((candidate) => candidate.uuid === accountUuid);
+  if (!account?.accessToken || !account.uuid) return;
 
+  const usageObservedAt = Date.now();
+  const expectedRateLimitRevision = captureRateLimitRevision(account);
   const usageResult = await fetchUsage(account.accessToken, chatgptAccountId);
   if (!usageResult.ok) {
     console.log(`⚠️  Reset was redeemed, but quota refresh failed: ${usageResult.reason}\n`);
     return;
   }
 
-  await manager.applyUsageCache(account.uuid, usageResult.data);
+  if (manager.applyUsageCacheAtRevision) {
+    await manager.applyUsageCacheAtRevision(account.uuid, usageResult.data, {
+      observedAt: usageObservedAt,
+      expectedRateLimitRevision,
+    });
+  } else {
+    await manager.applyUsageCache(account.uuid, usageResult.data, {
+      observedAt: usageObservedAt,
+      expectedRateLimitObservedAt: expectedRateLimitRevision,
+    });
+  }
 
   const profileResult = fetchProfile(account.accessToken);
   let email = account.email;

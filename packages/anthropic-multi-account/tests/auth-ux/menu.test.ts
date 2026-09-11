@@ -97,4 +97,26 @@ describe("getAccountStatus", () => {
 
     expect(getAccountStatus(account)).toBe("active");
   });
+
+  it("returns rate-limited when provider cooldown is active despite available cached usage", async () => {
+    const { getAccountStatus } = await import("../../src/auth-ux/menu/menu");
+
+    const account = {
+      index: 0,
+      refreshToken: "r",
+      addedAt: Date.now(),
+      lastUsed: Date.now(),
+      enabled: true,
+      rateLimitCooldownUntil: Date.now() + 60_000,
+      consecutiveAuthFailures: 0,
+      isAuthDisabled: false,
+      cachedUsage: {
+        five_hour: { utilization: 20, resets_at: null },
+        seven_day: null,
+        seven_day_sonnet: null,
+      },
+    };
+
+    expect(getAccountStatus(account)).toBe("rate-limited");
+  });
 });

@@ -1,11 +1,19 @@
+import { isQuotaWindowActive, normalizeUsagePercent } from "./routing";
+import type {
+  ApplyUsageCacheAtRevisionOptions,
+  ApplyUsageCacheOptions,
+  RateLimitRevision,
+} from "./account-manager";
 import type { ManagedAccount, PluginClient, PluginConfig, UsageLimits } from "./types";
 
 const USAGE_FETCH_COOLDOWN_MS = 30_000;
+const DEFAULT_RATE_LIMIT_MIN_BACKOFF_MS = 30_000;
 const NON_SUBSCRIPTION_BILLING_BACKOFF_MS = 24 * 60 * 60 * 1000;
 
 export interface RateLimitDependencies {
   fetchUsage: (accessToken: string, accountId?: string) => Promise<{ ok: true; data: UsageLimits } | { ok: false; reason: string }>;
-  getConfig: () => Pick<PluginConfig, "default_retry_after_ms">;
+  getConfig: () => Pick<PluginConfig, "default_retry_after_ms">
+    & Partial<Pick<PluginConfig, "rate_limit_min_backoff_ms">>;
   formatWaitTime: (ms: number) => string;
   getAccountLabel: (account: ManagedAccount) => string;
   showToast: (
@@ -16,8 +24,22 @@ export interface RateLimitDependencies {
 }
 
 export interface RateLimitAccountManager {
-  markRateLimited(uuid: string, backoffMs?: number): Promise<void>;
-  applyUsageCache(uuid: string, usage: UsageLimits): Promise<void>;
+  markRateLimited(
+    uuid: string,
+    backoffMs?: number,
+    options?: { rateLimitResetMs?: number; usage?: UsageLimits },
+  ): Promise<void>;
+  markRateLimitedAtRevision?(
+    uuid: string,
+    backoffMs?: number,
+    options?: { rateLimitResetMs?: number; usage?: UsageLimits },
+  ): Promise<RateLimitRevision | undefined>;
+  applyUsageCache(uuid: string, usage: UsageLimits, options?: ApplyUsageCacheOptions): Promise<void>;
+  applyUsageCacheAtRevision?(
+    uuid: string,
+    usage: UsageLimits,
+    options: ApplyUsageCacheAtRevisionOptions,
+  ): Promise<void>;
   getAccountCount(): number;
 }
 
@@ -43,7 +65,13 @@ export function createRateLimitHandlers(dependencies: RateLimitDependencies) {
       if (!isNaN(parsed) && parsed > 0) return parsed * 1000;
     }
 
-    return getConfig().default_retry_after_ms;
+    const config = getConfig();
+    const configuredMinimumBackoffMs = config.rate_limit_min_backoff_ms;
+    const minimumBackoffMs = typeof configuredMinimumBackoffMs === "number"
+      && Number.isFinite(configuredMinimumBackoffMs)
+      ? configuredMinimumBackoffMs
+      : DEFAULT_RATE_LIMIT_MIN_BACKOFF_MS;
+    return Math.max(config.default_retry_after_ms, minimumBackoffMs);
   }
 
   function isNonSubscriptionBillingClaim(claim: string | null): claim is string {
@@ -57,23 +85,109 @@ export function createRateLimitHandlers(dependencies: RateLimitDependencies) {
       || normalized.startsWith("sdk");
   }
 
-  function getResetMsFromUsage(account: ManagedAccount): number | null {
-    const usage = account.cachedUsage;
-    if (!usage) return null;
+  function hasNonExhaustedClaudeQuota(response: Response): boolean {
+    const utilizationHeaders = [...response.headers.entries()]
+      .filter(([name]) => name.startsWith("anthropic-ratelimit-unified-") && name.endsWith("-utilization"));
+    if (utilizationHeaders.length === 0) return false;
+
+    const claim = response.headers.get("anthropic-ratelimit-unified-representative-claim")?.toLowerCase();
+    if (claim && claim !== "unknown") {
+      const claimedHeader = claim === "five_hour"
+        ? "anthropic-ratelimit-unified-5h-utilization"
+        : claim === "seven_day"
+          ? "anthropic-ratelimit-unified-7d-utilization"
+          : claim.startsWith("seven_day_")
+            ? `anthropic-ratelimit-unified-7d_${claim.slice("seven_day_".length)}-utilization`
+            : undefined;
+      if (claimedHeader) {
+        const claimed = readClaudeUtilization(response.headers.get(claimedHeader));
+        return claimed !== undefined && claimed < 100;
+      }
+    }
+
+    const utilizations = utilizationHeaders.map(([, value]) => readClaudeUtilization(value));
+    if (utilizations.some((value) => value === undefined)) return false;
+    return utilizations.length > 0 && utilizations.every((value) => value !== undefined && value < 100);
+  }
+
+  function readClaudeUtilization(value: string | null): number | undefined {
+    if (value == null || value.trim() === "") return undefined;
+    const parsed = Number(value.trim());
+    if (!Number.isFinite(parsed) || parsed < 0) return undefined;
+    return Math.min(100, parsed * 100);
+  }
+
+  function claudeUnifiedResetFromResponse(response: Response): { resetAt: string; resetMs: number } | null {
+    const rawReset = response.headers.get("anthropic-ratelimit-unified-reset");
+    if (!rawReset || rawReset.trim() === "") return null;
+
+    const resetSeconds = Number(rawReset.trim());
+    if (!Number.isFinite(resetSeconds) || resetSeconds <= 0) return null;
+
+    const resetAt = resetSeconds * 1000;
+    if (!Number.isFinite(resetAt)) return null;
+
+    const resetMs = resetAt - Date.now();
+    const resetDate = new Date(resetAt);
+    return resetMs > 0 && Number.isFinite(resetDate.getTime())
+      ? { resetAt: resetDate.toISOString(), resetMs }
+      : null;
+  }
+
+  function claudeUsageFromResponse(response: Response, resetAt?: string): UsageLimits | null {
+    const fiveHour = readClaudeUtilization(response.headers.get("anthropic-ratelimit-unified-5h-utilization"));
+    const sevenDay = readClaudeUtilization(response.headers.get("anthropic-ratelimit-unified-7d-utilization"));
+    const sevenDaySonnet = readClaudeUtilization(
+      response.headers.get("anthropic-ratelimit-unified-7d_sonnet-utilization"),
+    );
+    if (fiveHour === undefined && sevenDay === undefined && sevenDaySonnet === undefined) return null;
+
+    const claim = response.headers.get("anthropic-ratelimit-unified-representative-claim")?.toLowerCase();
+    const claimedTier = claim === "five_hour" || claim === "seven_day" || claim === "seven_day_sonnet"
+      ? claim
+      : undefined;
+    const createTier = (key: string, utilization: number | undefined) => utilization === undefined
+      ? null
+      : {
+        utilization,
+        resets_at: utilization === 100 && resetAt && (claimedTier === undefined || claimedTier === key)
+          ? resetAt
+          : null,
+      };
+
+    return {
+      five_hour: createTier("five_hour", fiveHour),
+      seven_day: createTier("seven_day", sevenDay),
+      seven_day_sonnet: createTier("seven_day_sonnet", sevenDaySonnet),
+    };
+  }
+
+  function getResetMsFromUsage(account: ManagedAccount, claim?: string | null): number | null {
+    return account.cachedUsage ? getResetMsFromUsageLimits(account.cachedUsage, claim) : null;
+  }
+
+  function getResetMsFromUsageLimits(usage: UsageLimits, claim?: string | null): number | null {
 
     const now = Date.now();
     const candidates: number[] = [];
 
-    if (usage.five_hour?.resets_at) {
+    if (usage.five_hour?.resets_at && normalizeUsagePercent(usage.five_hour.utilization) === 100 && isQuotaWindowActive(usage.five_hour.resets_at, now)) {
       const ms = Date.parse(usage.five_hour.resets_at) - now;
       if (ms > 0) candidates.push(ms);
     }
-    if (usage.seven_day?.resets_at) {
+    if (usage.seven_day?.resets_at && normalizeUsagePercent(usage.seven_day.utilization) === 100 && isQuotaWindowActive(usage.seven_day.resets_at, now)) {
       const ms = Date.parse(usage.seven_day.resets_at) - now;
       if (ms > 0) candidates.push(ms);
     }
+    if (claim?.toLowerCase() === "seven_day_sonnet"
+      && usage.seven_day_sonnet?.resets_at
+      && normalizeUsagePercent(usage.seven_day_sonnet.utilization) === 100
+      && isQuotaWindowActive(usage.seven_day_sonnet.resets_at, now)) {
+      const ms = Date.parse(usage.seven_day_sonnet.resets_at) - now;
+      if (ms > 0) candidates.push(ms);
+    }
 
-    return candidates.length > 0 ? Math.min(...candidates) : null;
+    return candidates.length > 0 ? Math.max(...candidates) : null;
   }
 
   async function fetchUsageLimits(accessToken: string, accountId?: string): Promise<UsageLimits | null> {
@@ -96,12 +210,27 @@ export function createRateLimitHandlers(dependencies: RateLimitDependencies) {
 
     const nonSubscriptionClaim = response.headers.get("anthropic-ratelimit-unified-representative-claim");
     const shouldQuarantineBillingClaim = isNonSubscriptionBillingClaim(nonSubscriptionClaim);
-    const resetMs = shouldQuarantineBillingClaim
-      ? Math.max(retryAfterMsFromResponse(response), NON_SUBSCRIPTION_BILLING_BACKOFF_MS)
-      : getResetMsFromUsage(account) ?? retryAfterMsFromResponse(response);
-    await manager.markRateLimited(account.uuid, resetMs);
-
+    const hasNonExhaustedQuota = hasNonExhaustedClaudeQuota(response);
+    const retryAfterMs = retryAfterMsFromResponse(response);
+    const providerReset = !shouldQuarantineBillingClaim && !hasNonExhaustedQuota
+      ? claudeUnifiedResetFromResponse(response)
+      : null;
+    const providerResetMs = providerReset?.resetMs ?? null;
+    const cachedResetMs = providerResetMs === null ? getResetMsFromUsage(account, nonSubscriptionClaim) : null;
+    const rateLimitResetMs = hasNonExhaustedQuota
+      ? null
+      : providerResetMs ?? cachedResetMs;
+    const cooldownMs = shouldQuarantineBillingClaim
+      ? Math.max(retryAfterMs, NON_SUBSCRIPTION_BILLING_BACKOFF_MS)
+      : retryAfterMs;
+    const waitMs = Math.max(rateLimitResetMs ?? 0, cooldownMs);
+    const usageToPersist = providerReset
+      ? claudeUsageFromResponse(response, providerReset.resetAt) ?? undefined
+      : hasNonExhaustedQuota
+        ? claudeUsageFromResponse(response) ?? undefined
+        : undefined;
     if (shouldQuarantineBillingClaim) {
+      await manager.markRateLimited(account.uuid, cooldownMs);
       if (manager.getAccountCount() > 1) {
         void showToast(
           client,
@@ -112,20 +241,58 @@ export function createRateLimitHandlers(dependencies: RateLimitDependencies) {
       return;
     }
 
-    const shouldFetchUsage = account.accessToken
+    const rateLimitOptions = usageToPersist || rateLimitResetMs !== null
+      ? {
+        ...(rateLimitResetMs === null ? {} : { rateLimitResetMs }),
+        ...(usageToPersist ? { usage: usageToPersist } : {}),
+      }
+      : undefined;
+    const markRateLimitedAtRevision = manager.markRateLimitedAtRevision?.bind(manager);
+    const applyUsageCacheAtRevision = manager.applyUsageCacheAtRevision?.bind(manager);
+    const supportsRevisionGuards = markRateLimitedAtRevision !== undefined
+      && applyUsageCacheAtRevision !== undefined;
+    let rateLimitRevision: RateLimitRevision | undefined;
+    if (supportsRevisionGuards) {
+      rateLimitRevision = rateLimitOptions === undefined
+        ? await markRateLimitedAtRevision(account.uuid, cooldownMs)
+        : await markRateLimitedAtRevision(account.uuid, cooldownMs, rateLimitOptions);
+    } else if (rateLimitOptions === undefined) {
+      await manager.markRateLimited(account.uuid, waitMs);
+    } else {
+      await manager.markRateLimited(account.uuid, waitMs, rateLimitOptions);
+    }
+
+    const shouldFetchUsage = (!supportsRevisionGuards || rateLimitRevision !== undefined)
+      && !hasNonExhaustedQuota && providerResetMs === null && account.accessToken
       && (!account.cachedUsageAt || Date.now() - account.cachedUsageAt > USAGE_FETCH_COOLDOWN_MS);
 
     if (shouldFetchUsage) {
+      const observedAt = Date.now();
       const usage = await fetchUsageLimits(account.accessToken!, account.accountId);
       if (usage) {
-        await manager.applyUsageCache(account.uuid, usage);
+        const refreshedResetMs = getResetMsFromUsageLimits(usage, nonSubscriptionClaim);
+        if (applyUsageCacheAtRevision && rateLimitRevision !== undefined) {
+          await applyUsageCacheAtRevision(
+            account.uuid,
+            usage,
+            refreshedResetMs === null
+              ? { observedAt, expectedRateLimitRevision: rateLimitRevision }
+              : {
+                observedAt,
+                rateLimitResetMs: refreshedResetMs,
+                expectedRateLimitRevision: rateLimitRevision,
+              },
+          );
+        } else {
+          await manager.applyUsageCache(account.uuid, usage);
+        }
       }
     }
 
     if (manager.getAccountCount() > 1) {
       void showToast(
         client,
-        `${getAccountLabel(account)} rate-limited (resets in ${formatWaitTime(resetMs)}). Switching...`,
+        `${getAccountLabel(account)} rate-limited (resets in ${formatWaitTime(waitMs)}). Switching...`,
         "warning",
       );
     }

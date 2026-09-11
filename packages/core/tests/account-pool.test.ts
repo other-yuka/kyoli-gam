@@ -1,5 +1,13 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { MemoryAccountStore } from "../src/accounts";
+import {
+  CLAUDE_CODE_CACHED_USAGE_FORMAT,
+  MemoryAccountStore,
+  SQLiteAccountStore,
+  createAccountRefreshUpdate,
+} from "../src/accounts";
 import { StickyAccountPool } from "../src/account-pool";
 import { summarizeAccountStatus, listFailedAccounts } from "../src/account-status";
 import { MemoryStickySessionStore } from "../src/sticky-sessions";
@@ -293,6 +301,269 @@ describe("StickyAccountPool", () => {
     expect(updated?.lastErrorAt).toBeUndefined();
   });
 
+  it("keeps an expired legacy reset blocked until every exhausted usage window resets", async () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-09-11T00:00:00.000Z").getTime();
+    vi.setSystemTime(now);
+
+    try {
+      const store = new MemoryAccountStore();
+      const account = await store.create({ provider: "claude-code", kind: "oauth", name: "overlap" });
+      await store.recordFailure(account.id, {
+        status: 429,
+        message: "rate limited",
+        failureClass: "rate_limit",
+        failureCode: "rate_limit",
+        rateLimitResetAt: new Date(now + 60_000).toISOString(),
+        metadata: {
+          cachedUsageAt: now,
+          cachedUsage: {
+            format: CLAUDE_CODE_CACHED_USAGE_FORMAT,
+            five_hour: {
+              utilization: 100,
+              resets_at: new Date(now + 120_000).toISOString(),
+            },
+          },
+        },
+      });
+      const pool = new StickyAccountPool(store);
+
+      vi.setSystemTime(now + 60_001);
+      expect(await pool.select({
+        provider: "claude-code",
+        kind: "oauth",
+        sessionKey: "before-usage-reset",
+      })).toBeUndefined();
+      const stillBlocked = await store.get(account.id);
+      expect(stillBlocked?.rateLimitBlockedAt).toBeDefined();
+      expect(stillBlocked?.metadata.cachedUsage).toBeDefined();
+
+      vi.setSystemTime(now + 120_001);
+      expect((await pool.select({
+        provider: "claude-code",
+        kind: "oauth",
+        sessionKey: "after-usage-reset",
+      }))?.id).toBe(account.id);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps exhausted usage without a reset blocked until a fresh snapshot arrives", async () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-09-11T00:00:00.000Z").getTime();
+    vi.setSystemTime(now);
+
+    try {
+      const store = new MemoryAccountStore();
+      const account = await store.create({
+        provider: "claude-code",
+        kind: "oauth",
+        name: "unknown-reset",
+        metadata: {
+          cachedUsageAt: now,
+          cachedUsage: {
+            format: CLAUDE_CODE_CACHED_USAGE_FORMAT,
+            five_hour: {
+              utilization: 100,
+              resets_at: new Date(now + 60_000).toISOString(),
+            },
+            seven_day: { utilization: 100, resets_at: null },
+          },
+        },
+      });
+      await store.recordFailure(account.id, {
+        status: 429,
+        message: "quota exhausted",
+        failureClass: "quota",
+        rateLimitResetAt: new Date(now + 60_000).toISOString(),
+        rateLimitCooldownUntil: new Date(now + 60_000).toISOString(),
+      });
+      const pool = new StickyAccountPool(store);
+
+      vi.setSystemTime(now + 60_001);
+      expect(await pool.select({
+        provider: "claude-code",
+        kind: "oauth",
+        sessionKey: "before-fresh-usage",
+      })).toBeUndefined();
+
+      const blocked = await store.get(account.id);
+      if (!blocked) throw new Error("Expected blocked account");
+      const observedAt = now + 60_002;
+      await store.update(account.id, createAccountRefreshUpdate(blocked, {
+        metadata: {
+          ...blocked.metadata,
+          cachedUsageAt: observedAt,
+          cachedUsage: {
+            format: CLAUDE_CODE_CACHED_USAGE_FORMAT,
+            five_hour: { utilization: 20, resets_at: null },
+            seven_day: { utilization: 30, resets_at: null },
+          },
+        },
+      }, { usageObservedAt: observedAt, recoverRateLimitState: true }));
+
+      expect((await pool.select({
+        provider: "claude-code",
+        kind: "oauth",
+        sessionKey: "after-fresh-usage",
+      }))?.id).toBe(account.id);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["memory", "sqlite"] as const)(
+    "keeps an indeterminate canonical and legacy usage pair blocked in the %s store",
+    async (kind) => {
+      vi.useFakeTimers();
+      const now = new Date("2026-09-11T00:00:00.000Z").getTime();
+      vi.setSystemTime(now);
+      const dir = kind === "sqlite" ? mkdtempSync(join(tmpdir(), "kyoli-account-usage-conflict-")) : undefined;
+
+      try {
+        const store = kind === "sqlite"
+          ? new SQLiteAccountStore(join(dir!, "kyoli.db"))
+          : new MemoryAccountStore();
+        const account = await store.create({
+          provider: "claude-code",
+          kind: "oauth",
+          name: "usage-conflict",
+          metadata: {
+            cachedUsage: {
+              format: CLAUDE_CODE_CACHED_USAGE_FORMAT,
+              five_hour: { utilization: 20, resets_at: null },
+            },
+            usageCachedAt: now,
+            usage: {
+              five_hour: {
+                utilization: 100,
+                resets_at: new Date(now + 120_000).toISOString(),
+              },
+            },
+          },
+        });
+        await store.recordFailure(account.id, {
+          status: 429,
+          message: "rate limited",
+          failureClass: "rate_limit",
+          failureCode: "rate_limit",
+          rateLimitCooldownUntil: new Date(now + 60_000).toISOString(),
+        });
+        const pool = new StickyAccountPool(store);
+
+        vi.setSystemTime(now + 60_001);
+        expect(await pool.select({
+          provider: "claude-code",
+          kind: "oauth",
+          sessionKey: "before-legacy-reset",
+        })).toBeUndefined();
+        await expect(store.get(account.id)).resolves.toMatchObject({
+          failureCount: 1,
+          rateLimitBlockedAt: expect.any(String),
+        });
+
+        vi.setSystemTime(now + 120_001);
+        expect((await pool.select({
+          provider: "claude-code",
+          kind: "oauth",
+          sessionKey: "after-legacy-reset",
+        }))?.id).toBe(account.id);
+        await expect(store.get(account.id)).resolves.toMatchObject({
+          failureCount: 0,
+          rateLimitBlockedAt: undefined,
+        });
+      } finally {
+        vi.useRealTimers();
+        if (dir) rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("recovers a cooldown-only rate limit after its retry window expires", async () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-09-11T00:00:00.000Z").getTime();
+    vi.setSystemTime(now);
+
+    try {
+      const store = new MemoryAccountStore();
+      const account = await store.create({ provider: "claude-code", kind: "oauth", name: "cooldown" });
+      await store.recordFailure(account.id, {
+        status: 429,
+        message: "rate limited",
+        failureClass: "rate_limit",
+        failureCode: "rate_limit",
+        rateLimitCooldownUntil: new Date(now + 60_000).toISOString(),
+      });
+      const pool = new StickyAccountPool(store);
+
+      expect(await pool.select({
+        provider: "claude-code",
+        kind: "oauth",
+        sessionKey: "during-cooldown",
+      })).toBeUndefined();
+
+      vi.setSystemTime(now + 60_001);
+      const selected = await pool.select({
+        provider: "claude-code",
+        kind: "oauth",
+        sessionKey: "after-cooldown",
+      });
+      const recovered = await store.get(account.id);
+
+      expect(selected?.id).toBe(account.id);
+      expect(recovered?.failureCount).toBe(0);
+      expect(recovered?.rateLimitBlockedAt).toBeUndefined();
+      expect(recovered?.rateLimitCooldownUntil).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps an expired cooldown blocked while an exhausted usage window is active", async () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-09-11T00:00:00.000Z").getTime();
+    vi.setSystemTime(now);
+
+    try {
+      const store = new MemoryAccountStore();
+      const account = await store.create({ provider: "claude-code", kind: "oauth", name: "quota" });
+      await store.recordFailure(account.id, {
+        status: 429,
+        message: "rate limited",
+        failureClass: "rate_limit",
+        failureCode: "rate_limit",
+        rateLimitCooldownUntil: new Date(now + 60_000).toISOString(),
+        metadata: {
+          cachedUsageAt: now,
+          cachedUsage: {
+            five_hour: {
+              utilization: 100,
+              resets_at: new Date(now + 120_000).toISOString(),
+            },
+          },
+        },
+      });
+      const pool = new StickyAccountPool(store);
+
+      vi.setSystemTime(now + 60_001);
+      expect(await pool.select({
+        provider: "claude-code",
+        kind: "oauth",
+        sessionKey: "before-quota-reset",
+      })).toBeUndefined();
+
+      vi.setSystemTime(now + 120_001);
+      expect((await pool.select({
+        provider: "claude-code",
+        kind: "oauth",
+        sessionKey: "after-quota-reset",
+      }))?.id).toBe(account.id);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps active rate-limited accounts out of selection", async () => {
     const store = new MemoryAccountStore();
     const limited = await store.create({ provider: "codex", kind: "oauth", name: "limited" });
@@ -356,6 +627,62 @@ describe("StickyAccountPool", () => {
     expect((await store.get(limited.id))?.rateLimitBlockedAt).toBeUndefined();
   });
 
+  it("honors a provider retry cooldown despite fresher available usage", async () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-09-11T00:00:00.000Z").getTime();
+    vi.setSystemTime(now);
+
+    try {
+      const store = new MemoryAccountStore();
+      const limited = await store.create({ provider: "claude-code", kind: "oauth", name: "limited" });
+      const cooldownUntil = new Date(now + 60_000).toISOString();
+      await store.recordFailure(limited.id, {
+        status: 429,
+        message: "rate limited",
+        failureClass: "rate_limit",
+        failureCode: "rate_limit",
+        failurePhase: "startup",
+        rateLimitCooldownUntil: cooldownUntil,
+      });
+      const ready = await store.create({ provider: "claude-code", kind: "oauth", name: "ready" });
+      await store.update(limited.id, {
+        metadata: {
+          cachedUsageAt: now + 1,
+          cachedUsage: {
+            five_hour: { utilization: 10, resets_at: null },
+          },
+        },
+      });
+      const pool = new StickyAccountPool(store);
+
+      const duringCooldown = await pool.select({
+        provider: "claude-code",
+        kind: "oauth",
+        sessionKey: "during-provider-cooldown",
+        preferredAccountId: limited.id,
+      });
+
+      expect(duringCooldown?.id).toBe(ready.id);
+      expect(await store.get(limited.id)).toMatchObject({
+        rateLimitBlockedAt: expect.any(String),
+        rateLimitCooldownUntil: cooldownUntil,
+      });
+
+      vi.setSystemTime(now + 60_001);
+      const afterCooldown = await pool.select({
+        provider: "claude-code",
+        kind: "oauth",
+        sessionKey: "after-provider-cooldown",
+        preferredAccountId: limited.id,
+      });
+
+      expect(afterCooldown?.id).toBe(limited.id);
+      expect((await store.get(limited.id))?.rateLimitBlockedAt).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not recover unknown usage-limit blocks from blank utilization strings", async () => {
     const store = new MemoryAccountStore();
     const limited = await store.create({ provider: "codex", kind: "oauth", name: "limited" });
@@ -380,6 +707,41 @@ describe("StickyAccountPool", () => {
       provider: "codex",
       kind: "oauth",
       sessionKey: "session-a",
+      preferredAccountId: limited.id,
+    });
+
+    expect(selected?.id).toBe(ready.id);
+    expect((await store.get(limited.id))?.rateLimitBlockedAt).toBeDefined();
+  });
+
+  it("keeps a fresh exhausted usage window blocked until its reset", async () => {
+    const store = new MemoryAccountStore();
+    const limited = await store.create({ provider: "codex", kind: "oauth", name: "limited" });
+    await store.recordFailure(limited.id, {
+      status: 429,
+      message: "rate limited",
+      failureClass: "rate_limit",
+      failureCode: "rate_limit",
+      failurePhase: "startup",
+    });
+    const ready = await store.create({ provider: "codex", kind: "oauth", name: "ready" });
+    await store.update(limited.id, {
+      metadata: {
+        cachedUsageAt: Date.now() + 1_000,
+        cachedUsage: {
+          five_hour: {
+            utilization: 100,
+            resets_at: new Date(Date.now() + 60_000).toISOString(),
+          },
+        },
+      },
+    });
+    const pool = new StickyAccountPool(store);
+
+    const selected = await pool.select({
+      provider: "codex",
+      kind: "oauth",
+      sessionKey: "fresh-exhausted-session",
       preferredAccountId: limited.id,
     });
 
@@ -467,6 +829,117 @@ describe("StickyAccountPool", () => {
 
     expect(selected?.id).toBe(available.id);
     expect(selected?.id).not.toBe(saturated.id);
+  });
+
+  it("does not soft-skip Claude usage after that tier has rolled over", async () => {
+    const store = new MemoryAccountStore();
+    const rolledOver = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      name: "rolled-over",
+      metadata: {
+        cachedUsage: {
+          five_hour: { utilization: 0.96, resets_at: new Date(Date.now() - 60_000).toISOString() },
+          seven_day: { utilization: 0.2, resets_at: new Date(Date.now() + 86_400_000).toISOString() },
+        },
+      },
+    });
+    const available = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      name: "available",
+      metadata: { cachedUsage: { five_hour: { utilization: 0.1, resets_at: null } } },
+    });
+    const pool = new StickyAccountPool(store, { strategy: "round-robin", softQuotaThresholdPercent: 90 });
+
+    const result = await pool.selectWithDiagnostics({
+      provider: "claude-code",
+      kind: "oauth",
+      sessionKey: "rollover-session",
+    });
+
+    expect(result.diagnostics.softQuotaSkippedAccountIds).not.toContain(rolledOver.id);
+    expect(result.account?.id).toBe(rolledOver.id);
+    expect(result.account?.id).not.toBe(available.id);
+  });
+
+  it("keeps a one-percent Claude usage value distinct from a ratio cache", async () => {
+    const store = new MemoryAccountStore();
+    const lowUsage = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      name: "one-percent",
+      metadata: {
+        cachedUsage: {
+          format: "percent-v1",
+          five_hour: { utilization: 1, resets_at: null },
+        },
+      },
+    });
+    const exhausted = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      name: "exhausted",
+      metadata: {
+        cachedUsage: {
+          format: "percent-v1",
+          five_hour: { utilization: 100, resets_at: null },
+        },
+      },
+    });
+    const pool = new StickyAccountPool(store, {
+      strategy: "weighted",
+      softQuotaThresholdPercent: 90,
+    });
+
+    const result = await pool.selectWithDiagnostics({
+      provider: "claude-code",
+      kind: "oauth",
+      sessionKey: "one-percent-session",
+    });
+
+    expect(result.account?.id).toBe(lowUsage.id);
+    expect(result.diagnostics.softQuotaSkippedAccountIds).toContain(exhausted.id);
+  });
+
+  it("treats fractional Claude OAuth utilization as a percentage", async () => {
+    const store = new MemoryAccountStore();
+    const fractionalPercent = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      name: "fractional-percent",
+      metadata: {
+        cachedUsage: {
+          format: "percent-v1",
+          five_hour: { utilization: 0.5, resets_at: null },
+        },
+      },
+    });
+    const overThreshold = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      name: "over-threshold",
+      metadata: {
+        cachedUsage: {
+          format: "percent-v1",
+          five_hour: { utilization: 10, resets_at: null },
+        },
+      },
+    });
+    const pool = new StickyAccountPool(store, {
+      strategy: "round-robin",
+      softQuotaThresholdPercent: 5,
+    });
+
+    const result = await pool.selectWithDiagnostics({
+      provider: "claude-code",
+      kind: "oauth",
+      sessionKey: "fractional-percent-session",
+    });
+
+    expect(result.account?.id).toBe(fractionalPercent.id);
+    expect(result.diagnostics.softQuotaSkippedAccountIds).not.toContain(fractionalPercent.id);
+    expect(result.diagnostics.softQuotaSkippedAccountIds).toContain(overThreshold.id);
   });
 
   it("uses a conservative default soft quota threshold for fresh selection", async () => {

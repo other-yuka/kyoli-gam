@@ -950,6 +950,11 @@ describe("createCodexChatGPTProvider", () => {
         accountId: "acct_old",
       },
     });
+    await store.recordFailure(account.id, {
+      status: 500,
+      message: "earlier server failure",
+      failureClass: "transient",
+    });
 
     const provider = createCodexChatGPTProvider({
       accounts: new StickyAccountPool(store),
@@ -2820,6 +2825,11 @@ describe("createCodexChatGPTProvider", () => {
         accountId: "acct_old",
       },
     });
+    await store.recordFailure(account.id, {
+      status: 500,
+      message: "earlier server failure",
+      failureClass: "transient",
+    });
 
     const provider = createCodexChatGPTProvider({
       accounts: new StickyAccountPool(store),
@@ -2868,6 +2878,8 @@ describe("createCodexChatGPTProvider", () => {
     expect(updated?.metadata.email).toBe("fresh@example.com");
     expect(updated?.metadata.accountId).toBe("acct_new");
     expect(updated?.metadata.planTier).toBe("pro");
+    expect(updated?.failureCount).toBe(0);
+    expect(updated?.lastFailureClass).toBeUndefined();
   });
 
   it("bounds compact retry starts by the overall request budget without penalizing the account", async () => {
@@ -3469,6 +3481,11 @@ describe("createCodexChatGPTProvider", () => {
         accountId: "acct_old",
       },
     });
+    await store.recordFailure(account.id, {
+      status: 500,
+      message: "earlier server failure",
+      failureClass: "transient",
+    });
 
     const provider = createCodexChatGPTProvider({
       accounts: new StickyAccountPool(store),
@@ -3509,6 +3526,8 @@ describe("createCodexChatGPTProvider", () => {
     expect(updated?.credentials.accessToken).toBe("fresh-access");
     expect(updated?.credentials.refreshToken).toBe("refresh-new");
     expect(updated?.credentials.accountId).toBe("acct_new");
+    expect(updated?.failureCount).toBe(0);
+    expect(updated?.lastFailureClass).toBeUndefined();
   });
 
   it("fails over when an expired account cannot refresh", async () => {

@@ -13,6 +13,7 @@ import type {
   UsageLimits,
 } from "../src/types";
 import { setupTestEnv, createMockClient, createTestStorage, buildFakeJwt } from "./helpers";
+import { captureRateLimitRevision } from "opencode-multi-account-core";
 
 const originalFetch = globalThis.fetch;
 
@@ -45,7 +46,7 @@ function createAuth(id: string): OAuthCredentials {
 
 function createUsage(utilization: number): UsageLimits {
   return {
-    five_hour: { utilization, resets_at: "2026-01-01T00:00:00Z" },
+    five_hour: { utilization, resets_at: new Date(Date.now() + 60 * 60 * 1000).toISOString() },
     seven_day: null,
     seven_day_sonnet: null,
   };
@@ -201,8 +202,12 @@ describe("account-manager", () => {
       throw new Error("Expected two accounts");
     }
 
-    await manager.applyUsageCache(first.uuid, createUsage(95));
-    await manager.applyUsageCache(second.uuid, createUsage(10));
+    await manager.applyUsageCacheAtRevision(first.uuid, createUsage(95), {
+      expectedRateLimitRevision: captureRateLimitRevision(first),
+    });
+    await manager.applyUsageCacheAtRevision(second.uuid, createUsage(10), {
+      expectedRateLimitRevision: captureRateLimitRevision(second),
+    });
 
     const selected = await manager.selectAccount();
     expect(selected?.uuid).toBe(second.uuid);
@@ -279,11 +284,46 @@ describe("account-manager", () => {
     await manager.markRateLimited(second.uuid, 2_000);
     await manager.refresh();
 
+    expect(manager.getAccounts()[0]?.rateLimitCooldownUntil).toBe(15_000);
+    expect(manager.getAccounts()[1]?.rateLimitCooldownUntil).toBe(12_000);
     expect(manager.getMinWaitTime()).toBe(2_000);
     now = 12_100;
     manager.clearExpiredRateLimits();
     expect(manager.getMinWaitTime()).toBe(0);
 
+    nowSpy.mockRestore();
+  });
+
+  test("persists a quota refresh after reset-credit recovery", async () => {
+    const now = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const manager = await createManagerFromStorage(createTestStorage(1));
+    const account = manager.getAccounts()[0];
+    if (!account?.uuid) {
+      throw new Error("Expected account");
+    }
+
+    const rateLimitRevision = await manager.markRateLimitedAtRevision!(account.uuid, 60_000);
+    await manager.markSuccessAtRevision(account.uuid, rateLimitRevision ?? null);
+    await manager.refresh();
+    const resetAccount = manager.getAccounts().find((candidate) => candidate.uuid === account.uuid);
+    if (!resetAccount) {
+      throw new Error("Expected reset account");
+    }
+    const usage = createUsage(15);
+
+    await manager.applyUsageCacheAtRevision(account.uuid, usage, {
+      observedAt: now,
+      expectedRateLimitRevision: captureRateLimitRevision(resetAccount),
+    });
+
+    expect(resetAccount.rateLimitObservedAt).toBe((rateLimitRevision ?? 0) + 1);
+    const saved = await readStorage();
+    expect(saved.accounts.find((candidate) => candidate.uuid === account.uuid)).toMatchObject({
+      cachedUsage: usage,
+      cachedUsageAt: now,
+      rateLimitObservedAt: (rateLimitRevision ?? 0) + 1,
+    });
     nowSpy.mockRestore();
   });
 

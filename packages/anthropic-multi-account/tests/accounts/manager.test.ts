@@ -14,6 +14,7 @@ import type {
   UsageLimits,
 } from "../../src/shared/types";
 import { setupTestEnv, createMockClient, createTestStorage } from "../helpers";
+import { captureRateLimitRevision } from "opencode-multi-account-core";
 
 const originalFetch = globalThis.fetch;
 const originalXdgConfigHome = process.env.XDG_CONFIG_HOME;
@@ -47,7 +48,7 @@ function createAuth(id: string): OAuthCredentials {
 
 function createUsage(utilization: number): UsageLimits {
   return {
-    five_hour: { utilization, resets_at: "2026-01-01T00:00:00Z" },
+    five_hour: { utilization, resets_at: new Date(Date.now() + 60 * 60 * 1000).toISOString() },
     seven_day: null,
     seven_day_sonnet: null,
   };
@@ -238,12 +239,83 @@ describe("account-manager", () => {
         throw new Error("Expected two accounts");
       }
 
-      await manager.applyUsageCache(first.uuid, createUsage(95));
-      await manager.applyUsageCache(second.uuid, createUsage(10));
+      await manager.applyUsageCacheAtRevision(first.uuid, createUsage(95), {
+        expectedRateLimitRevision: captureRateLimitRevision(first),
+      });
+      await manager.applyUsageCacheAtRevision(second.uuid, createUsage(10), {
+        expectedRateLimitRevision: captureRateLimitRevision(second),
+      });
 
       const selected = await manager.selectAccount();
 
       expect(selected?.uuid).toBe(second.uuid);
+    });
+
+    test("does not let a rolled-over usage window suppress an account", async () => {
+      await configureSelection("hybrid", false);
+      await updateConfigField("soft_quota_threshold_percent", 90);
+      const stored = createTestStorage(2);
+      const manager = await createManagerFromStorage(stored);
+      const accounts = manager.getAccounts();
+      const rolledOver = accounts[0];
+      const available = accounts[1];
+      if (!rolledOver?.uuid || !available?.uuid) {
+        throw new Error("Expected two accounts");
+      }
+
+      await manager.applyUsageCacheAtRevision(rolledOver.uuid, {
+        five_hour: { utilization: 95, resets_at: new Date(Date.now() - 60_000).toISOString() },
+        seven_day: { utilization: 20, resets_at: new Date(Date.now() + 86_400_000).toISOString() },
+        seven_day_sonnet: null,
+      }, { expectedRateLimitRevision: captureRateLimitRevision(rolledOver) });
+      await manager.applyUsageCacheAtRevision(available.uuid, {
+        five_hour: { utilization: 10, resets_at: null },
+        seven_day: null,
+        seven_day_sonnet: null,
+      }, { expectedRateLimitRevision: captureRateLimitRevision(available) });
+
+      const selected = await manager.selectAccount();
+
+      expect(selected?.uuid).toBe(rolledOver.uuid);
+    });
+
+    test("ignores expired quota windows in hybrid reset pacing", async () => {
+      await configureSelection("hybrid", false);
+      const stored = createTestStorage(3);
+      const disabled = stored.accounts[2];
+      if (!disabled?.uuid) {
+        throw new Error("Expected disabled account");
+      }
+      disabled.enabled = false;
+      stored.activeAccountUuid = disabled.uuid;
+      const selectionTimestamp = Date.now() - 60_000;
+      for (const account of stored.accounts.slice(0, 2)) {
+        account.lastUsed = selectionTimestamp;
+      }
+      const manager = await createManagerFromStorage(stored);
+      const accounts = manager.getAccounts();
+      const first = accounts[0];
+      const second = accounts[1];
+      if (!first?.uuid || !second?.uuid) {
+        throw new Error("Expected two accounts");
+      }
+
+      const activeReset = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+      const expiredReset = new Date(Date.now() - 60_000).toISOString();
+      await manager.applyUsageCacheAtRevision(first.uuid, {
+        five_hour: { utilization: 20, resets_at: activeReset },
+        seven_day: { utilization: 100, resets_at: expiredReset },
+        seven_day_sonnet: null,
+      }, { expectedRateLimitRevision: captureRateLimitRevision(first) });
+      await manager.applyUsageCacheAtRevision(second.uuid, {
+        five_hour: { utilization: 20, resets_at: activeReset },
+        seven_day: null,
+        seven_day_sonnet: null,
+      }, { expectedRateLimitRevision: captureRateLimitRevision(second) });
+
+      const selected = await manager.selectAccount();
+
+      expect(selected?.uuid).toBe(first.uuid);
     });
 
     test("gives stickiness bonus to current account", async () => {
@@ -258,8 +330,12 @@ describe("account-manager", () => {
         throw new Error("Expected two accounts");
       }
 
-      await manager.applyUsageCache(current.uuid, createUsage(60));
-      await manager.applyUsageCache(challenger.uuid, createUsage(40));
+      await manager.applyUsageCacheAtRevision(current.uuid, createUsage(60), {
+        expectedRateLimitRevision: captureRateLimitRevision(current),
+      });
+      await manager.applyUsageCacheAtRevision(challenger.uuid, createUsage(40), {
+        expectedRateLimitRevision: captureRateLimitRevision(challenger),
+      });
 
       const selected = await manager.selectAccount();
 
@@ -279,8 +355,12 @@ describe("account-manager", () => {
         throw new Error("Expected two accounts with uuid");
       }
 
-      await manager.applyUsageCache(first.uuid, createUsage(40));
-      await manager.applyUsageCache(second.uuid, createUsage(20));
+      await manager.applyUsageCacheAtRevision(first.uuid, createUsage(40), {
+        expectedRateLimitRevision: captureRateLimitRevision(first),
+      });
+      await manager.applyUsageCacheAtRevision(second.uuid, createUsage(20), {
+        expectedRateLimitRevision: captureRateLimitRevision(second),
+      });
 
       const otherPid = process.ppid > 0 ? process.ppid : 1;
       await writeClaims({
@@ -368,8 +448,8 @@ describe("account-manager", () => {
       await manager.refresh();
 
       let refreshed = manager.getAccounts();
-      expect(refreshed[0]?.rateLimitResetAt).toBe(15_000);
-      expect(refreshed[1]?.rateLimitResetAt).toBe(12_000);
+      expect(refreshed[0]?.rateLimitCooldownUntil).toBe(15_000);
+      expect(refreshed[1]?.rateLimitCooldownUntil).toBe(12_000);
       expect(manager.isRateLimited(refreshed[0]!)).toBe(true);
       expect(manager.isRateLimited(refreshed[1]!)).toBe(true);
       expect(manager.getMinWaitTime()).toBe(2_000);
@@ -377,7 +457,7 @@ describe("account-manager", () => {
       now = 12_100;
       manager.clearExpiredRateLimits();
       refreshed = manager.getAccounts();
-      expect(refreshed[1]?.rateLimitResetAt).toBe(undefined);
+      expect(refreshed[1]?.rateLimitCooldownUntil).toBe(undefined);
       expect(manager.isRateLimited(refreshed[1]!)).toBe(false);
       expect(manager.isRateLimited(refreshed[0]!)).toBe(true);
       expect(manager.getMinWaitTime()).toBe(0);
@@ -385,7 +465,7 @@ describe("account-manager", () => {
       now = 16_000;
       manager.clearExpiredRateLimits();
       refreshed = manager.getAccounts();
-      expect(refreshed[0]?.rateLimitResetAt).toBe(undefined);
+      expect(refreshed[0]?.rateLimitCooldownUntil).toBe(undefined);
       expect(manager.isRateLimited(refreshed[0]!)).toBe(false);
       expect(manager.getMinWaitTime()).toBe(0);
 
@@ -404,7 +484,7 @@ describe("account-manager", () => {
       nowSpy.mockRestore();
 
       const saved = await readStorage();
-      expect(saved.accounts[0]?.rateLimitResetAt).toBe(1_500);
+      expect(saved.accounts[0]?.rateLimitCooldownUntil).toBe(1_500);
     });
   });
 
@@ -482,7 +562,7 @@ describe("account-manager", () => {
         throw new Error("Expected account");
       }
 
-      await manager.markRateLimited(account.uuid, 30_000);
+      const rateLimitRevision = await manager.markRateLimitedAtRevision!(account.uuid, 30_000);
       await manager.markAuthFailure(account.uuid, { ok: false, permanent: false });
 
       const client = createMockClient();
@@ -490,11 +570,12 @@ describe("account-manager", () => {
       const setSpy = vi.spyOn(client.auth, "set");
       const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => 123_456);
 
-      await manager.markSuccess(account.uuid);
+      await manager.markSuccessAtRevision(account.uuid, rateLimitRevision ?? null);
       await manager.refresh();
 
       const updated = manager.getAccounts()[0]!;
       expect(updated.rateLimitResetAt).toBe(undefined);
+      expect(updated.rateLimitCooldownUntil).toBe(undefined);
       expect(updated.last429At).toBe(undefined);
       expect(updated.consecutiveAuthFailures).toBe(0);
       expect(updated.lastUsed).toBe(123_456);
@@ -559,7 +640,7 @@ describe("account-manager", () => {
       const setSpy = vi.spyOn(client.auth, "set");
 
       const account = manager.getAccounts()[0]!;
-      await manager.markSuccess(account.uuid!);
+      await manager.markSuccessAtRevision(account.uuid!, captureRateLimitRevision(account));
 
       expect(setSpy.mock.calls.length).toBe(0);
     });

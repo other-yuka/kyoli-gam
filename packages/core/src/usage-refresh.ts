@@ -141,21 +141,26 @@ export class UsageRefreshService {
     try {
       const refresh = provider.refreshUsage;
       if (!refresh) return false;
+      const usageRefreshStartedAt = Date.now();
       const refreshed = await refresh({ account });
       if (!refreshed.ok) {
         await this.handleRefreshFailure(account, refreshed);
         return false;
       }
 
+      const accountSnapshot = refreshed.accountSnapshot ?? account;
+      if (accountSnapshot.id !== account.id) {
+        throw new Error("A usage refresh snapshot must belong to the refreshed account.");
+      }
       const updated = await this.options.accounts.update(
         account.id,
-        createAccountRefreshUpdate(account, refreshed),
+        createAccountRefreshUpdate(accountSnapshot, refreshed, {
+          usageObservedAt: usageRefreshStartedAt,
+          recoverRateLimitState: true,
+        }),
       );
       if (!updated) return false;
 
-      if (shouldRecoverAccountState(updated)) {
-        await this.options.accounts.resetState(updated.id);
-      }
       this.cooldownUntilByAccount.delete(account.id);
       return true;
     } catch (error) {
@@ -189,34 +194,6 @@ export class UsageRefreshService {
       message: failure.message,
     });
   }
-}
-
-function shouldRecoverAccountState(account: AccountRecord): boolean {
-  if (!account.rateLimitResetAt && !account.rateLimitCooldownUntil && account.lastFailureClass !== "quota") {
-    return false;
-  }
-  return hasNoExhaustedUsageWindow(account.metadata.cachedUsage) ||
-    hasNoExhaustedUsageWindow(account.metadata.usage);
-}
-
-function hasNoExhaustedUsageWindow(value: unknown): boolean {
-  const usage = readRecord(value);
-  if (!usage) return false;
-  const windows = [
-    usage.five_hour,
-    usage.seven_day,
-    ...Object.entries(usage)
-      .filter(([key]) => key.startsWith("seven_day_"))
-      .map(([, window]) => window),
-  ].map((window) => readNumber(readRecord(window)?.utilization))
-    .filter((utilization): utilization is number => utilization !== undefined);
-  return windows.length > 0 && windows.every((utilization) => utilization < 100);
-}
-
-function readRecord(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : undefined;
 }
 
 function readNumber(value: unknown): number | undefined {

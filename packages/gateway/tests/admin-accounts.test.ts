@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { MemoryAccountStore, MemoryRequestLogStore, StickyAccountPool } from "@kyoli-gam/core";
+import { createCodexChatGPTProvider } from "@kyoli-gam/provider-codex-chatgpt";
 import { createGateway } from "../src";
 
 describe("admin accounts API", () => {
@@ -324,6 +325,67 @@ describe("admin accounts API", () => {
     }
   });
 
+  it("persists usage fetched after the Codex provider refreshes an expired credential", async () => {
+    const accounts = new MemoryAccountStore();
+    const account = await accounts.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: {
+        accessToken: "expired-access",
+        refreshToken: "initial-refresh",
+        expiresAt: Date.now() - 1,
+      },
+    });
+    const provider = createCodexChatGPTProvider({
+      accounts: new StickyAccountPool(accounts),
+      tokenRefresh: async () => ({
+        accessToken: "fresh-access",
+        refreshToken: "rotated-refresh",
+        accountId: "chatgpt-account",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+      }),
+      fetch: async (input) => {
+        expect(String(input)).toBe("https://chatgpt.com/backend-api/wham/usage");
+        return Response.json({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: { used_percent: 12, reset_after_seconds: 60 },
+            secondary_window: { used_percent: 34, reset_after_seconds: 120 },
+          },
+        });
+      },
+    });
+    const gateway = createGateway({ accounts, providers: [provider] });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (_input, init) => {
+      const headers = new Headers(init?.headers);
+      expect(headers.get("authorization")).toBe("Bearer fresh-access");
+      expect(headers.get("ChatGPT-Account-Id")).toBe("chatgpt-account");
+      return Response.json({ available_count: 0, credits: [] });
+    };
+
+    try {
+      const response = await gateway.fetch(
+        new Request(`http://127.0.0.1:2021/admin/accounts/${account.id}/codex-reset`),
+      );
+
+      expect(response.status).toBe(200);
+      await expect(accounts.get(account.id)).resolves.toMatchObject({
+        credentials: {
+          accessToken: "fresh-access",
+          refreshToken: "rotated-refresh",
+          accountId: "chatgpt-account",
+        },
+        metadata: {
+          planTier: "plus",
+          cachedUsageAt: expect.any(Number),
+        },
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("redeems one Codex reset credit without overwriting concurrent reauthentication", async () => {
     const accounts = new MemoryAccountStore();
     const account = await accounts.create({
@@ -458,9 +520,7 @@ describe("admin accounts API", () => {
         status: 409,
       });
       expect(body.account.credentials).toBeUndefined();
-      expect(body.account.metadata?.cachedUsage).toMatchObject({
-        seven_day: { utilization: 95 },
-      });
+      expect(body.account.metadata?.cachedUsage).toBeUndefined();
       expect(stored?.credentials).toMatchObject({
         accessToken: "generation-b-access",
         refreshToken: "generation-b-refresh",

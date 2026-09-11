@@ -21,7 +21,7 @@ describe("reconcileCodexOAuthAccount", () => {
         email: "stale@example.test",
         accountId: "chatgpt-account-1",
         planTier: "pro",
-        cachedUsage: { five_hour: { utilization: 100 } },
+        cachedUsage: { format: "percent-v1", five_hour: { utilization: 100 } },
         cachedUsageAt: 1_700_000_000_000,
       },
     });

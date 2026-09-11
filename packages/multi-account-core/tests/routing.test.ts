@@ -1,11 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { scoreQuotaResetPace } from "../src/routing";
+import {
+  normalizeUsagePercent,
+  scoreQuotaResetPace,
+} from "../src/routing";
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 const NOW = new Date("2026-06-18T00:00:00.000Z").getTime();
 
 describe("quota reset-aware routing", () => {
+  it("keeps percent inputs distinct from ratio inputs", () => {
+    expect(normalizeUsagePercent(1)).toBe(1);
+    expect(normalizeUsagePercent(92)).toBe(92);
+  });
+
   it("scores a soon-reset under-pace account above a long-reset over-pace account", () => {
     const longResetScore = scoreQuotaResetPace([
       {

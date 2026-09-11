@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import type { DiskCredentials } from "./account-store";
 import {
+  captureRateLimitRevision,
+  type RateLimitRevision,
+} from "./account-manager";
+import {
   isTokenRefreshError,
   type ManagedAccount,
   type PluginClient,
@@ -18,9 +22,13 @@ export interface ExecutorAccountManager {
   getAccountCount(): number;
   refresh(): Promise<void>;
   selectAccount(stickyKey?: string): Promise<ManagedAccount | null>;
-  markSuccess(uuid: string): Promise<void>;
   markAuthFailure(uuid: string, result: TokenRefreshResult, expected?: DiskCredentials): Promise<void>;
   markRevoked(uuid: string): Promise<void>;
+  markSuccess(uuid: string, requestStartedAt?: number): Promise<void>;
+  markSuccessAtRevision?(
+    uuid: string,
+    expectedRateLimitRevision: RateLimitRevision | null,
+  ): Promise<void>;
   hasAnyUsableAccount(): boolean;
   getMinWaitTime(): number;
 }
@@ -341,6 +349,7 @@ export function createExecutorForProvider(
       const account = await resolveAccount(manager, client, stickyKey);
       const accountUuid = account.uuid;
       if (!accountUuid) continue;
+      const expectedRateLimitRevision = captureRateLimitRevision(account);
 
       if (previousAccountUuid && accountUuid !== previousAccountUuid && manager.getAccountCount() > 1) {
         void showToast(client, `Switched to ${getAccountLabel(account)}`, "info");
@@ -349,6 +358,7 @@ export function createExecutorForProvider(
 
       let runtime: Awaited<ReturnType<ExecutorRuntimeFactory["getRuntime"]>>;
       let result: SupervisedTurnResponse;
+      const requestStartedAt = Date.now();
       try {
         runtime = await runtimeFactory.getRuntime(accountUuid);
         result = await fetchAndSupervise(runtime);
@@ -369,7 +379,11 @@ export function createExecutorForProvider(
         continue;
       }
 
-      await manager.markSuccess(accountUuid);
+      if (manager.markSuccessAtRevision) {
+        await manager.markSuccessAtRevision(accountUuid, expectedRateLimitRevision);
+      } else {
+        await manager.markSuccess(accountUuid, requestStartedAt);
+      }
       return transition.response;
     }
 

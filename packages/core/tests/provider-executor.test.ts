@@ -1,13 +1,81 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   executeWithAccountFailover,
   type AccountExecutionTraceEvent,
   type SelectedCredential,
 } from "../src/provider-executor";
 import { StickyAccountPool } from "../src/account-pool";
-import { MemoryAccountStore } from "../src/accounts";
+import {
+  MemoryAccountStore,
+  captureRateLimitRevision,
+  createAccountRefreshUpdate,
+} from "../src/accounts";
 
 describe("executeWithAccountFailover", () => {
+  it("uses a refreshed credential for same-account retry and success recording", async () => {
+    const store = new MemoryAccountStore();
+    const account = await store.create({
+      provider: "codex",
+      kind: "oauth",
+      credentials: { accessToken: "old-token", refreshToken: "old-refresh" },
+    });
+    await store.recordFailure(account.id, {
+      status: 500,
+      message: "earlier server failure",
+      failureClass: "transient",
+    });
+    const refreshedAccount = await store.update(account.id, createAccountRefreshUpdate(account, {
+      credentials: { accessToken: "new-token", refreshToken: "new-refresh" },
+    }));
+    if (!refreshedAccount) throw new Error("Expected refreshed account");
+    const attemptedTokens: string[] = [];
+
+    const response = await executeWithAccountFailover({
+      provider: "codex",
+      kind: "oauth",
+      accounts: new StickyAccountPool(store),
+      configuredCredential: {
+        value: "old-token",
+        accountId: account.id,
+        rateLimitRevision: captureRateLimitRevision(account),
+      },
+      sessionKey: "refreshed-credential-retry",
+      maxAttempts: 1,
+      sameAccountMaxRetries: 1,
+      missingCredentialResponse: () => new Response("missing", { status: 401 }),
+      failureMessage: (status) => `failed ${status}`,
+      selectCredential: async () => undefined,
+      execute: async (credential) => {
+        attemptedTokens.push(credential.value);
+        if (attemptedTokens.length === 1) {
+          return {
+            response: new Response("retry", { status: 503 }),
+            downstreamVisible: false,
+            failure: {
+              class: "transient",
+              phase: "startup",
+              httpStatus: 503,
+              retryScope: "same_account",
+            },
+            effectiveCredential: {
+              value: "new-token",
+              accountId: account.id,
+              rateLimitRevision: captureRateLimitRevision(refreshedAccount),
+            },
+          };
+        }
+        return new Response("ok", { status: 200 });
+      },
+    });
+
+    expect(response.status).toBe(200);
+    expect(attemptedTokens).toEqual(["old-token", "new-token"]);
+    await expect(store.get(account.id)).resolves.toMatchObject({
+      failureCount: 0,
+      lastFailureClass: undefined,
+    });
+  });
+
   it("tries more than three accounts by default", async () => {
     const attempts: string[] = [];
     const credentials = Array.from({ length: 4 }, (_, index) => ({
@@ -161,6 +229,220 @@ describe("executeWithAccountFailover", () => {
         },
       },
     });
+  });
+
+  it("stores quota reset and provider retry cooldown as separate boundaries", async () => {
+    const now = new Date("2026-09-11T00:00:00.000Z");
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+
+    try {
+      const store = new MemoryAccountStore();
+      const account = await store.create({
+        provider: "claude-code",
+        kind: "oauth",
+        credentials: { accessToken: "token" },
+      });
+      const resetAt = new Date(now.getTime() + 60 * 60 * 1000).toISOString();
+      const cooldownUntil = new Date(now.getTime() + 2 * 60 * 1000).toISOString();
+
+      await executeWithAccountFailover({
+        provider: "claude-code",
+        kind: "oauth",
+        accounts: new StickyAccountPool(store),
+        configuredCredential: {
+          value: "token",
+          accountId: account.id,
+          rateLimitRevision: captureRateLimitRevision(account),
+        },
+        sessionKey: "separate-rate-boundaries",
+        maxAttempts: 1,
+        missingCredentialResponse: () => new Response("missing", { status: 401 }),
+        failureMessage: (status) => `failed ${status}`,
+        selectCredential: async () => undefined,
+        execute: async () => ({
+          response: new Response("limited", { status: 429 }),
+          downstreamVisible: false,
+          failure: {
+            class: "rate_limit",
+            code: "rate_limit",
+            httpStatus: 429,
+            phase: "startup",
+            resetAt,
+            retryAfterSeconds: 120,
+            retryScope: "next_account",
+          },
+        }),
+      });
+
+      await expect(store.get(account.id)).resolves.toMatchObject({
+        rateLimitResetAt: resetAt,
+        rateLimitCooldownUntil: cooldownUntil,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not let an older successful request clear a newer rate limit", async () => {
+    const now = new Date("2026-09-11T00:00:00.000Z").getTime();
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+
+    try {
+      const store = new MemoryAccountStore();
+      const account = await store.create({
+        provider: "claude-code",
+        kind: "oauth",
+        credentials: { accessToken: "token" },
+      });
+      let signalExecutionStarted: (() => void) | undefined;
+      let finishExecution: ((response: Response) => void) | undefined;
+      const executionStarted = new Promise<void>((resolve) => {
+        signalExecutionStarted = resolve;
+      });
+      const executionFinished = new Promise<Response>((resolve) => {
+        finishExecution = resolve;
+      });
+
+      const request = executeWithAccountFailover({
+        provider: "claude-code",
+        kind: "oauth",
+        accounts: new StickyAccountPool(store),
+        configuredCredential: {
+          value: "token",
+          accountId: account.id,
+          rateLimitRevision: captureRateLimitRevision(account),
+        },
+        sessionKey: "success-after-rate-limit",
+        maxAttempts: 1,
+        missingCredentialResponse: () => new Response("missing", { status: 401 }),
+        failureMessage: (status) => `failed ${status}`,
+        selectCredential: async () => undefined,
+        execute: async () => {
+          signalExecutionStarted?.();
+          return executionFinished;
+        },
+      });
+
+      await executionStarted;
+      const resetAt = new Date(now + 60 * 60 * 1000).toISOString();
+      const cooldownUntil = new Date(now + 60_000).toISOString();
+      await store.recordFailure(account.id, {
+        status: 429,
+        message: "newer rate limit",
+        failureClass: "rate_limit",
+        failureCode: "rate_limit",
+        failurePhase: "startup",
+        rateLimitResetAt: resetAt,
+        rateLimitCooldownUntil: cooldownUntil,
+      });
+      finishExecution?.(new Response("ok", { status: 200 }));
+
+      await expect(request).resolves.toMatchObject({ status: 200 });
+      await expect(store.get(account.id)).resolves.toMatchObject({
+        failureCount: 1,
+        lastFailureMessage: "newer rate limit",
+        rateLimitResetAt: resetAt,
+        rateLimitCooldownUntil: cooldownUntil,
+        rateLimitObservedAt: now,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears a same-millisecond rate limit captured by the successful request", async () => {
+    const now = new Date("2026-09-11T00:00:00.000Z").getTime();
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+
+    try {
+      const store = new MemoryAccountStore();
+      const account = await store.create({
+        provider: "claude-code",
+        kind: "oauth",
+        credentials: { accessToken: "token" },
+      });
+      await store.recordFailure(account.id, {
+        status: 429,
+        message: "first rate limit",
+        rateLimitCooldownUntil: new Date(now + 60_000).toISOString(),
+      });
+      const blocked = await store.recordFailure(account.id, {
+        status: 429,
+        message: "second rate limit",
+        rateLimitCooldownUntil: new Date(now + 60_000).toISOString(),
+      });
+      if (!blocked) throw new Error("Expected blocked account");
+
+      const response = await executeWithAccountFailover({
+        provider: "claude-code",
+        kind: "oauth",
+        accounts: new StickyAccountPool(store),
+        configuredCredential: {
+          value: "token",
+          accountId: account.id,
+          rateLimitRevision: captureRateLimitRevision(blocked),
+        },
+        sessionKey: "same-millisecond-success",
+        maxAttempts: 1,
+        missingCredentialResponse: () => new Response("missing", { status: 401 }),
+        failureMessage: (status) => `failed ${status}`,
+        selectCredential: async () => undefined,
+        execute: async () => new Response("ok", { status: 200 }),
+      });
+
+      expect(response.status).toBe(200);
+      await expect(store.get(account.id)).resolves.toMatchObject({
+        failureCount: 0,
+        rateLimitObservedAt: now + 2,
+      });
+      const recovered = await store.get(account.id);
+      expect(recovered?.rateLimitResetAt).toBeUndefined();
+      expect(recovered?.rateLimitBlockedAt).toBeUndefined();
+      expect(recovered?.rateLimitCooldownUntil).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears rate-limit state for a successful legacy credential", async () => {
+    const store = new MemoryAccountStore();
+    const account = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      credentials: { accessToken: "token" },
+    });
+    await store.recordFailure(account.id, {
+      status: 429,
+      message: "rate limited",
+      failureClass: "rate_limit",
+      failureCode: "rate_limit",
+      rateLimitCooldownUntil: new Date(Date.now() + 60_000).toISOString(),
+    });
+
+    const response = await executeWithAccountFailover({
+      provider: "claude-code",
+      kind: "oauth",
+      accounts: new StickyAccountPool(store),
+      configuredCredential: {
+        value: "token",
+        accountId: account.id,
+      },
+      sessionKey: "legacy-credential-success",
+      maxAttempts: 1,
+      missingCredentialResponse: () => new Response("missing", { status: 401 }),
+      failureMessage: (status) => `failed ${status}`,
+      selectCredential: async () => undefined,
+      execute: async () => new Response("ok", { status: 200 }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(store.get(account.id)).resolves.toMatchObject({ failureCount: 0 });
+    const recovered = await store.get(account.id);
+    expect(recovered?.rateLimitBlockedAt).toBeUndefined();
+    expect(recovered?.rateLimitCooldownUntil).toBeUndefined();
   });
 
   it("keeps the missing credential response when the provider has no stored accounts", async () => {

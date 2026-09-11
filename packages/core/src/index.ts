@@ -88,11 +88,17 @@ export interface ProviderUsageRefreshContext {
   account: import("./accounts").AccountRecord;
 }
 
+export type ProviderUsageAccountSnapshot = Pick<
+  import("./accounts").AccountRecord,
+  "id" | "credentials" | "metadata" | "rateLimitBlockedAt" | "rateLimitObservedAt"
+>;
+
 export type ProviderUsageRefreshResult =
   | {
     ok: true;
     credentials?: Record<string, unknown>;
     metadata?: Record<string, unknown>;
+    accountSnapshot?: ProviderUsageAccountSnapshot;
   }
   | {
     ok: false;

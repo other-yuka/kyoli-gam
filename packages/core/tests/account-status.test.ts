@@ -76,6 +76,45 @@ describe("account status", () => {
       ).toEqual(["sooner", "later"]);
     });
 
+  it("uses the later reset and cooldown per account, then the earliest account recovery", () => {
+    const now = Date.now();
+    const resetInOneMinute = new Date(now + 60_000).toISOString();
+    const cooldownInTwoMinutes = new Date(now + 120_000).toISOString();
+    const resetInFourMinutes = new Date(now + 240_000).toISOString();
+    const cooldownInFiveMinutes = new Date(now + 300_000).toISOString();
+    const accounts = [
+      account({
+        id: "later-effective-retry",
+        rateLimitResetAt: resetInOneMinute,
+        rateLimitCooldownUntil: cooldownInFiveMinutes,
+      }),
+      account({
+        id: "sooner-effective-retry",
+        rateLimitResetAt: resetInFourMinutes,
+        rateLimitCooldownUntil: cooldownInTwoMinutes,
+      }),
+    ];
+
+    expect(listRateLimitedAccounts(accounts)).toMatchObject([
+      { id: "sooner-effective-retry", retryAt: resetInFourMinutes },
+      { id: "later-effective-retry", retryAt: cooldownInFiveMinutes },
+    ]);
+    expect(summarizeAccountStatus(accounts)[0]).toMatchObject({
+      nextResetAt: resetInFourMinutes,
+      rateLimited: 2,
+    });
+  });
+
+  it("recognizes an explicit active provider cooldown without legacy block metadata", () => {
+    const cooldownUntil = new Date(Date.now() + 60_000).toISOString();
+
+    expect(listRateLimitedAccounts([
+      account({ id: "cooldown-only", rateLimitCooldownUntil: cooldownUntil }),
+    ])).toMatchObject([
+      { id: "cooldown-only", retryAt: cooldownUntil },
+    ]);
+  });
+
   it("lists unknown usage-limit blocks without inventing a reset time", () => {
     const blockedAt = new Date(Date.now() - 60_000).toISOString();
 
@@ -195,6 +234,17 @@ describe("account status", () => {
         account({ id: "active", rateLimitResetAt: future }),
         account({ id: "auth", rateLimitResetAt: past, reauthRequiredReason: "401" }),
         account({ id: "cooldown", rateLimitResetAt: past, authCooldownUntil: future }),
+        account({
+          id: "active-usage-window",
+          provider: "claude-code",
+          rateLimitResetAt: past,
+          metadata: {
+            cachedUsage: {
+              format: "percent-v1",
+              seven_day: { utilization: 100, resets_at: future },
+            },
+          },
+        }),
       ]).map((row) => row.id),
     ).toEqual(["expired"]);
   });

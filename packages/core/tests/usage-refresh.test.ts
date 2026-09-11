@@ -1,9 +1,28 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   MemoryAccountStore,
   UsageRefreshService,
   type ProviderAdapter,
 } from "../src";
+
+class InterleavingAccountStore extends MemoryAccountStore {
+  beforeUpdate?: () => Promise<void>;
+  afterUpdate?: () => Promise<void>;
+
+  override async update(
+    id: string,
+    input: Parameters<MemoryAccountStore["update"]>[1],
+  ): ReturnType<MemoryAccountStore["update"]> {
+    const beforeUpdate = this.beforeUpdate;
+    this.beforeUpdate = undefined;
+    await beforeUpdate?.();
+    const updated = await super.update(id, input);
+    const afterUpdate = this.afterUpdate;
+    this.afterUpdate = undefined;
+    await afterUpdate?.();
+    return updated;
+  }
+}
 
 describe("UsageRefreshService", () => {
   it("refreshes stale provider usage metadata", async () => {
@@ -215,6 +234,284 @@ describe("UsageRefreshService", () => {
     });
   });
 
+  it("removes usage windows omitted from an authoritative refresh snapshot", async () => {
+    const now = Date.now();
+    const store = new MemoryAccountStore();
+    const account = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      metadata: {
+        cachedUsageAt: now - 10_000,
+        cachedUsage: {
+          format: "percent-v1",
+          five_hour: { utilization: 10, resets_at: null },
+          seven_day_sonnet: {
+            utilization: 100,
+            resets_at: new Date(now + 7 * 24 * 60 * 60 * 1000).toISOString(),
+          },
+        },
+      },
+    });
+    const provider = createUsageProvider(async ({ account: staleAccount }) => ({
+      ok: true,
+      metadata: {
+        ...staleAccount.metadata,
+        cachedUsageAt: now,
+        cachedUsage: {
+          format: "percent-v1",
+          five_hour: { utilization: 20, resets_at: null },
+          seven_day: { utilization: 30, resets_at: null },
+        },
+      },
+    }), "claude-code");
+    const service = new UsageRefreshService({
+      accounts: store,
+      providers: [provider],
+      intervalMs: 0,
+    });
+
+    await expect(service.refreshOnce()).resolves.toMatchObject({
+      checked: 1,
+      refreshed: 1,
+      failed: 0,
+    });
+    await expect(store.get(account.id)).resolves.toMatchObject({
+      metadata: {
+        cachedUsageAt: now,
+        cachedUsage: {
+          format: "percent-v1",
+          five_hour: { utilization: 20, resets_at: null },
+          seven_day: { utilization: 30, resets_at: null },
+        },
+      },
+    });
+    expect((await store.get(account.id))?.metadata.cachedUsage).not.toHaveProperty("seven_day_sonnet");
+  });
+
+  it("does not let an older usage refresh overwrite a newer rate-limit snapshot", async () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-09-11T00:00:00.000Z").getTime();
+    vi.setSystemTime(now);
+
+    try {
+      const store = new InterleavingAccountStore();
+      const account = await store.create({
+        provider: "claude-code",
+        kind: "oauth",
+        metadata: { cachedUsageAt: now - 10_000 },
+      });
+      let signalUsageStarted: (() => void) | undefined;
+      let finishUsage: (() => void) | undefined;
+      const usageStarted = new Promise<void>((resolve) => {
+        signalUsageStarted = resolve;
+      });
+      const usageFinished = new Promise<void>((resolve) => {
+        finishUsage = resolve;
+      });
+      const provider = createUsageProvider(async () => {
+        signalUsageStarted?.();
+        await usageFinished;
+        return {
+          ok: true,
+          metadata: {
+            cachedUsageAt: Date.now() + 1_000,
+            cachedUsage: {
+              five_hour: { utilization: 10, resets_at: null },
+            },
+            planTier: "max",
+          },
+        };
+      }, "claude-code");
+      const service = new UsageRefreshService({
+        accounts: store,
+        providers: [provider],
+        intervalMs: 0,
+      });
+
+      const refresh = service.refreshOnce();
+      await usageStarted;
+      vi.advanceTimersByTime(1);
+      const rateLimitedAt = Date.now();
+      const cooldownUntil = new Date(rateLimitedAt + 60_000).toISOString();
+      const rateLimitUsage = {
+        five_hour: {
+          utilization: 100,
+          resets_at: new Date(rateLimitedAt + 60 * 60 * 1000).toISOString(),
+        },
+      };
+      store.beforeUpdate = async () => {
+        await store.recordFailure(account.id, {
+          status: 429,
+          message: "rate limited",
+          failureClass: "rate_limit",
+          failureCode: "rate_limit",
+          failurePhase: "startup",
+          rateLimitCooldownUntil: cooldownUntil,
+          metadata: {
+            cachedUsage: rateLimitUsage,
+            cachedUsageAt: rateLimitedAt,
+          },
+        });
+      };
+      finishUsage?.();
+
+      await expect(refresh).resolves.toMatchObject({ checked: 1, refreshed: 1, failed: 0 });
+      await expect(store.get(account.id)).resolves.toMatchObject({
+        metadata: {
+          cachedUsage: rateLimitUsage,
+          cachedUsageAt: rateLimitedAt,
+          planTier: "max",
+        },
+        rateLimitBlockedAt: new Date(rateLimitedAt).toISOString(),
+        rateLimitCooldownUntil: cooldownUntil,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not recover a newer rate limit after its cooldown elapses during a stale refresh", async () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-09-11T00:00:00.000Z").getTime();
+    vi.setSystemTime(now);
+
+    try {
+      const store = new InterleavingAccountStore();
+      const account = await store.create({
+        provider: "claude-code",
+        kind: "oauth",
+        metadata: {
+          cachedUsageAt: now - 10_000,
+          cachedUsage: {
+            five_hour: { utilization: 10, resets_at: null },
+          },
+        },
+      });
+      let signalUsageStarted: (() => void) | undefined;
+      let finishUsage: (() => void) | undefined;
+      const usageStarted = new Promise<void>((resolve) => {
+        signalUsageStarted = resolve;
+      });
+      const usageFinished = new Promise<void>((resolve) => {
+        finishUsage = resolve;
+      });
+      const provider = createUsageProvider(async () => {
+        signalUsageStarted?.();
+        await usageFinished;
+        return {
+          ok: true,
+          metadata: {
+            cachedUsageAt: Date.now(),
+            cachedUsage: {
+              five_hour: { utilization: 20, resets_at: null },
+            },
+            planTier: "max",
+          },
+        };
+      }, "claude-code");
+      const service = new UsageRefreshService({
+        accounts: store,
+        providers: [provider],
+        intervalMs: 0,
+      });
+      const resetAt = new Date(now + 60 * 60 * 1000).toISOString();
+      const cooldownUntil = new Date(now + 1).toISOString();
+
+      const refresh = service.refreshOnce();
+      await usageStarted;
+      store.beforeUpdate = async () => {
+        await store.recordFailure(account.id, {
+          status: 429,
+          message: "newer rate limit",
+          failureClass: "rate_limit",
+          rateLimitResetAt: resetAt,
+          rateLimitCooldownUntil: cooldownUntil,
+        });
+        vi.advanceTimersByTime(2);
+      };
+      finishUsage?.();
+
+      await expect(refresh).resolves.toMatchObject({ checked: 1, refreshed: 1, failed: 0 });
+      await expect(store.get(account.id)).resolves.toMatchObject({
+        failureCount: 1,
+        lastFailureMessage: "newer rate limit",
+        metadata: {
+          cachedUsageAt: now - 10_000,
+          cachedUsage: {
+            five_hour: { utilization: 10, resets_at: null },
+          },
+          planTier: "max",
+        },
+        rateLimitResetAt: resetAt,
+        rateLimitCooldownUntil: cooldownUntil,
+        rateLimitObservedAt: now,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not clear a rate limit recorded as the usage update returns", async () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-09-11T00:00:00.000Z").getTime();
+    vi.setSystemTime(now);
+
+    try {
+      const store = new InterleavingAccountStore();
+      const account = await store.create({
+        provider: "claude-code",
+        kind: "oauth",
+        metadata: { cachedUsageAt: now - 10_000 },
+      });
+      await store.recordFailure(account.id, {
+        status: 429,
+        message: "old rate limit",
+        failureClass: "rate_limit",
+        failureCode: "rate_limit",
+        failurePhase: "startup",
+        rateLimitResetAt: new Date(now + 60 * 60 * 1000).toISOString(),
+        rateLimitCooldownUntil: new Date(now - 1).toISOString(),
+      });
+      const provider = createUsageProvider(async () => ({
+        ok: true,
+        metadata: {
+          cachedUsageAt: Date.now(),
+          cachedUsage: {
+            five_hour: { utilization: 10, resets_at: null },
+            seven_day: { utilization: 20, resets_at: null },
+          },
+        },
+      }), "claude-code");
+      const service = new UsageRefreshService({
+        accounts: store,
+        providers: [provider],
+        intervalMs: 0,
+      });
+      const newCooldownUntil = new Date(now + 2 * 60_000).toISOString();
+      store.afterUpdate = async () => {
+        await store.recordFailure(account.id, {
+          status: 429,
+          message: "new rate limit",
+          failureClass: "rate_limit",
+          failureCode: "rate_limit",
+          failurePhase: "startup",
+          rateLimitCooldownUntil: newCooldownUntil,
+        });
+      };
+      vi.setSystemTime(now + 1);
+
+      await expect(service.refreshOnce()).resolves.toMatchObject({ checked: 1, refreshed: 1, failed: 0 });
+      await expect(store.get(account.id)).resolves.toMatchObject({
+        failureCount: 1,
+        lastFailureMessage: "new rate limit",
+        rateLimitBlockedAt: new Date(now + 1).toISOString(),
+        rateLimitCooldownUntil: newCooldownUntil,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("rejects a stale refresh after concurrent credentials are replaced", async () => {
     const store = new MemoryAccountStore();
     const account = await store.create({
@@ -298,6 +595,7 @@ describe("UsageRefreshService", () => {
       failureCode: "rate_limit",
       failurePhase: "startup",
       rateLimitResetAt: new Date(Date.now() + 60_000).toISOString(),
+      rateLimitCooldownUntil: new Date(Date.now() - 1).toISOString(),
     });
     await store.recordFailure(recovered.id, {
       status: 429,
@@ -306,6 +604,7 @@ describe("UsageRefreshService", () => {
       failureCode: "rate_limit",
       failurePhase: "startup",
       rateLimitResetAt: new Date(Date.now() + 60_000).toISOString(),
+      rateLimitCooldownUntil: new Date(Date.now() - 1).toISOString(),
     });
     const provider = createUsageProvider(async ({ account }) => ({
       ok: true,
@@ -333,11 +632,150 @@ describe("UsageRefreshService", () => {
     expect((await store.get(exhausted.id))?.rateLimitResetAt).toBeDefined();
     expect((await store.get(recovered.id))?.rateLimitResetAt).toBeUndefined();
   });
+
+  it("recovers a blocked Codex account from healthy primary usage windows", async () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-09-11T00:00:00.000Z").getTime();
+    vi.setSystemTime(now);
+
+    try {
+      const store = new MemoryAccountStore();
+      const account = await store.create({
+        provider: "codex",
+        kind: "oauth",
+        metadata: { cachedUsageAt: now - 10_000 },
+      });
+      await store.recordFailure(account.id, {
+        status: 429,
+        message: "quota exhausted",
+        failureClass: "quota",
+        failureCode: "usage_limit_reached",
+        failurePhase: "startup",
+        rateLimitResetAt: new Date(now + 60_000).toISOString(),
+        rateLimitCooldownUntil: new Date(now - 1).toISOString(),
+      });
+      vi.setSystemTime(now + 1);
+      const provider = createUsageProvider(async () => ({
+        ok: true,
+        metadata: {
+          cachedUsageAt: Date.now(),
+          cachedUsage: {
+            primary: { used_percent: 20, resets_at: null },
+            secondary: { used_percent: 30, resets_at: null },
+            credits: { has_credits: true, unlimited: false, balance: "5" },
+          },
+        },
+      }));
+      const service = new UsageRefreshService({
+        accounts: store,
+        providers: [provider],
+        intervalMs: 1,
+      });
+
+      expect(await service.refreshOnce()).toMatchObject({ checked: 1, refreshed: 1 });
+      expect(await store.get(account.id)).toMatchObject({
+        failureCount: 0,
+        lastFailureClass: undefined,
+        rateLimitBlockedAt: undefined,
+        rateLimitCooldownUntil: undefined,
+        rateLimitResetAt: undefined,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("recovers a blocked account when its exhausted usage window has rolled over", async () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-09-11T00:00:00.000Z").getTime();
+    vi.setSystemTime(now);
+
+    try {
+      const store = new MemoryAccountStore();
+      const account = await store.create({
+        provider: "codex",
+        kind: "oauth",
+        metadata: { cachedUsageAt: now - 10_000 },
+      });
+      await store.recordFailure(account.id, {
+        status: 429,
+        message: "limited",
+        failureClass: "rate_limit",
+        failureCode: "rate_limit",
+        failurePhase: "startup",
+        rateLimitResetAt: new Date(now + 60_000).toISOString(),
+        rateLimitCooldownUntil: new Date(now - 1).toISOString(),
+      });
+      vi.setSystemTime(now + 1);
+      const provider = createUsageProvider(async () => ({
+        ok: true,
+        metadata: {
+          cachedUsageAt: Date.now(),
+          cachedUsage: {
+            five_hour: { utilization: 100, resets_at: new Date(now - 60_000).toISOString() },
+            seven_day: { utilization: 20, resets_at: null },
+          },
+        },
+      }));
+      const service = new UsageRefreshService({
+        accounts: store,
+        providers: [provider],
+        intervalMs: 1,
+      });
+
+      expect(await service.refreshOnce()).toMatchObject({ checked: 1, refreshed: 1 });
+      expect((await store.get(account.id))?.rateLimitResetAt).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not let fresh usage clear an active provider retry cooldown", async () => {
+    const store = new MemoryAccountStore();
+    const account = await store.create({
+      provider: "claude-code",
+      kind: "oauth",
+      metadata: { cachedUsageAt: Date.now() - 10_000 },
+    });
+    const cooldownUntil = new Date(Date.now() + 60_000).toISOString();
+    await store.recordFailure(account.id, {
+      status: 429,
+      message: "rate limited",
+      failureClass: "rate_limit",
+      failureCode: "rate_limit",
+      failurePhase: "startup",
+      rateLimitCooldownUntil: cooldownUntil,
+    });
+    const provider = createUsageProvider(async () => ({
+      ok: true,
+      metadata: {
+        cachedUsageAt: Date.now(),
+        cachedUsage: {
+          five_hour: { utilization: 10, resets_at: null },
+          seven_day: { utilization: 20, resets_at: null },
+        },
+      },
+    }), "claude-code");
+    const service = new UsageRefreshService({
+      accounts: store,
+      providers: [provider],
+      intervalMs: 1,
+    });
+
+    expect(await service.refreshOnce()).toMatchObject({ checked: 1, refreshed: 1 });
+    expect(await store.get(account.id)).toMatchObject({
+      rateLimitBlockedAt: expect.any(String),
+      rateLimitCooldownUntil: cooldownUntil,
+    });
+  });
 });
 
-function createUsageProvider(refreshUsage: ProviderAdapter["refreshUsage"]): ProviderAdapter {
+function createUsageProvider(
+  refreshUsage: ProviderAdapter["refreshUsage"],
+  id: ProviderAdapter["id"] = "codex",
+): ProviderAdapter {
   return {
-    id: "codex",
+    id,
     displayName: "Test Codex",
     routes: [],
     async listModels() {

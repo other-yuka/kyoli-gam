@@ -10,6 +10,18 @@ export interface QuotaResetPaceOptions {
   targetAtResetPercent?: number;
 }
 
+/** Normalize a value that is already expressed as a percentage. */
+export function normalizeUsagePercent(value: number | null | undefined): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  return Math.max(0, Math.min(100, value));
+}
+
+export function isQuotaWindowActive(resetAt: string | null | undefined, now = Date.now()): boolean {
+  if (!resetAt) return true;
+  const resetMs = Date.parse(resetAt);
+  return !Number.isFinite(resetMs) || resetMs > now;
+}
+
 const DEFAULT_TARGET_AT_RESET_PERCENT = 90;
 const FIVE_HOUR_WINDOW_MS = 5 * 60 * 60 * 1000;
 const SEVEN_DAY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
@@ -53,9 +65,7 @@ function inferQuotaWindowMs(key: string): number | undefined {
 }
 
 function readPercent(value: number | null | undefined): number | undefined {
-  return typeof value === "number" && Number.isFinite(value)
-    ? Math.max(0, Math.min(100, value))
-    : undefined;
+  return normalizeUsagePercent(value);
 }
 
 function clampRatio(value: number): number {

@@ -1,7 +1,12 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { AccountRecord, AccountStore, ProviderId } from "@kyoli-gam/core";
+import {
+  CLAUDE_CODE_CACHED_USAGE_FORMAT,
+  type AccountRecord,
+  type AccountStore,
+  type ProviderId,
+} from "@kyoli-gam/core";
 import { loadClaudeCodeIdentity, type ClaudeCodeIdentity } from "@kyoli-gam/provider-claude-code";
 
 export type OpenCodeImportProvider = "all" | "codex" | "claude-code";
@@ -192,13 +197,20 @@ function createAccountInput(
       deviceId: source.provider === "claude-code" ? claudeIdentity?.deviceId : undefined,
       localAccountUuid: source.provider === "claude-code" ? claudeIdentity?.accountUuid : undefined,
       planTier: normalized.planTier,
-      cachedUsage: normalized.cachedUsage,
+      cachedUsage: source.provider === "claude-code"
+        ? markClaudeUsageAsPercent(normalized.cachedUsage)
+        : normalized.cachedUsage,
       cachedUsageAt: normalized.cachedUsageAt,
       addedAt: normalized.addedAt,
       lastUsed: normalized.lastUsed,
       rateLimitResetAt: normalized.rateLimitResetAt,
     }),
   };
+}
+
+function markClaudeUsageAsPercent(value: unknown): unknown {
+  if (!isRecord(value)) return value;
+  return { ...value, format: CLAUDE_CODE_CACHED_USAGE_FORMAT };
 }
 
 function shouldImportClaude(provider: OpenCodeImportProvider): boolean {

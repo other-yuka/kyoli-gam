@@ -72,6 +72,23 @@ describe("storage", () => {
       expect(loaded?.accounts[0]?.refreshToken).toBe("refresh-1");
     });
 
+    test("preserves rate-limit cooldown provenance fields", async () => {
+      const stored = createStorage([createAccount(2, {
+        rateLimitResetAt: 1_700_000_060_000,
+        rateLimitCooldownUntil: 1_700_000_060_000,
+        rateLimitObservedAt: 1_700_000_000_000,
+      })]);
+      await fs.writeFile(getStoragePath(), `${JSON.stringify(stored, null, 2)}\n`, "utf-8");
+
+      const loaded = await loadAccounts();
+
+      expect(loaded?.accounts[0]).toMatchObject({
+        rateLimitResetAt: 1_700_000_060_000,
+        rateLimitCooldownUntil: 1_700_000_060_000,
+        rateLimitObservedAt: 1_700_000_000_000,
+      });
+    });
+
     test("returns null and creates backup for corrupt JSON", async () => {
       await fs.writeFile(getStoragePath(), "{ this-is-not-valid-json", "utf-8");
 

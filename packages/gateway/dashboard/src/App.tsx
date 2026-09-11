@@ -954,10 +954,9 @@ function OperationsOverview(props: {
   const failedLogs = allFailedLogs.slice(0, 5);
   const retriedLogs = props.logs.filter((log) => log.retryCount > 0).length;
   const stalePins = props.sessions.filter((session) => isStalePromptCache(session) || isOldRoutePin(session)).length;
-  const nextReset = props.status
-    .map((summary) => summary.next_reset_at ?? summary.next_auth_retry_at)
-    .filter((value): value is string => Boolean(value))
-    .sort((a, b) => Date.parse(a) - Date.parse(b))[0];
+  const nextReset = nearestTimestamp(
+    props.status.flatMap((summary) => [summary.next_reset_at, summary.next_auth_retry_at]),
+  );
   const readyTone = props.stats.ready > 0 && props.stats.failures === 0 ? "good" : props.stats.ready > 0 ? "warn" : "bad";
   const headline = props.stats.ready > 0
     ? props.stats.failures > 0
@@ -1039,7 +1038,7 @@ function OperationsOverview(props: {
               provider: account.provider,
               label: accountDisplayName(account, { compact: true }),
               meta: joinMeta([readAccountState(account).label, readPlan(account)]),
-              detail: account.rateLimitResetAt ? `reset ${relativeTime(account.rateLimitResetAt)}` : account.lastFailureMessage ?? "needs review",
+              detail: accountRecoveryLabel(account) ?? account.lastFailureMessage ?? "needs review",
             }))}
             onClick={() => {
               props.onAccountFilter("blocked");
@@ -2769,7 +2768,7 @@ function accountResetAt(account: AccountRecord): string | undefined {
       return { value, parsed };
     })
     .filter((entry): entry is { value: string; parsed: number } => Boolean(entry.value) && Number.isFinite(entry.parsed))
-    .sort((left, right) => left.parsed - right.parsed);
+    .sort((left, right) => right.parsed - left.parsed);
   return values[0]?.value;
 }
 
