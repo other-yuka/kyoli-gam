@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { MemoryAccountStore } from "../src/accounts";
+import { CLAUDE_CODE_CACHED_USAGE_FORMAT, MemoryAccountStore } from "../src/accounts";
 import { StickyAccountPool } from "../src/account-pool";
 import { summarizeAccountStatus, listFailedAccounts } from "../src/account-status";
 import { MemoryStickySessionStore } from "../src/sticky-sessions";
@@ -291,6 +291,54 @@ describe("StickyAccountPool", () => {
     expect(updated?.failureCount).toBe(0);
     expect(updated?.rateLimitResetAt).toBeUndefined();
     expect(updated?.lastErrorAt).toBeUndefined();
+  });
+
+  it("keeps an expired legacy reset blocked until every exhausted usage window resets", async () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-09-11T00:00:00.000Z").getTime();
+    vi.setSystemTime(now);
+
+    try {
+      const store = new MemoryAccountStore();
+      const account = await store.create({ provider: "claude-code", kind: "oauth", name: "overlap" });
+      await store.recordFailure(account.id, {
+        status: 429,
+        message: "rate limited",
+        failureClass: "rate_limit",
+        failureCode: "rate_limit",
+        rateLimitResetAt: new Date(now + 60_000).toISOString(),
+        metadata: {
+          cachedUsageAt: now,
+          cachedUsage: {
+            format: CLAUDE_CODE_CACHED_USAGE_FORMAT,
+            five_hour: {
+              utilization: 100,
+              resets_at: new Date(now + 120_000).toISOString(),
+            },
+          },
+        },
+      });
+      const pool = new StickyAccountPool(store);
+
+      vi.setSystemTime(now + 60_001);
+      expect(await pool.select({
+        provider: "claude-code",
+        kind: "oauth",
+        sessionKey: "before-usage-reset",
+      })).toBeUndefined();
+      const stillBlocked = await store.get(account.id);
+      expect(stillBlocked?.rateLimitBlockedAt).toBeDefined();
+      expect(stillBlocked?.metadata.cachedUsage).toBeDefined();
+
+      vi.setSystemTime(now + 120_001);
+      expect((await pool.select({
+        provider: "claude-code",
+        kind: "oauth",
+        sessionKey: "after-usage-reset",
+      }))?.id).toBe(account.id);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("recovers a cooldown-only rate limit after its retry window expires", async () => {

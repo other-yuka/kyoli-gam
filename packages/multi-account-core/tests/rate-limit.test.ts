@@ -48,6 +48,57 @@ describe("core/rate-limit", () => {
     expect(handlers.retryAfterMsFromResponse(response)).toBe(2345);
   });
 
+  test("keeps the legacy config contract when Retry-After headers are absent", () => {
+    expect(handlers.retryAfterMsFromResponse(new Response("", { status: 429 }))).toBe(60_000);
+  });
+
+  test("uses the minimum backoff when Retry-After is absent and the configured fallback is zero", async () => {
+    const zeroFallbackHandlers = createRateLimitHandlers({
+      fetchUsage,
+      getConfig: () => ({
+        default_retry_after_ms: 0,
+        rate_limit_min_backoff_ms: 30_000,
+      }),
+      formatWaitTime: (ms) => `${Math.ceil(ms / 1000)}s`,
+      getAccountLabel: () => "Account 1",
+      showToast,
+    });
+    const manager = {
+      markRateLimited: vi.fn(async () => {}),
+      markRateLimitedAtRevision: vi.fn(async () => Date.now()),
+      applyUsageCache: vi.fn(async () => {}),
+      applyUsageCacheAtRevision: vi.fn(async () => {}),
+      getAccountCount: vi.fn(() => 2),
+    };
+
+    await zeroFallbackHandlers.handleRateLimitResponse(
+      manager,
+      createClient(),
+      createAccount(),
+      new Response("", {
+        status: 429,
+        headers: {
+          "anthropic-ratelimit-unified-5h-utilization": "0.92",
+          "anthropic-ratelimit-unified-representative-claim": "five_hour",
+        },
+      }),
+    );
+
+    expect(manager.markRateLimitedAtRevision).toHaveBeenCalledWith("acct-1", 30_000, {
+      usage: {
+        five_hour: { utilization: 92, resets_at: null },
+        seven_day: null,
+        seven_day_sonnet: null,
+      },
+    });
+    expect(fetchUsage).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith(
+      expect.anything(),
+      "Account 1 rate-limited (resets in 30s). Switching...",
+      "warning",
+    );
+  });
+
   test("preserves usage refresh behavior for legacy account managers", async () => {
     const now = 1_700_000_000_000;
     const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);

@@ -7,11 +7,13 @@ import type {
 import type { ManagedAccount, PluginClient, PluginConfig, UsageLimits } from "./types";
 
 const USAGE_FETCH_COOLDOWN_MS = 30_000;
+const DEFAULT_RATE_LIMIT_MIN_BACKOFF_MS = 30_000;
 const NON_SUBSCRIPTION_BILLING_BACKOFF_MS = 24 * 60 * 60 * 1000;
 
 export interface RateLimitDependencies {
   fetchUsage: (accessToken: string, accountId?: string) => Promise<{ ok: true; data: UsageLimits } | { ok: false; reason: string }>;
-  getConfig: () => Pick<PluginConfig, "default_retry_after_ms">;
+  getConfig: () => Pick<PluginConfig, "default_retry_after_ms">
+    & Partial<Pick<PluginConfig, "rate_limit_min_backoff_ms">>;
   formatWaitTime: (ms: number) => string;
   getAccountLabel: (account: ManagedAccount) => string;
   showToast: (
@@ -63,7 +65,13 @@ export function createRateLimitHandlers(dependencies: RateLimitDependencies) {
       if (!isNaN(parsed) && parsed > 0) return parsed * 1000;
     }
 
-    return getConfig().default_retry_after_ms;
+    const config = getConfig();
+    const configuredMinimumBackoffMs = config.rate_limit_min_backoff_ms;
+    const minimumBackoffMs = typeof configuredMinimumBackoffMs === "number"
+      && Number.isFinite(configuredMinimumBackoffMs)
+      ? configuredMinimumBackoffMs
+      : DEFAULT_RATE_LIMIT_MIN_BACKOFF_MS;
+    return Math.max(config.default_retry_after_ms, minimumBackoffMs);
   }
 
   function isNonSubscriptionBillingClaim(claim: string | null): claim is string {

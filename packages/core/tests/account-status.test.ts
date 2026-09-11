@@ -234,6 +234,17 @@ describe("account status", () => {
         account({ id: "active", rateLimitResetAt: future }),
         account({ id: "auth", rateLimitResetAt: past, reauthRequiredReason: "401" }),
         account({ id: "cooldown", rateLimitResetAt: past, authCooldownUntil: future }),
+        account({
+          id: "active-usage-window",
+          provider: "claude-code",
+          rateLimitResetAt: past,
+          metadata: {
+            cachedUsage: {
+              format: "percent-v1",
+              seven_day: { utilization: 100, resets_at: future },
+            },
+          },
+        }),
       ]).map((row) => row.id),
     ).toEqual(["expired"]);
   });

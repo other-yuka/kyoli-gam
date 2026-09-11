@@ -43,6 +43,7 @@ export function shouldRecoverRateLimitBlock(account: AccountRecord, now = Date.n
   if (!account.rateLimitBlockedAt && !account.rateLimitResetAt) return false;
   if (account.reauthRequiredReason || isCurrentlyAuthCoolingDown(account, now)) return false;
   if (isCurrentlyRateLimitCoolingDown(account, now)) return false;
+  if (readUsageRateLimitBoundary(account.metadata, now) !== "") return false;
 
   const resetAt = readIsoMs(account.rateLimitResetAt);
   if (resetAt !== undefined && resetAt <= now) return true;
@@ -51,7 +52,6 @@ export function shouldRecoverRateLimitBlock(account: AccountRecord, now = Date.n
     cooldownUntil !== undefined
     && cooldownUntil <= now
     && resetAt === undefined
-    && readUsageRateLimitBoundary(account.metadata, now) === ""
   ) return true;
 
   return hasFreshAvailableUsageAfterBlock(account, now);
