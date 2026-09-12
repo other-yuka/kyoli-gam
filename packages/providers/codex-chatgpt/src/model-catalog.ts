@@ -21,7 +21,6 @@ export const FALLBACK_CODEX_MODELS: ModelInfo[] = [
   codexModel("gpt-5.6-luna", "GPT-5.6 Luna", { supported_reasoning_levels: GPT_5_6_REASONING_LEVELS }),
   codexModel("gpt-5.5", "GPT-5.5"),
   codexModel("gpt-5.4", "GPT-5.4"),
-  codexModel("gpt-5.4-mini", "GPT-5.4 Mini"),
   codexModel("gpt-5.3-codex", "GPT-5.3 Codex"),
   codexModel("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark"),
   codexModel("gpt-5.2", "GPT-5.2"),

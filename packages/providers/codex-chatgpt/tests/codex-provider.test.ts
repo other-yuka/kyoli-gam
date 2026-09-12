@@ -259,6 +259,7 @@ describe("createCodexChatGPTProvider", () => {
 
     expect(ids).toEqual(expect.arrayContaining(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]));
     expect(ids).not.toContain("gpt-5.6-pro");
+    expect(ids).not.toContain("gpt-5.4-mini");
     expect(models.find((model) => model.upstreamId === "gpt-5.6-sol")?.metadata).toMatchObject({
       supported_reasoning_levels: expect.arrayContaining([expect.objectContaining({ effort: "max" })]),
     });
