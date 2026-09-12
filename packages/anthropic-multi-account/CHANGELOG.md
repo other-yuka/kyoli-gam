@@ -1,5 +1,13 @@
 # opencode-anthropic-multi-account
 
+## 0.3.31
+
+### Patch Changes
+
+- [#457](https://github.com/other-yuka/kyoli-gam/pull/457) [`64b0697`](https://github.com/other-yuka/kyoli-gam/commit/64b0697cf6ab67c4e16ca7588ad5d6d2f1ce0f17) Thanks [@other-yuka](https://github.com/other-yuka)! - Guard Anthropic request normalization against non-record content entries, discard nested text blocks with invalid text, and remove the unavailable `gpt-5.4-mini` Codex fallback model.
+- Updated dependencies []:
+  - opencode-multi-account-core@0.3.31
+
 ## 0.3.30
 
 ### Patch Changes
