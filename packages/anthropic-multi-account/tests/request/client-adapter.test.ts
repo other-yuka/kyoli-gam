@@ -13,6 +13,10 @@ describe("client-adapter", () => {
         {
           role: "user",
           content: [
+            null,
+            undefined,
+            [],
+            { type: "text", text: null },
             { type: "text", text: "<system-reminder>hidden</system-reminder>" },
             { type: "text", text: "<env>os=darwin</env>" },
             { type: "text", text: "hello" },
@@ -191,6 +195,126 @@ describe("client-adapter", () => {
     ]);
   });
 
+  test("normalizeAnthropicClientRequest drops malformed user content blocks", () => {
+    const adapted = normalizeAnthropicClientRequest({
+      messages: [
+        {
+          role: "user",
+          content: [
+            null,
+            undefined,
+            [],
+            { type: "text", text: "hello" },
+          ],
+        },
+      ],
+    });
+
+    expect(adapted.messages).toEqual([
+      {
+        role: "user",
+        content: [{ type: "text", text: "hello" }],
+      },
+    ]);
+  });
+
+  test("normalizeAnthropicClientRequest drops malformed assistant content blocks", () => {
+    const adapted = normalizeAnthropicClientRequest({
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            null,
+            undefined,
+            [],
+            { type: "tool_use", id: "toolu_1", name: "Read", input: { file_path: "README.md" } },
+          ],
+        },
+      ],
+    });
+
+    expect(adapted.messages).toEqual([
+      {
+        role: "assistant",
+        content: [
+          { type: "tool_use", id: "toolu_1", name: "Read", input: { file_path: "README.md" } },
+        ],
+      },
+    ]);
+  });
+
+  test("normalizeAnthropicClientRequest drops malformed nested text blocks", () => {
+    const adapted = normalizeAnthropicClientRequest({
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "toolu_1",
+              content: [
+                { type: "text", text: null },
+                { type: "text", text: "result" },
+                { type: "image", source: { type: "base64", media_type: "image/png", data: "AA==" } },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(adapted.messages).toEqual([
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "toolu_1",
+            content: [
+              { type: "text", text: "result" },
+              { type: "image", source: { type: "base64", media_type: "image/png", data: "AA==" } },
+            ],
+          },
+        ],
+      },
+    ]);
+  });
+
+  test("normalizeAnthropicClientRequest preserves malformed-only nested tool results as empty", () => {
+    const adapted = normalizeAnthropicClientRequest({
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "toolu_1",
+              content: [
+                null,
+                undefined,
+                [],
+                { type: "text", text: null },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(adapted.messages).toEqual([
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "toolu_1",
+            content: "",
+          },
+        ],
+      },
+    ]);
+  });
+
   test("normalizeAnthropicClientRequest preserves a metadata-only trailing user boundary", () => {
     const adapted = normalizeAnthropicClientRequest({
       messages: [
@@ -207,5 +331,33 @@ describe("client-adapter", () => {
       role: "user",
       content: [{ type: "text", text: "<task_metadata>subagent=explore</task_metadata>" }],
     });
+  });
+
+  test("normalizeAnthropicClientRequest filters a restored trailing user boundary", () => {
+    const adapted = normalizeAnthropicClientRequest({
+      messages: [
+        { role: "user", content: [{ type: "text", text: "<env>hidden</env>" }] },
+        { role: "assistant", content: [{ type: "text", text: "complete" }] },
+        {
+          role: "user",
+          content: [
+            null,
+            undefined,
+            [],
+            { type: "text", text: null },
+            { type: "text", text: "<task_metadata>subagent=explore</task_metadata>" },
+          ],
+        },
+      ],
+    });
+
+    expect(adapted.messages).toEqual([
+      { role: "assistant", content: [{ type: "text", text: "complete" }] },
+      {
+        role: "user",
+        content: [{ type: "text", text: "<task_metadata>subagent=explore</task_metadata>" }],
+      },
+    ]);
+    expect(adapted.firstUserMessage).toBe("<task_metadata>subagent=explore</task_metadata>");
   });
 });

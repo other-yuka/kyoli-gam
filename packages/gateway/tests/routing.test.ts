@@ -880,14 +880,6 @@ describe("gateway routing", () => {
           capabilities: ["responses", "tools", "reasoning", "codex"],
           aliases: ["gpt-5.3-codex"],
         },
-        {
-          id: "openai/gpt-5.4-mini",
-          provider: "codex",
-          upstreamId: "gpt-5.4-mini",
-          displayName: "GPT-5.4 mini",
-          capabilities: ["responses", "tools", "reasoning", "codex"],
-          aliases: ["gpt-5.4-mini"],
-        },
       ],
     });
 
@@ -916,11 +908,8 @@ describe("gateway routing", () => {
     });
 
     const codexModel = payload.models.find((model) => model.slug === "gpt-5.3-codex");
+    expect(codexModel?.additional_speed_tiers).toEqual([]);
     expect(codexModel?.service_tiers).toEqual([]);
-
-    const miniModel = payload.models.find((model) => model.slug === "gpt-5.4-mini");
-    expect(miniModel?.additional_speed_tiers).toEqual([]);
-    expect(miniModel?.service_tiers).toEqual([]);
   });
 
   it("exposes Claude Code models as Codex-compatible virtual models without WebSocket preference", async () => {

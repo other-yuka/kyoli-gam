@@ -76,6 +76,9 @@ export function normalizeAnthropicClientRequest(inputBody: JsonRecord): AdaptedC
     && hasMeaningfulContent(trailingMessage.content)
     ? structuredClone(trailingMessage)
     : undefined;
+  if (trailingUserBoundary) {
+    compactMessageContent([trailingUserBoundary]);
+  }
   sanitizeMessages(body);
   const trailingUserBoundaryWasScrubbed = trailingUserBoundary !== undefined
     && !hasMeaningfulContent(trailingMessage?.content);
@@ -92,6 +95,10 @@ export function normalizeAnthropicClientRequest(inputBody: JsonRecord): AdaptedC
     }
 
     for (const block of message.content) {
+      if (!isRecord(block)) {
+        continue;
+      }
+
       sanitizeMessageBlock(block);
     }
   }
@@ -145,7 +152,11 @@ export function sanitizeMessages(body: JsonRecord): void {
     }
 
     message.content = message.content.filter((block) => {
-      return !isRecord(block) || block.type !== "text" || block.text !== "";
+      if (!isRecord(block)) {
+        return false;
+      }
+
+      return block.type !== "text" || (typeof block.text === "string" && block.text !== "");
     });
   }
 }
@@ -198,7 +209,7 @@ export function truncateToolResultText(text: string): string {
 }
 
 function isRecord(value: unknown): value is JsonRecord {
-  return typeof value === "object" && value !== null;
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function sanitizeContent(text: string): string {
@@ -261,7 +272,7 @@ function sanitizeMessageBlock(block: ContentBlock): void {
     return;
   }
 
-  block.content = block.content
+  const sanitizedContent = block.content
     .map((item) => {
       if (isRecord(item) && typeof item.text === "string") {
         return {
@@ -272,7 +283,24 @@ function sanitizeMessageBlock(block: ContentBlock): void {
 
       return item;
     })
-    .filter((item) => !isRecord(item) || typeof item.text !== "string" || item.text.trim().length > 0);
+    .filter((item) => {
+      if (!isRecord(item)) {
+        return false;
+      }
+
+      if (item.type === "text") {
+        return typeof item.text === "string" && item.text.trim().length > 0;
+      }
+
+      return typeof item.text !== "string" || item.text.trim().length > 0;
+    });
+
+  if (sanitizedContent.length === 0) {
+    block.content = "";
+    return;
+  }
+
+  block.content = sanitizedContent;
 }
 
 function stripAssistantThinkingBlocks(messages: Message[]): void {
@@ -281,7 +309,7 @@ function stripAssistantThinkingBlocks(messages: Message[]): void {
       continue;
     }
 
-    message.content = message.content.filter((block) => block.type !== "thinking");
+    message.content = message.content.filter((block) => isRecord(block) && block.type !== "thinking");
   }
 }
 
@@ -420,7 +448,7 @@ function extractFirstUserMessage(messages: Message[] | undefined): string {
     }
 
     const text = message.content
-      .filter((block) => typeof block.text === "string")
+      .filter((block) => isRecord(block) && typeof block.text === "string")
       .map((block) => block.text)
       .join("\n\n")
       .trim();
