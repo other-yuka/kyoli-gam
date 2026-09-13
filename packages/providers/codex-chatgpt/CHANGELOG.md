@@ -1,5 +1,13 @@
 # @kyoli-gam/provider-codex-chatgpt
 
+## 0.0.98
+
+### Patch Changes
+
+- [#457](https://github.com/other-yuka/kyoli-gam/pull/457) [`64b0697`](https://github.com/other-yuka/kyoli-gam/commit/64b0697cf6ab67c4e16ca7588ad5d6d2f1ce0f17) Thanks [@other-yuka](https://github.com/other-yuka)! - Guard Anthropic request normalization against non-record content entries, discard nested text blocks with invalid text, and remove the unavailable `gpt-5.4-mini` Codex fallback model.
+- Updated dependencies []:
+  - @kyoli-gam/core@0.0.98
+
 ## 0.0.97
 
 ### Patch Changes
