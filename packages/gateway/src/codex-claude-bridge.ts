@@ -34,6 +34,7 @@ interface AnthropicMessageBody {
 interface StreamState {
   contentBlocks: Map<number, AnthropicContentBlockState>;
   failed: boolean;
+  messageStopped: boolean;
   outputItems: Array<Record<string, unknown>>;
   outputText: string;
   response: Record<string, unknown>;
@@ -580,6 +581,7 @@ function convertAnthropicStreamToResponsesStream(upstream: Response, model: stri
   const state: StreamState = {
     contentBlocks: new Map(),
     failed: false,
+    messageStopped: false,
     outputItems: [],
     outputText: "",
     response: createResponseShell(model),
@@ -595,10 +597,23 @@ function convertAnthropicStreamToResponsesStream(upstream: Response, model: stri
           buffer += decoder.decode();
           const finalEvents = drainAnthropicFrames(buffer, (frame) => convertAnthropicFrame(frame, state));
           for (const event of finalEvents.frames) controller.enqueue(encoder.encode(event));
-          if (!state.failed) {
+          if (!state.failed && state.messageStopped) {
             controller.enqueue(encoder.encode(responsesEvent("response.completed", {
               type: "response.completed",
               response: finalizeResponse(state),
+            })));
+          } else if (!state.failed) {
+            state.failed = true;
+            controller.enqueue(encoder.encode(responsesEvent("response.failed", {
+              type: "response.failed",
+              response: {
+                ...finalizeResponse(state),
+                status: "failed",
+                error: {
+                  type: "upstream_error",
+                  message: "Claude bridge stream ended before message_stop.",
+                },
+              },
             })));
           }
           controller.close();
@@ -671,6 +686,10 @@ function convertAnthropicFrame(frame: string, state: StreamState): string[] {
     const message = readRecord(payload.message);
     state.response.id = readString(message?.id) ?? state.response.id;
     state.response.model = readString(message?.model) ?? state.response.model;
+    return [];
+  }
+  if (type === "message_stop") {
+    state.messageStopped = true;
     return [];
   }
   if (type === "content_block_start") {
@@ -830,6 +849,7 @@ function convertAnthropicMessageToResponsePayload(payload: unknown, model: strin
   const state: StreamState = {
     contentBlocks: new Map(),
     failed: false,
+    messageStopped: false,
     outputItems: [],
     outputText: "",
     response,
