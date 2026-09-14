@@ -1030,6 +1030,61 @@ describe("gateway routing", () => {
     expect(text).toContain("response.completed");
   });
 
+  it("does not complete a virtual Claude Codex response when the upstream closes before message_stop", async () => {
+    const claude = fakeProvider({
+      id: "claude-code",
+      routes: ["/v1/messages"],
+      models: [
+        {
+          id: "anthropic/claude-sonnet-4-5",
+          provider: "claude-code",
+          upstreamId: "claude-sonnet-4-5",
+          capabilities: ["messages", "streaming", "claude-code"],
+          aliases: ["claude-code/claude-sonnet-4-5"],
+        },
+      ],
+      handle: async () =>
+        new Response(
+          [
+            "event: message_start",
+            'data: {"type":"message_start","message":{"id":"msg_incomplete","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[]}}',
+            "",
+            "event: content_block_start",
+            'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+            "",
+            "event: content_block_delta",
+            'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}',
+            "",
+            "",
+          ].join("\n"),
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    });
+    const gateway = createGateway({
+      accounts: new MemoryAccountStore(),
+      providers: [claude],
+    });
+
+    const response = await gateway.fetch(
+      new Request("http://127.0.0.1:2021/backend-api/codex/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "kyoli-claude/claude-sonnet-4-5",
+          input: [{ role: "user", content: [{ type: "input_text", text: "hi" }] }],
+        }),
+      }),
+    );
+    const text = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(text).toContain("response.created");
+    expect(text).toContain('"delta":"partial"');
+    expect(text).toContain("response.failed");
+    expect(text).toContain('"message":"Claude bridge stream ended before message_stop."');
+    expect(text).not.toContain("response.completed");
+  });
+
   it("does not complete a virtual Claude Codex response after an upstream stream failure", async () => {
     const claude = fakeProvider({
       id: "claude-code",
